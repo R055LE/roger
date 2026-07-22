@@ -1,7 +1,8 @@
 """Client, intents, dispatch, owner gate, and the ``/roger`` slash command.
 
-P1 wires the skeleton: a non-privileged connection, the guild-scoped command, the owner gate with
-audit logging, and message routing. The brains it routes to arrive in later phases.
+Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped command, the
+owner gate with audit logging, and message routing. Owner requests (via ``/roger`` or DM) go to the
+admin brain; ambient and digest arrive in later phases.
 """
 
 from __future__ import annotations
@@ -15,12 +16,15 @@ from enum import Enum
 import discord
 from discord import app_commands
 
+from roger.brains.admin import handle_admin_request
 from roger.config import Settings, load_settings
+from roger.llm import LLM
 from roger.store import AuditStatus, Store
 
 log = logging.getLogger("roger")
 
 CANNED_DENY = "Sorry — Roger only takes admin requests from the server owner."
+DISCORD_MAX = 2000
 
 
 # --------------------------------------------------------------------------- logging
@@ -48,6 +52,10 @@ def configure_logging(level: str) -> None:
     root.setLevel(level.upper())
     # discord.py is noisy at INFO; keep the gateway chatter at WARNING.
     logging.getLogger("discord").setLevel(logging.WARNING)
+
+
+def _truncate(text: str, limit: int = DISCORD_MAX) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -81,11 +89,12 @@ def classify_message(message: discord.Message, *, owner_id: int, bot_user_id: in
 
 
 class RogerClient(discord.Client):
-    def __init__(self, settings: Settings, store: Store) -> None:
+    def __init__(self, settings: Settings, store: Store, llm: LLM) -> None:
         # Intents.default() has message_content, members, and presences OFF — invariant §2.1.
         super().__init__(intents=discord.Intents.default())
         self.settings = settings
         self.store = store
+        self.llm = llm
         self.tree = app_commands.CommandTree(self)
         self._guild = discord.Object(id=settings.guild_id)
 
@@ -111,12 +120,29 @@ class RogerClient(discord.Client):
         route = classify_message(
             message, owner_id=self.settings.owner_id, bot_user_id=self.user.id
         )
-        if route is Route.IGNORE:
-            return
-        # Brains land in later phases; P1 only proves the routing is correct.
-        log.debug("routed message from %s -> %s", message.author.id, route.value)
-        # TODO(P2): Route.ADMIN_DM  -> admin brain
-        # TODO(P4): Route.AMBIENT_DM / Route.AMBIENT_MENTION -> ambient brain
+        if route is Route.ADMIN_DM:
+            reply = await self._run_admin(message.content, message.author.id)
+            await message.channel.send(_truncate(reply))
+        elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
+            log.debug("ambient route %s from %s (P4)", route.value, message.author.id)
+            # TODO(P4): ambient brain
+
+    async def _run_admin(self, request: str, actor_id: int) -> str:
+        guild = self.get_guild(self.settings.guild_id)
+        if guild is None:
+            return "I can't see the configured guild right now."
+        try:
+            return await handle_admin_request(
+                request=request,
+                guild=guild,
+                actor_id=actor_id,
+                llm=self.llm,
+                store=self.store,
+            )
+        except Exception:
+            # Never leave a deferred interaction hanging — reply, then surface it in the logs.
+            log.exception("admin request failed for actor %s", actor_id)
+            return "Something went wrong handling that — check the logs."
 
 
 def _register_commands(client: RogerClient) -> None:
@@ -149,19 +175,10 @@ async def _handle_roger_request(
         log.info("gate rejected /roger from non-owner %s", user_id)
         return
 
-    # Owner path. defer() up front — real model calls will exceed Discord's 3s ack window.
+    # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
     await interaction.response.defer(thinking=True)
-    await client.store.record_audit(
-        actor_id=user_id,
-        brain="admin",
-        tool=None,
-        args={"request": request},
-        status=AuditStatus.OK,
-        detail="P1 echo",
-    )
-    await interaction.followup.send(
-        f"(P1 skeleton) Received: {request!r}. The admin brain comes online in P2."
-    )
+    reply = await client._run_admin(request, user_id)
+    await interaction.followup.send(_truncate(reply))
 
 
 # --------------------------------------------------------------------------- entrypoint
@@ -171,7 +188,8 @@ async def main() -> None:
     settings = load_settings()
     configure_logging(settings.log_level)
     store = await Store(settings.db_path).open()
-    client = RogerClient(settings, store)
+    llm = LLM(settings, store)
+    client = RogerClient(settings, store, llm)
     try:
         await client.start(settings.discord_token)
     finally:

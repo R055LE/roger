@@ -62,6 +62,10 @@ CREATE TABLE IF NOT EXISTS ambient_log (
 """
 
 
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
 class Store:
     def __init__(self, path: str) -> None:
         self._path = path
@@ -126,3 +130,22 @@ class Store:
         cursor = await self._conn.execute("PRAGMA journal_mode")
         row = await cursor.fetchone()
         return str(row[0]) if row else ""
+
+    async def usage_today(self, brain: str) -> int:
+        """Total (in + out) tokens recorded for ``brain`` today. Drives the budget gate."""
+        cursor = await self._conn.execute(
+            "SELECT tokens_in + tokens_out FROM usage WHERE date = ? AND brain = ?",
+            (_today(), brain),
+        )
+        row = await cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    async def add_usage(self, brain: str, tokens_in: int, tokens_out: int) -> None:
+        await self._conn.execute(
+            "INSERT INTO usage (date, brain, tokens_in, tokens_out) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(date, brain) DO UPDATE SET "
+            "tokens_in = tokens_in + excluded.tokens_in, "
+            "tokens_out = tokens_out + excluded.tokens_out",
+            (_today(), brain, tokens_in, tokens_out),
+        )
+        await self._conn.commit()
