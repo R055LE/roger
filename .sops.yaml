@@ -1,0 +1,9 @@
+# sops + age. Encrypts the real roger.env at rest on the host; this file (recipient config only)
+# is safe to commit. The encrypted roger.env is NOT — it stays git-ignored.
+#
+# One-time setup:
+#   age-keygen -o ~/.config/sops/age/keys.txt   # back the key up to the NAS
+# Copy the PUBLIC key it prints (age1...) over the placeholder below.
+creation_rules:
+  - path_regex: \.env$
+    age: age1REPLACE_WITH_YOUR_AGE_PUBLIC_KEY

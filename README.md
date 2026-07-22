@@ -4,27 +4,66 @@ An [OpenRouter](https://openrouter.ai)-backed Discord bot — the spiritual succ
 [`roger-bot`](https://github.com/R055LE/roger-bot), my first-ever programming project. Same
 character, rebuilt from scratch on hosted models and modern tooling.
 
-> **Status:** scaffolding. The design spec is incoming — stack, structure, and features follow
-> it. Everything here is deliberately minimal so the spec drives the real shape.
+Roger is a single-guild, owner-gated Discord assistant with three separate "brains":
 
-## Intent (provisional)
+- **Admin** — an owner-only server concierge. Ask in plain language ("a read-only podcast channel
+  under Media that DJs can post in") and it creates channels/roles and sets permissions through a
+  small, hand-rolled tool loop. No agent framework.
+- **Ambient** — a deadpan chat persona for @mentions and DMs. No tools, no authority.
+- **Digest** — a scheduled RSS/Atom summary posted to a channel.
 
-- A Discord chat bot (mentions, DMs, and configured channels) with a small, focused persona.
-- OpenAI-compatible client pointed at OpenRouter, so the model is a config value, not a rewrite.
-- Config via environment only — **no secrets in git**. See [`.env.example`](.env.example).
+## Security posture
+
+Security is structural, not prompt-deep:
+
+- **No privileged gateway intents.** `message_content`, `members`, and `presence` stay off. Roger
+  only sees content in DMs, @mentions, and its own messages — exactly what it needs.
+- **Owner-gated.** Admin actions require `user.id == OWNER_ID`, checked before a single token is
+  spent. Everyone else gets a canned reply and an audit row.
+- **Least privilege.** Never requests Administrator. Roles it creates always have zero permissions;
+  access is granted through channel overwrites. No delete/rename/edit tools exist.
+- **Budgeted.** Per-brain daily token caps and a hard cap on tool calls per request.
+- **No secrets in git — ever, not even encrypted.** Secrets live in a `sops`+`age`-encrypted
+  `roger.env` on the host; the repo carries only `.sops.yaml` and `roger.env.example`.
+
+## Stack
+
+Python 3.12 · [discord.py](https://github.com/Rapptz/discord.py) · the OpenAI SDK pointed at
+OpenRouter · `pydantic` · `aiosqlite` · `feedparser`. Runs as a non-root, read-only-rootfs
+container. `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host later is an
+env change, not a rewrite.
 
 ## Setup
 
 ```bash
-cp .env.example .env   # then fill in the tokens
+# 1. Configure
+cp roger.env.example roger.env        # fill in tokens, owner/guild IDs, model chains
+
+# 2. Encrypt secrets at rest (age key generated once — see .sops.yaml)
+sops -e -i roger.env
+
+# 3. Run (secrets injected into the process env, never baked into the image)
+mkdir -p data
+sops exec-env roger.env 'docker compose up -d --build'
 ```
 
-Full run/deploy instructions land with the spec.
+Each `MODEL_*` var is a comma-separated priority list (primary first, the rest are OpenRouter
+fallbacks). Every model in `MODEL_ADMIN` must support tool calling.
 
-## Security
+## Development
 
-- `.env` and any live persona/config are gitignored; commit `.env.example` with placeholders only.
-- API keys (Discord, OpenRouter) are read from the environment at runtime — never hardcoded.
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e '.[dev]'
+pytest
+ruff check .
+```
+
+## Status
+
+Built in phases. **P1 (skeleton) is in:** connects with non-privileged intents, registers the
+guild-scoped `/roger` command, enforces the owner gate with audit logging, and ships the container.
+Admin tool loop, ambient chat, and digest follow.
 
 ## License
 

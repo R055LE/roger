@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "roger"
+version = "0.1.0"
+description = "An OpenRouter-backed Discord bot: owner-gated admin concierge, ambient chat, and a scheduled digest."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "R055LE" }]
+dependencies = [
+    "discord.py==2.7.1",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    "openai==2.46.0",
+    "aiosqlite==0.22.1",
+    "feedparser==6.0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.15.22",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["roger"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # assert is the point in tests
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

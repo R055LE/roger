@@ -1,0 +1,24 @@
+# VCS / meta
+.git
+.gitignore
+.github
+
+# Never ship secrets or the working spec into the image
+*.env
+!*.env.example
+.sops.yaml
+roger-build-spec.md
+
+# Runtime data + local dev
+data/
+tests/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Compose/Dockerfile aren't needed inside the image
+compose.yaml
+Dockerfile
