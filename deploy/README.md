@@ -58,7 +58,7 @@ ssh "$HOST" 'sudo bash /tmp/roger-src/install-systemd.sh'
 
 # 5. First deploy (the timer also fires within ~2 min of boot / install).
 ssh "$HOST" 'sudo systemctl start roger-deploy.service'
-ssh "$HOST" 'docker compose -f /opt/roger/compose.yaml logs --tail 20 roger'
+ssh "$HOST" 'docker logs --tail 20 "$(docker ps -q --filter name=roger)"'
 ```
 
 > **One-time GHCR step:** the first `release.yml` run publishes the package **private** by
@@ -74,7 +74,9 @@ read-only container can write the SQLite DB into the bind mount.
   ~5 minutes. Nothing else to do.
 - **Deploy now:** `ssh "$HOST" 'sudo systemctl start roger-deploy.service'`.
 - **Watch logs:** `journalctl -u roger-deploy.service -f` (deploys) or
-  `docker compose -f /opt/roger/compose.yaml logs -f roger` (the bot).
+  `docker logs -f "$(docker ps -q --filter name=roger)"` (the bot). Use plain `docker`, not
+  `docker compose` — any compose subcommand re-interpolates the file and needs the decrypted
+  env, so wrap those as `sops exec-env /opt/roger/roger.env 'docker compose … <cmd>'`.
 - **Change config/secrets:** `cd /opt/roger && sops roger.env`, save, then trigger a deploy.
   `up -d` recreates the container with the new env.
 
