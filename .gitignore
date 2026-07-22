@@ -1,0 +1,28 @@
+# Secrets / local config — never commit real values
+.env
+.env.*
+!.env.example
+
+# Live bot persona / server-specific config (ship an example instead)
+persona.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
