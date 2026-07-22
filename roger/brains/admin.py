@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from roger.llm import LLM, BudgetExceeded, LLMConfigError
 from roger.store import AuditStatus, Store
 from roger.tools import executors, schemas
+from roger.tools.context import ToolContext
 from roger.tools.guard import GuardError
 
 log = logging.getLogger("roger.admin")
@@ -48,6 +49,7 @@ async def handle_admin_request(
     llm: LLM,
     store: Store,
     confirm: Confirmer | None = None,
+    ctx: ToolContext | None = None,
 ) -> str:
     confirm = confirm or _deny_all
 
@@ -99,7 +101,7 @@ async def handle_admin_request(
                     continue
 
                 tool_calls_used += 1
-                result, status, detail = await _run_tool(call, guild, confirm)
+                result, status, detail = await _run_tool(call, guild, confirm, ctx)
                 await store.record_audit(
                     actor_id=actor_id,
                     brain="admin",
@@ -124,7 +126,7 @@ async def handle_admin_request(
 
 
 async def _run_tool(
-    call: Any, guild: Any, confirm: Confirmer
+    call: Any, guild: Any, confirm: Confirmer, ctx: ToolContext | None
 ) -> tuple[dict[str, Any], AuditStatus, str | None]:
     spec = schemas.REGISTRY.get(call.function.name)
     if spec is None:
@@ -141,7 +143,7 @@ async def _run_tool(
             diff = await executors.preview(spec.name, guild, args)
             if not await confirm(diff):
                 return {"status": "denied by owner"}, AuditStatus.DENIED, "owner denied"
-        result = await executors.EXECUTORS[spec.name](guild, args)
+        result = await executors.EXECUTORS[spec.name](guild, args, ctx)
         return result, AuditStatus.OK, None
     except GuardError as exc:
         return {"error": str(exc)}, AuditStatus.INVALID, "guard"

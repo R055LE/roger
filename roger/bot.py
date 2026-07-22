@@ -2,26 +2,33 @@
 
 Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped command, the
 owner gate with audit logging, and message routing. Owner requests (via ``/roger`` or DM) go to the
-admin brain; ambient and digest arrive in later phases.
+admin brain; non-owner chat goes to the ambient brain; a scheduled digest posts on its own loop.
 """
 
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import logging
+import re
 import sys
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 
 from roger.brains.admin import handle_admin_request
+from roger.brains.ambient import AmbientLimiter, handle_ambient
+from roger.brains.digest import run_digest_job
 from roger.config import Settings, load_settings
 from roger.llm import LLM
 from roger.store import AuditStatus, Store
+from roger.tools.context import ToolContext
 
 log = logging.getLogger("roger")
 
@@ -59,6 +66,13 @@ def configure_logging(level: str) -> None:
 
 def _truncate(text: str, limit: int = DISCORD_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+_MENTION_RE = re.compile(r"<@!?\d+>")
+
+
+def _strip_mentions(content: str) -> str:
+    return _MENTION_RE.sub("", content).strip()
 
 
 # --------------------------------------------------------------------------- confirm flow
@@ -142,12 +156,27 @@ class RogerClient(discord.Client):
         self.llm = llm
         self.tree = app_commands.CommandTree(self)
         self._guild = discord.Object(id=settings.guild_id)
+        self.ambient_limiter = AmbientLimiter(
+            settings.ambient_rate_per_user,
+            settings.ambient_rate_window_s,
+            settings.ambient_global_hourly,
+        )
 
     async def setup_hook(self) -> None:
         self._assert_non_privileged()
         _register_commands(self)
         # Guild-scoped sync is instant and never leaks the command to other servers.
         await self.tree.sync(guild=self._guild)
+        if self.settings.feeds and self.settings.digest_channel_id is not None:
+            self._digest_loop.change_interval(
+                time=datetime.time(
+                    hour=self.settings.digest_hour, tzinfo=ZoneInfo(self.settings.tz)
+                )
+            )
+            self._digest_loop.start()
+            log.info(
+                "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
+            )
 
     def _assert_non_privileged(self) -> None:
         i = self.intents
@@ -169,8 +198,21 @@ class RogerClient(discord.Client):
             reply = await self._run_admin(message.content, message.author.id, message.channel.send)
             await message.channel.send(_truncate(reply))
         elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
-            log.debug("ambient route %s from %s (P4)", route.value, message.author.id)
-            # TODO(P4): ambient brain
+            content = message.content
+            if route is Route.AMBIENT_MENTION:
+                content = _strip_mentions(content)  # §5: strip the mention first
+                if not content:
+                    return
+            reply = await handle_ambient(
+                content=content,
+                user_id=message.author.id,
+                channel_id=message.channel.id,
+                llm=self.llm,
+                store=self.store,
+                limiter=self.ambient_limiter,
+            )
+            if reply:
+                await message.channel.send(_truncate(reply))
 
     async def _run_admin(
         self, request: str, actor_id: int, send: Callable[..., Awaitable[Any]]
@@ -179,6 +221,7 @@ class RogerClient(discord.Client):
         if guild is None:
             return "I can't see the configured guild right now."
         confirm = _make_confirmer(send, self.settings.owner_id)
+        ctx = ToolContext(llm=self.llm, store=self.store, settings=self.settings, client=self)
         try:
             return await handle_admin_request(
                 request=request,
@@ -187,11 +230,23 @@ class RogerClient(discord.Client):
                 llm=self.llm,
                 store=self.store,
                 confirm=confirm,
+                ctx=ctx,
             )
         except Exception:
             # Never leave a deferred interaction hanging — reply, then surface it in the logs.
             log.exception("admin request failed for actor %s", actor_id)
             return "Something went wrong handling that — check the logs."
+
+    @tasks.loop(time=datetime.time(hour=8))
+    async def _digest_loop(self) -> None:
+        result = await run_digest_job(
+            client=self, settings=self.settings, llm=self.llm, store=self.store
+        )
+        log.info("scheduled digest: %s", result.get("status"))
+
+    @_digest_loop.before_loop
+    async def _before_digest(self) -> None:
+        await self.wait_until_ready()
 
 
 def _register_commands(client: RogerClient) -> None:

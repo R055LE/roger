@@ -155,7 +155,7 @@ def _patch_confirm_tool(monkeypatch, applied):
     async def fake_preview(name, guild, args):
         return "DIFF"
 
-    async def fake_set_perms(guild, args):
+    async def fake_set_perms(guild, args, ctx=None):
         applied["done"] = True
         return {"channel": "general", "applied": []}
 

@@ -149,3 +149,47 @@ class Store:
             (_today(), brain, tokens_in, tokens_out),
         )
         await self._conn.commit()
+
+    # --- ambient own-thread memory (§8) ---
+
+    async def recent_ambient(
+        self, user_id: int, channel_id: int, limit: int = 12
+    ) -> list[dict[str, Any]]:
+        """The most recent ambient exchanges for this user+channel, oldest first."""
+        cursor = await self._conn.execute(
+            "SELECT role, content FROM ambient_log WHERE user_id = ? AND channel_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, channel_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    async def add_ambient(self, user_id: int, channel_id: int, role: str, content: str) -> None:
+        await self._conn.execute(
+            "INSERT INTO ambient_log (ts, user_id, channel_id, role, content) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (time.time(), user_id, channel_id, role, content),
+        )
+        await self._conn.commit()
+
+    # --- digest dedupe (§9) ---
+
+    async def filter_unseen(self, feed_url: str, entry_ids: list[str]) -> set[str]:
+        if not entry_ids:
+            return set()
+        placeholders = ",".join("?" * len(entry_ids))
+        query = (
+            "SELECT entry_id FROM seen WHERE feed_url = ? "  # noqa: S608 - placeholders only, no user data
+            f"AND entry_id IN ({placeholders})"
+        )
+        cursor = await self._conn.execute(query, (feed_url, *entry_ids))
+        seen = {row[0] for row in await cursor.fetchall()}
+        return {entry_id for entry_id in entry_ids if entry_id not in seen}
+
+    async def mark_seen(self, pairs: list[tuple[str, str]]) -> None:
+        now = time.time()
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO seen (feed_url, entry_id, ts) VALUES (?, ?, ?)",
+            [(feed_url, entry_id, now) for feed_url, entry_id in pairs],
+        )
+        await self._conn.commit()

@@ -61,9 +61,18 @@ ruff check .
 
 ## Status
 
-Built in phases. **P1 (skeleton) is in:** connects with non-privileged intents, registers the
-guild-scoped `/roger` command, enforces the owner gate with audit logging, and ships the container.
-Admin tool loop, ambient chat, and digest follow.
+Feature-complete across the planned phases:
+
+- **Admin** — owner-gated `/roger` and DMs; a hand-rolled tool loop with `list_structure`,
+  `create_channel`, `create_role`, and confirm-gated `set_permissions`; per-request tool and daily
+  token budgets; a full SQLite audit trail.
+- **Ambient** — deadpan chat on @mentions and non-owner DMs, rate-limited per user + globally, with
+  a short own-thread memory. No tools, ever.
+- **Digest** — a scheduled daily RSS/Atom summary (also triggerable via `/roger run the digest
+  now`), deduped so nothing posts twice.
+
+Runs as a non-root, read-only-rootfs container. ~55 tests cover the guard rules, the tool loop, the
+rate limiter, and the digest paths.
 
 ## License
 

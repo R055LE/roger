@@ -11,6 +11,7 @@ from typing import Any
 
 import discord
 
+from roger.tools.context import ToolContext
 from roger.tools.guard import (
     GuardError,
     check_no_duplicate,
@@ -75,7 +76,9 @@ async def snapshot(guild: discord.Guild) -> dict[str, Any]:
     return {"categories": categories, "channels": channels, "roles": roles}
 
 
-async def list_structure(guild: discord.Guild, args: ListStructureArgs) -> dict[str, Any]:
+async def list_structure(
+    guild: discord.Guild, args: ListStructureArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
     return await snapshot(guild)
 
 
@@ -117,7 +120,9 @@ async def _resolve_target(guild: discord.Guild, query: str) -> discord.Role | di
 # --------------------------------------------------------------------------- mutations
 
 
-async def create_channel(guild: discord.Guild, args: CreateChannelArgs) -> dict[str, Any]:
+async def create_channel(
+    guild: discord.Guild, args: CreateChannelArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
     if args.kind == "category":
         if args.category is not None:
             raise GuardError("a category can't be nested under another category")
@@ -160,7 +165,9 @@ async def create_channel(guild: discord.Guild, args: CreateChannelArgs) -> dict[
     }
 
 
-async def create_role(guild: discord.Guild, args: CreateRoleArgs) -> dict[str, Any]:
+async def create_role(
+    guild: discord.Guild, args: CreateRoleArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
     name = sanitize_display_name(args.name)
     check_no_duplicate("role", name, [r.name for r in guild.roles])
     kwargs: dict[str, Any] = {
@@ -180,7 +187,9 @@ async def create_role(guild: discord.Guild, args: CreateRoleArgs) -> dict[str, A
     }
 
 
-async def set_permissions(guild: discord.Guild, args: SetPermissionsArgs) -> dict[str, Any]:
+async def set_permissions(
+    guild: discord.Guild, args: SetPermissionsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
     channel = _resolve_channel(guild, args.channel)
     applied: list[dict[str, Any]] = []
     for overwrite in args.overwrites:
@@ -200,9 +209,16 @@ async def set_permissions(guild: discord.Guild, args: SetPermissionsArgs) -> dic
     return {"channel": channel.name, "applied": applied}
 
 
-async def run_digest(guild: discord.Guild, args: RunDigestArgs) -> dict[str, Any]:
-    # Stub until P5 wires the digest brain.
-    return {"status": "run_digest is registered; the digest job lands in P5"}
+async def run_digest(
+    guild: discord.Guild, args: RunDigestArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    if ctx is None or ctx.settings is None:
+        return {"status": "digest unavailable in this context"}
+    from roger.brains.digest import run_digest_job
+
+    return await run_digest_job(
+        client=ctx.client, settings=ctx.settings, llm=ctx.llm, store=ctx.store
+    )
 
 
 # --------------------------------------------------------------------------- confirm preview
