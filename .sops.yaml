@@ -6,4 +6,6 @@
 # Copy the PUBLIC key it prints (age1...) over the placeholder below.
 creation_rules:
   - path_regex: \.env$
-    age: age1REPLACE_WITH_YOUR_AGE_PUBLIC_KEY
+    # Public recipient for hermes. The matching private key lives only at
+    # ~/.config/sops/age/keys.txt on hermes (never committed) — back it up to the NAS.
+    age: age1jclqnjqe5f5pa2yamfxwj2p7cpc2k0nzwyme5tkw2zfafuhl0cfsnz9qvv

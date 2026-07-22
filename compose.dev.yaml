@@ -1,0 +1,11 @@
+# Local development override — build from source instead of pulling the published image.
+#
+#   set -a; source ./roger.env; set +a
+#   docker compose -f compose.yaml -f compose.dev.yaml up --build
+#
+# Not copied to hermes; production always runs the GHCR image from compose.yaml alone.
+services:
+  roger:
+    build: .
+    image: roger:dev
+    pull_policy: never

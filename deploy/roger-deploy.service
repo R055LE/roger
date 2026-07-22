@@ -1,0 +1,12 @@
+[Unit]
+Description=Pull and (re)deploy roger from GHCR
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=hermes
+ExecStart=/usr/local/bin/roger-deploy
+# Non-fatal: a failed poll (e.g. registry hiccup) shouldn't disable the timer.
+SuccessExitStatus=0

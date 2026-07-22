@@ -1,9 +1,9 @@
 FROM python:3.12-slim
 
-# Non-root runtime user. The app writes only to /data (volume) and /tmp (tmpfs), so the
-# rootfs can be mounted read-only.
-RUN groupadd --system roger \
- && useradd --system --gid roger --home-dir /app --no-create-home roger \
+# Non-root runtime user with a fixed uid/gid so the host can chown the bind-mounted /data
+# to match. The app writes only to /data (volume) and /tmp (tmpfs), so the rootfs is read-only.
+RUN groupadd --system --gid 10001 roger \
+ && useradd --system --uid 10001 --gid 10001 --home-dir /app --no-create-home roger \
  && apt-get update \
  && apt-get install -y --no-install-recommends tzdata \
  && rm -rf /var/lib/apt/lists/*

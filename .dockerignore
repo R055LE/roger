@@ -19,6 +19,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 
-# Compose/Dockerfile aren't needed inside the image
+# Compose/Dockerfile/deploy tooling aren't needed inside the image
 compose.yaml
+compose.dev.yaml
 Dockerfile
+deploy/

@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll GHCR for new roger images and redeploy
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

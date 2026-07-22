@@ -1,7 +1,8 @@
 services:
   roger:
-    build: .
-    image: roger:0.1.0
+    # Published by the release workflow on every push to main. hermes pulls this tag.
+    # For local builds from source, add: -f compose.yaml -f compose.dev.yaml (see compose.dev.yaml).
+    image: ghcr.io/r055le/roger:main
     init: true
     read_only: true
     restart: unless-stopped

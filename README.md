@@ -33,22 +33,29 @@ OpenRouter · `pydantic` · `aiosqlite` · `feedparser`. Runs as a non-root, rea
 container. `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host later is an
 env change, not a rewrite.
 
-## Setup
+## Configure
 
 ```bash
-# 1. Configure
 cp roger.env.example roger.env        # fill in tokens, owner/guild IDs, model chains
-
-# 2. Encrypt secrets at rest (age key generated once — see .sops.yaml)
-sops -e -i roger.env
-
-# 3. Run (secrets injected into the process env, never baked into the image)
-mkdir -p data
-sops exec-env roger.env 'docker compose up -d --build'
 ```
 
 Each `MODEL_*` var is a comma-separated priority list (primary first, the rest are OpenRouter
 fallbacks). Every model in `MODEL_ADMIN` must support tool calling.
+
+## Deploy
+
+CI/CD is pull-based: pushing to `main` runs the tests, builds the image, and publishes it to
+GHCR (`ghcr.io/r055le/roger:main`); the host polls that tag and redeploys itself. Secrets are
+injected at runtime by `sops exec-env` and never baked into the image. Full runbook (host
+bootstrap, age key, systemd timer) in [`deploy/`](deploy/README.md).
+
+Run it directly on any Docker host:
+
+```bash
+sops -e -i roger.env                                  # encrypt at rest (age key — see .sops.yaml)
+mkdir -p data
+sops exec-env roger.env 'docker compose up -d'        # pulls the published image
+```
 
 ## Development
 
