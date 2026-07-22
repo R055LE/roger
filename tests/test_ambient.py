@@ -63,6 +63,15 @@ def test_limiter_window_resets(monkeypatch):
     assert lim.check(1) == "ok"
 
 
+def test_limiter_notifies_on_low_uptime_host(monkeypatch):
+    # Freshly-booted host: monotonic() < window_s. The first over-limit call must still notify
+    # (regression: a 0.0 sentinel made `now - last_notified` read as "already notified").
+    monkeypatch.setattr(ambient.time, "monotonic", lambda: 5.0)
+    lim = AmbientLimiter(per_user=1, window_s=600, global_hourly=100)
+    assert lim.check(1) == "ok"
+    assert lim.check(1) == "notify"
+
+
 # --- handle_ambient ---
 
 

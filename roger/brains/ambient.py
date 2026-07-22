@@ -59,7 +59,10 @@ class AmbientLimiter:
             self._global_hits.append(now)
             return "ok"
 
-        if now - self._notified.get(user_id, 0.0) > self._window_s:
+        # Default to -inf, not 0.0: time.monotonic() is seconds-since-boot, so on a freshly
+        # booted host `now` can be < window_s and a 0.0 sentinel would read as "notified
+        # recently" — swallowing the one canned line the user is owed.
+        if now - self._notified.get(user_id, float("-inf")) > self._window_s:
             self._notified[user_id] = now
             return "notify"
         return "silent"
