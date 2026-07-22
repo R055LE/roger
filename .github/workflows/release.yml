@@ -1,7 +1,7 @@
 name: release
 
 # Build the runtime image and publish it to GHCR on every push to main.
-# hermes polls ghcr.io/r055le/roger:main and redeploys when the digest changes.
+# The deploy host polls ghcr.io/r055le/roger:main and redeploys when the digest changes.
 # No secrets are baked in — they're injected at runtime by `sops exec-env` on the host.
 
 on:
@@ -22,6 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Buildx
+        # docker-container driver: required for gha cache export and SBOM/provenance attestations.
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
