@@ -1,14 +1,18 @@
 """Admin brain: the hand-rolled tool loop (§6).
 
 Owner-only (the gate runs at dispatch, before we ever get here). Snapshots live guild state, hands
-it to the model with the tool schemas, then runs a bounded loop: validate args → guard → execute →
-feed the result back. P2 wires the loop with the read-only ``list_structure`` tool only.
+it to the model with the tool schemas, then runs a bounded loop: validate args → guard → execute
+(or pause for confirmation) → feed the result back.
+
+Confirmation is injected as a callback so the loop stays testable and decoupled from Discord: the
+bot passes a real button-driven confirmer; tests pass a fake.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import ValidationError
@@ -16,17 +20,24 @@ from pydantic import ValidationError
 from roger.llm import LLM, BudgetExceeded, LLMConfigError
 from roger.store import AuditStatus, Store
 from roger.tools import executors, schemas
+from roger.tools.guard import GuardError
 
 log = logging.getLogger("roger.admin")
 
 MAX_TOOL_CALLS = 5  # hard budget per request (§2.9)
 MAX_TURNS = 8  # safety bound on model round-trips
 
+Confirmer = Callable[[str], Awaitable[bool]]
+
 SYSTEM_PROMPT = (
     "You are Roger, a Discord server admin assistant. You may only act through the provided "
     "tools. If a request falls outside them, say so plainly — do not pretend. Keep replies short "
     "and factual; no personality flourishes. The current server state is provided as JSON."
 )
+
+
+async def _deny_all(_: str) -> bool:
+    return False
 
 
 async def handle_admin_request(
@@ -36,7 +47,10 @@ async def handle_admin_request(
     actor_id: int,
     llm: LLM,
     store: Store,
+    confirm: Confirmer | None = None,
 ) -> str:
+    confirm = confirm or _deny_all
+
     await store.record_audit(
         actor_id=actor_id,
         brain="admin",
@@ -85,7 +99,7 @@ async def handle_admin_request(
                     continue
 
                 tool_calls_used += 1
-                result, status, detail = await _run_tool(call, guild)
+                result, status, detail = await _run_tool(call, guild, confirm)
                 await store.record_audit(
                     actor_id=actor_id,
                     brain="admin",
@@ -109,7 +123,9 @@ async def handle_admin_request(
         return f"The admin brain isn't configured yet ({exc})."
 
 
-async def _run_tool(call: Any, guild: Any) -> tuple[dict[str, Any], AuditStatus, str | None]:
+async def _run_tool(
+    call: Any, guild: Any, confirm: Confirmer
+) -> tuple[dict[str, Any], AuditStatus, str | None]:
     spec = schemas.REGISTRY.get(call.function.name)
     if spec is None:
         return {"error": f"unknown tool: {call.function.name}"}, AuditStatus.INVALID, "unknown tool"
@@ -120,10 +136,15 @@ async def _run_tool(call: Any, guild: Any) -> tuple[dict[str, Any], AuditStatus,
     except (json.JSONDecodeError, ValidationError) as exc:
         return {"error": f"invalid arguments: {exc}"}, AuditStatus.INVALID, "arg validation"
 
-    executor = executors.EXECUTORS[spec.name]
     try:
-        result = await executor(guild, args)
+        if spec.requires_confirm:
+            diff = await executors.preview(spec.name, guild, args)
+            if not await confirm(diff):
+                return {"status": "denied by owner"}, AuditStatus.DENIED, "owner denied"
+        result = await executors.EXECUTORS[spec.name](guild, args)
         return result, AuditStatus.OK, None
+    except GuardError as exc:
+        return {"error": str(exc)}, AuditStatus.INVALID, "guard"
     except Exception as exc:  # surfaced to the model as a structured result, not raised
         log.exception("executor for %s failed", spec.name)
         return {"error": str(exc)}, AuditStatus.ERROR, "executor error"

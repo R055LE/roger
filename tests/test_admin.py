@@ -143,3 +143,99 @@ async def test_tool_call_budget_caps_at_five(tmp_path):
         assert len(denied) == 1
     finally:
         await store.close()
+
+
+_SET_PERMS_ARGS = (
+    '{"channel": "general", "overwrites": '
+    '[{"target": "@everyone", "deny": ["send_messages"]}]}'
+)
+
+
+def _patch_confirm_tool(monkeypatch, applied):
+    async def fake_preview(name, guild, args):
+        return "DIFF"
+
+    async def fake_set_perms(guild, args):
+        applied["done"] = True
+        return {"channel": "general", "applied": []}
+
+    monkeypatch.setattr(admin.executors, "preview", fake_preview)
+    monkeypatch.setitem(admin.executors.EXECUTORS, "set_permissions", fake_set_perms)
+
+
+async def test_set_permissions_executes_when_approved(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        applied = {}
+        _patch_confirm_tool(monkeypatch, applied)
+
+        async def approve(diff):
+            return True
+
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
+                _resp(content="Done."),
+            ]
+        )
+        out = await admin.handle_admin_request(
+            request="lock #general",
+            guild=object(),
+            actor_id=1,
+            llm=llm,
+            store=store,
+            confirm=approve,
+        )
+        assert out == "Done."
+        assert applied.get("done") is True
+        rows = await store.fetch_audit()
+        assert any(r["tool"] == "set_permissions" and r["status"] == "ok" for r in rows)
+    finally:
+        await store.close()
+
+
+async def test_set_permissions_skipped_when_denied(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        applied = {}
+        _patch_confirm_tool(monkeypatch, applied)
+
+        async def deny(diff):
+            return False
+
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
+                _resp(content="Left it alone."),
+            ]
+        )
+        out = await admin.handle_admin_request(
+            request="lock #general", guild=object(), actor_id=1, llm=llm, store=store, confirm=deny
+        )
+        assert out == "Left it alone."
+        assert "done" not in applied  # executor never ran
+        rows = await store.fetch_audit()
+        assert any(r["tool"] == "set_permissions" and r["status"] == "denied" for r in rows)
+    finally:
+        await store.close()
+
+
+async def test_set_permissions_defaults_to_deny_without_confirmer(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        applied = {}
+        _patch_confirm_tool(monkeypatch, applied)
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
+                _resp(content="Couldn't confirm."),
+            ]
+        )
+        # No confirm= passed -> _deny_all -> executor must not run.
+        out = await admin.handle_admin_request(
+            request="lock #general", guild=object(), actor_id=1, llm=llm, store=store
+        )
+        assert out == "Couldn't confirm."
+        assert "done" not in applied
+    finally:
+        await store.close()

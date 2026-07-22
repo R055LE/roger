@@ -11,7 +11,9 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 from enum import Enum
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -25,6 +27,7 @@ log = logging.getLogger("roger")
 
 CANNED_DENY = "Sorry — Roger only takes admin requests from the server owner."
 DISCORD_MAX = 2000
+CONFIRM_TIMEOUT = 120
 
 
 # --------------------------------------------------------------------------- logging
@@ -56,6 +59,48 @@ def configure_logging(level: str) -> None:
 
 def _truncate(text: str, limit: int = DISCORD_MAX) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+# --------------------------------------------------------------------------- confirm flow
+
+
+class _ConfirmView(discord.ui.View):
+    """Owner-only ✅/❌ buttons for a permission change. Timeout counts as a deny."""
+
+    def __init__(self, owner_id: int) -> None:
+        super().__init__(timeout=CONFIRM_TIMEOUT)
+        self._owner_id = owner_id
+        self.value: bool | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self._owner_id:
+            await interaction.response.send_message("Not your call.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
+    async def approve(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.value = True
+        await interaction.response.edit_message(content="Approved.", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="❌")
+    async def deny(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.value = False
+        await interaction.response.edit_message(content="Denied.", view=None)
+        self.stop()
+
+
+def _make_confirmer(
+    send: Callable[..., Awaitable[Any]], owner_id: int
+) -> Callable[[str], Awaitable[bool]]:
+    async def confirm(diff: str) -> bool:
+        view = _ConfirmView(owner_id)
+        await send(content=f"**Confirm permission change:**\n```\n{diff}\n```", view=view)
+        await view.wait()  # returns on click or timeout
+        return bool(view.value)  # None (timeout) -> False
+
+    return confirm
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -121,16 +166,19 @@ class RogerClient(discord.Client):
             message, owner_id=self.settings.owner_id, bot_user_id=self.user.id
         )
         if route is Route.ADMIN_DM:
-            reply = await self._run_admin(message.content, message.author.id)
+            reply = await self._run_admin(message.content, message.author.id, message.channel.send)
             await message.channel.send(_truncate(reply))
         elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
             log.debug("ambient route %s from %s (P4)", route.value, message.author.id)
             # TODO(P4): ambient brain
 
-    async def _run_admin(self, request: str, actor_id: int) -> str:
+    async def _run_admin(
+        self, request: str, actor_id: int, send: Callable[..., Awaitable[Any]]
+    ) -> str:
         guild = self.get_guild(self.settings.guild_id)
         if guild is None:
             return "I can't see the configured guild right now."
+        confirm = _make_confirmer(send, self.settings.owner_id)
         try:
             return await handle_admin_request(
                 request=request,
@@ -138,6 +186,7 @@ class RogerClient(discord.Client):
                 actor_id=actor_id,
                 llm=self.llm,
                 store=self.store,
+                confirm=confirm,
             )
         except Exception:
             # Never leave a deferred interaction hanging — reply, then surface it in the logs.
@@ -177,7 +226,7 @@ async def _handle_roger_request(
 
     # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
     await interaction.response.defer(thinking=True)
-    reply = await client._run_admin(request, user_id)
+    reply = await client._run_admin(request, user_id, interaction.followup.send)
     await interaction.followup.send(_truncate(reply))
 
 
