@@ -15,11 +15,10 @@ cd "$DEPLOY_DIR"
 exec 9>"${DEPLOY_DIR}/.deploy.lock"
 flock -n 9 || { echo "roger-deploy: another run holds the lock, skipping"; exit 0; }
 
-echo "roger-deploy: pulling latest image"
-docker compose pull --quiet
-
-echo "roger-deploy: applying"
-sops exec-env roger.env 'docker compose up -d'
+# compose interpolates the whole file (including required ${VAR:?} vars) on every subcommand,
+# so even `pull` needs the env populated — run both inside the sops-decrypted environment.
+echo "roger-deploy: pulling + applying"
+sops exec-env roger.env 'docker compose pull --quiet && docker compose up -d'
 
 echo "roger-deploy: pruning superseded images"
 docker image prune -f >/dev/null
