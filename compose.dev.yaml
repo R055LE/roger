@@ -3,7 +3,7 @@
 #   set -a; source ./roger.env; set +a
 #   docker compose -f compose.yaml -f compose.dev.yaml up --build
 #
-# Not copied to hermes; production always runs the GHCR image from compose.yaml alone.
+# Not copied to the deploy host; production always runs the GHCR image from compose.yaml alone.
 services:
   roger:
     build: .

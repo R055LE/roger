@@ -6,7 +6,7 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-User=hermes
+User=__DEPLOY_USER__
 ExecStart=/usr/local/bin/roger-deploy
 # Non-fatal: a failed poll (e.g. registry hiccup) shouldn't disable the timer.
 SuccessExitStatus=0

@@ -1,6 +1,6 @@
 services:
   roger:
-    # Published by the release workflow on every push to main. hermes pulls this tag.
+    # Published by the release workflow on every push to main. The deploy host pulls this tag.
     # For local builds from source, add: -f compose.yaml -f compose.dev.yaml (see compose.dev.yaml).
     image: ghcr.io/r055le/roger:main
     init: true

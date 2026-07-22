@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# hermes-bootstrap.sh — one-time (re-runnable) host prep for running roger.
+# bootstrap.sh — one-time (re-runnable) host prep for running roger.
 #
 # Installs Docker + the compose plugin + age from apt (distro-maintained, security-patched)
 # and sops from a pinned, checksum-verified release binary, puts the deploy user in the docker
 # group, and enables Docker at boot. Touches no secrets and does not start roger.
 #
-#   ssh hermes 'sudo bash -s' < deploy/hermes-bootstrap.sh
+#   ssh <host> 'sudo bash -s' < deploy/bootstrap.sh
 #
 # Idempotent: safe to run repeatedly.
 set -euo pipefail
@@ -16,7 +16,7 @@ DEPLOY_USER="${SUDO_USER:-$(id -un)}"
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "Run as root (use: sudo bash hermes-bootstrap.sh)." >&2
+  echo "Run as root (use: sudo bash bootstrap.sh)." >&2
   exit 1
 fi
 
