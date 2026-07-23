@@ -147,6 +147,23 @@ def classify_message(message: discord.Message, *, owner_id: int, bot_user_id: in
     return Route.IGNORE
 
 
+# --------------------------------------------------------------------------- permissions
+
+# The gateway permissions Roger's tools actually need — matches the invite set in deploy/README.md.
+REQUIRED_PERMISSIONS: tuple[tuple[str, str], ...] = (
+    ("view_channel", "View Channels"),
+    ("manage_channels", "Manage Channels"),
+    ("manage_roles", "Manage Roles"),
+    ("send_messages", "Send Messages"),
+    ("embed_links", "Embed Links"),
+)
+
+
+def _missing_permissions(perms: discord.Permissions) -> list[str]:
+    """Names of the required permissions Roger is *not* granted (pure, so it unit-tests cleanly)."""
+    return [label for attr, label in REQUIRED_PERMISSIONS if not getattr(perms, attr)]
+
+
 # --------------------------------------------------------------------------- client
 
 
@@ -164,6 +181,7 @@ class RogerClient(discord.Client):
             settings.ambient_rate_window_s,
             settings.ambient_global_hourly,
         )
+        self._perms_checked = False
 
     async def setup_hook(self) -> None:
         self._assert_non_privileged()
@@ -197,6 +215,26 @@ class RogerClient(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("roger online as %s (guild=%s)", self.user, self.settings.guild_id)
+        self._warn_on_missing_permissions()
+
+    def _warn_on_missing_permissions(self) -> None:
+        # on_ready fires again on every reconnect; report the permission state once per process.
+        if self._perms_checked:
+            return
+        guild = self.get_guild(self.settings.guild_id)
+        if guild is None or guild.me is None:
+            log.warning("can't verify permissions — guild %s not visible", self.settings.guild_id)
+            return
+        self._perms_checked = True
+        missing = _missing_permissions(guild.me.guild_permissions)
+        if missing:
+            log.warning(
+                "missing Discord permissions: %s — admin tools that need them will 403; re-invite "
+                "with the set in deploy/README.md (never Administrator)",
+                ", ".join(missing),
+            )
+        else:
+            log.info("permission check ok — all required scopes granted")
 
     async def on_message(self, message: discord.Message) -> None:
         route = classify_message(

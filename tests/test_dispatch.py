@@ -2,7 +2,9 @@
 
 from types import SimpleNamespace
 
-from roger.bot import Route, classify_message
+import discord
+
+from roger.bot import Route, _missing_permissions, classify_message
 
 BOT = 111
 OWNER = 222
@@ -55,3 +57,36 @@ def test_guild_message_without_mention_is_ignored():
 
 def test_owner_gets_no_special_treatment_in_guild_without_mention():
     assert route(msg(OWNER, "talking in a channel", mentions=[])) is Route.IGNORE
+
+
+# --------------------------------------------------------------------------- permission check
+
+# The exact integer deploy/README.md tells the operator to invite with.
+DOCUMENTED_INVITE = 268454928
+
+
+def test_documented_invite_integer_grants_every_required_permission():
+    # If this fails, the number in deploy/README.md and the code's requirements have drifted apart.
+    assert _missing_permissions(discord.Permissions(DOCUMENTED_INVITE)) == []
+
+
+def test_no_permissions_flags_all_required_scopes():
+    assert set(_missing_permissions(discord.Permissions.none())) == {
+        "View Channels",
+        "Manage Channels",
+        "Manage Roles",
+        "Send Messages",
+        "Embed Links",
+    }
+
+
+def test_administrator_satisfies_the_check():
+    # A member with Administrator resolves to guild_permissions == Permissions.all() at runtime,
+    # so nothing is reported missing (we simply never invite Administrator).
+    assert _missing_permissions(discord.Permissions.all()) == []
+
+
+def test_a_single_revoked_scope_is_named():
+    perms = discord.Permissions(DOCUMENTED_INVITE)
+    perms.update(manage_roles=False)
+    assert _missing_permissions(perms) == ["Manage Roles"]
