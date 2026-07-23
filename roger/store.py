@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS usage (
     brain      TEXT    NOT NULL,
     tokens_in  INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0,
+    cost_usd   REAL    NOT NULL DEFAULT 0,
     PRIMARY KEY (date, brain)
 );
 
@@ -95,6 +96,7 @@ class Store:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
         return self
 
@@ -108,6 +110,23 @@ class Store:
         if self._db is None:
             raise RuntimeError("Store used before open()")
         return self._db
+
+    async def _migrate(self) -> None:
+        """Additive, idempotent migrations for columns ``CREATE TABLE IF NOT EXISTS`` can't add.
+
+        A DB provisioned before ``cost_usd`` existed already has the ``usage`` table, so the
+        schema's ``CREATE TABLE IF NOT EXISTS`` skips it and the column must be added by hand. The
+        column check makes a run against a fresh (already-current) DB a no-op.
+        """
+        if not await self._has_column("usage", "cost_usd"):
+            await self._conn.execute(
+                "ALTER TABLE usage ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0"
+            )
+
+    async def _has_column(self, table: str, column: str) -> bool:
+        # PRAGMA can't be parameterized; `table` is an internal literal, never user input.
+        cursor = await self._conn.execute(f"PRAGMA table_info({table})")  # noqa: S608
+        return any(row[1] == column for row in await cursor.fetchall())
 
     async def record_audit(
         self,
@@ -155,15 +174,27 @@ class Store:
         row = await cursor.fetchone()
         return int(row[0]) if row and row[0] is not None else 0
 
-    async def add_usage(self, brain: str, tokens_in: int, tokens_out: int) -> None:
+    async def add_usage(
+        self, brain: str, tokens_in: int, tokens_out: int, cost_usd: float = 0.0
+    ) -> None:
         await self._conn.execute(
-            "INSERT INTO usage (date, brain, tokens_in, tokens_out) VALUES (?, ?, ?, ?) "
+            "INSERT INTO usage (date, brain, tokens_in, tokens_out, cost_usd) "
+            "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(date, brain) DO UPDATE SET "
             "tokens_in = tokens_in + excluded.tokens_in, "
-            "tokens_out = tokens_out + excluded.tokens_out",
-            (_today(), brain, tokens_in, tokens_out),
+            "tokens_out = tokens_out + excluded.tokens_out, "
+            "cost_usd = cost_usd + excluded.cost_usd",
+            (_today(), brain, tokens_in, tokens_out, cost_usd),
         )
         await self._conn.commit()
+
+    async def cost_today(self, brain: str) -> float:
+        """Actual USD charged for ``brain`` today (OpenRouter-reported cost, summed)."""
+        cursor = await self._conn.execute(
+            "SELECT cost_usd FROM usage WHERE date = ? AND brain = ?", (_today(), brain)
+        )
+        row = await cursor.fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
 
     # --- ambient own-thread memory (§8) ---
 

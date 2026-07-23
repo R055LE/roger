@@ -89,10 +89,13 @@ class LLM:
 
         usage = getattr(response, "usage", None)
         if usage is not None:
+            # `cost` is an OpenRouter extension on the usage object (USD, always returned now);
+            # absent when pointed at a vanilla OpenAI-compatible host, so default to 0.
             await self._store.add_usage(
                 brain,
                 getattr(usage, "prompt_tokens", 0) or 0,
                 getattr(usage, "completion_tokens", 0) or 0,
+                cost_usd=float(getattr(usage, "cost", 0.0) or 0.0),
             )
         return response
 

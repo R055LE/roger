@@ -27,6 +27,7 @@ def test_format_status_renders_perms_usage_feeds_and_actions():
         missing_perms=[],
         usage={"admin": 12345, "ambient": 0, "digest": 200},
         caps={"admin": 150000, "ambient": 40000, "digest": 30000},
+        cost={"admin": 0.0123, "ambient": 0.0, "digest": 0.002},
         feeds_count=3,
         recent_audit=[{"ts": 0, "tool": "create_channel", "status": "ok", "detail": None}],
         digest_hour=8,
@@ -35,6 +36,8 @@ def test_format_status_renders_perms_usage_feeds_and_actions():
     )
     assert "permissions: OK" in body
     assert "12,345 / 150,000" in body
+    assert "$0.0123" in body  # per-brain cost
+    assert "total" in body and "$0.0143" in body  # summed across brains
     assert "feeds: 3" in body and "08:00 UTC" in body
     assert "00:00  create_channel" in body  # epoch ts rendered in the given tz
 
@@ -45,6 +48,7 @@ def test_format_status_flags_missing_perms_and_unconfigured_digest():
         missing_perms=["Manage Roles"],
         usage={},
         caps={},
+        cost={},
         feeds_count=0,
         recent_audit=[],
         digest_hour=8,
@@ -61,6 +65,7 @@ def test_format_status_includes_audit_detail_when_present():
         missing_perms=[],
         usage={},
         caps={},
+        cost={},
         feeds_count=0,
         recent_audit=[
             {"ts": 0, "tool": "set_permissions", "status": "denied", "detail": "owner denied"}
@@ -89,7 +94,7 @@ def _settings(**over):
 async def test_gather_status_reads_live_store(tmp_path):
     store = await Store(str(tmp_path / "s.db")).open()
     try:
-        await store.add_usage("admin", 100, 50)  # 150 in+out
+        await store.add_usage("admin", 100, 50, cost_usd=0.0075)  # 150 in+out
         await store.add_feed("http://a", "A")
         await store.record_audit(
             actor_id=1, brain="admin", tool="create_channel", args=None,
@@ -103,6 +108,7 @@ async def test_gather_status_reads_live_store(tmp_path):
         assert "Live Guild" in body
         assert "permissions: OK" in body  # the full invite set grants everything required
         assert "150 / 150,000" in body
+        assert "$0.0075" in body  # OpenRouter-reported cost surfaced from the live store
         assert "feeds: 1" in body
         assert "create_channel" in body
     finally:
