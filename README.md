@@ -14,6 +14,9 @@ Roger is a single-guild, owner-gated Discord assistant with three separate "brai
   authority.
 - **Digest** — a scheduled RSS/Atom summary posted to a channel.
 
+Design details — the routing table, the tool loop, the store schema, and the security invariants the
+source cites as `(§N)` — are in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ## Security posture
 
 Security is structural, not prompt-deep:
