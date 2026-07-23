@@ -232,7 +232,8 @@ def _format_status(
             when = _hhmm(row["ts"], tz)
             tool = row.get("tool") or "—"
             detail = f" ({row['detail']})" if row.get("detail") else ""
-            lines.append(f"  {when}  {tool:<15}{row.get('status', '?')}{detail}")
+            # 16-wide: the longest tool name (`set_permissions`) is 15, so a gap is always left.
+            lines.append(f"  {when}  {tool:<16}{row.get('status', '?')}{detail}")
     return "\n".join(lines)
 
 
