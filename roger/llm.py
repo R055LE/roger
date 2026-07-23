@@ -1,8 +1,10 @@
 """OpenAI-compatible client pointed at OpenRouter, with budget checks and usage recording.
 
 One client, one place. Failover across a brain's model chain is OpenRouter's job (the ``models``
-array in ``extra_body``); this wrapper keeps exactly one retry for transport-level errors reaching
-OpenRouter itself, per the spec.
+array in ``extra_body``); on top of that, this wrapper enforces an explicit per-request timeout and
+bounded retries with backoff for transient failures — transport errors, timeouts, 429s, and 5xx —
+honoring a numeric ``Retry-After`` when the server sends one. Everything else (4xx, config) fails
+fast.
 """
 
 from __future__ import annotations
@@ -11,7 +13,13 @@ import asyncio
 import logging
 from typing import Any
 
-from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncOpenAI,
+    InternalServerError,
+    RateLimitError,
+)
 
 from roger.config import Settings
 from roger.store import Store
@@ -21,6 +29,27 @@ log = logging.getLogger("roger.llm")
 # Sampling + output ceilings per brain (§11).
 _TEMPERATURE = {"admin": 0.1, "digest": 0.3, "ambient": 0.8}
 _MAX_TOKENS = {"admin": 1024, "digest": 1500, "ambient": 300}
+
+# Retry policy. The SDK maps every status >= 500 to InternalServerError, so that one type covers all
+# 5xx. A hung request must not sit on a deferred Discord interaction, hence the hard timeout too.
+_RETRYABLE = (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError)
+REQUEST_TIMEOUT_S = 60.0
+MAX_ATTEMPTS = 3
+_BASE_BACKOFF_S = 0.5
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Seconds from a numeric ``Retry-After`` header, else None (pure, testable)."""
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    value = response.headers.get("retry-after")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except ValueError:  # HTTP-date form — ignore, fall back to exponential backoff
+        return None
 
 
 class LLMConfigError(RuntimeError):
@@ -38,11 +67,12 @@ class BudgetExceeded(RuntimeError):
 class LLM:
     def __init__(self, settings: Settings, store: Store) -> None:
         self._store = store
-        # max_retries=0: we do our own single, transport-only retry below.
+        # max_retries=0: we own the retry policy (_call_with_retries). timeout bounds a hung call.
         self._client = AsyncOpenAI(
             api_key=settings.openrouter_api_key,
             base_url=settings.openrouter_base_url,
             max_retries=0,
+            timeout=REQUEST_TIMEOUT_S,
         )
         self._chains = {
             "admin": settings.admin_models,
@@ -85,7 +115,7 @@ class LLM:
         if tools:
             kwargs["tools"] = tools
 
-        response = await self._call_with_one_retry(kwargs)
+        response = await self._call_with_retries(kwargs)
 
         usage = getattr(response, "usage", None)
         if usage is not None:
@@ -99,12 +129,21 @@ class LLM:
             )
         return response
 
-    async def _call_with_one_retry(self, kwargs: dict[str, Any]) -> Any:
-        for attempt in range(2):
+    async def _call_with_retries(self, kwargs: dict[str, Any]) -> Any:
+        for attempt in range(MAX_ATTEMPTS):
             try:
                 return await self._client.chat.completions.create(**kwargs)
-            except (APIConnectionError, APITimeoutError):
-                if attempt == 1:
+            except _RETRYABLE as exc:
+                if attempt == MAX_ATTEMPTS - 1:
                     raise
-                log.warning("transport error reaching OpenRouter; retrying once")
-                await asyncio.sleep(0.5)
+                backoff = _BASE_BACKOFF_S * 2**attempt
+                retry_after = _retry_after_seconds(exc)
+                delay = max(retry_after, backoff) if retry_after is not None else backoff
+                log.warning(
+                    "OpenRouter call failed (%s); retry %d/%d in %.1fs",
+                    type(exc).__name__,
+                    attempt + 1,
+                    MAX_ATTEMPTS - 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
