@@ -140,11 +140,12 @@ REGISTRY: dict[str, ToolSpec] = {
     "create_channel": ToolSpec(
         name="create_channel",
         description=(
-            "Create a text, voice, or category channel. Optionally place a text/voice channel "
-            "under a category, set a text topic, and set access at creation: read_only (deny "
-            "@everyone send), private (hide from @everyone entirely), and grants (per-role allow, "
-            "e.g. let a 'DJs' role send in an otherwise read-only channel). A private channel "
-            "requires the owner to confirm; read_only and grants apply immediately."
+            "Create a text, voice, or category channel. Optionally nest a text/voice channel "
+            "under a category, set a text topic, and set access at creation — for ANY type, "
+            "categories included: read_only (deny @everyone send; text only), private (hide from "
+            "@everyone — use this for an admin-only category, whose child channels inherit it), "
+            "and grants (per-role allow, e.g. let 'Admins' view a private category). Anything "
+            "private requires owner confirmation; read_only and grants apply immediately."
         ),
         args_model=CreateChannelArgs,
         confirm_when=lambda args: args.private,
@@ -160,7 +161,9 @@ REGISTRY: dict[str, ToolSpec] = {
     "set_permissions": ToolSpec(
         name="set_permissions",
         description=(
-            "Set channel-scoped permission overwrites on an existing channel. The owner must "
+            "Set channel permission overwrites on a text, voice, or category channel. Target a "
+            "role, member, @everyone, or 'self' (which means Roger itself). If a change hides a "
+            "channel from @everyone, Roger automatically keeps its own access. The owner must "
             "confirm the exact change before it is applied."
         ),
         args_model=SetPermissionsArgs,
