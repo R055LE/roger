@@ -16,8 +16,10 @@ from roger.tools.schemas import (
     CreateRoleArgs,
     EditChannelArgs,
     ListFeedsArgs,
+    Overwrite,
     PostMessageArgs,
     RemoveFeedArgs,
+    SetPermissionsArgs,
     SuggestFeedsArgs,
 )
 
@@ -39,6 +41,7 @@ class FakeChannel:
         self.topic = topic
         self.edited = None
         self.sent = []
+        self.perm_calls = []  # (target, overwrite) from set_permissions
 
     async def edit(self, **changes):
         self.edited = changes
@@ -47,6 +50,9 @@ class FakeChannel:
 
     async def send(self, content, allowed_mentions=None):
         self.sent.append(SimpleNamespace(content=content, allowed_mentions=allowed_mentions))
+
+    async def set_permissions(self, target, *, overwrite):
+        self.perm_calls.append((target, overwrite))
 
 
 class FakeGuild:
@@ -107,12 +113,13 @@ class FakeGuild:
 
     async def create_text_channel(self, *, name, category, topic, overwrites):
         self.last_overwrites = overwrites
-        channel = SimpleNamespace(id=self._id(), name=name)
+        channel = FakeChannel(self._id(), name, category=category, topic=topic)
         self.text_channels.append(channel)
         return channel
 
-    async def create_category(self, *, name):
-        category = SimpleNamespace(id=self._id(), name=name)
+    async def create_category(self, *, name, overwrites=None):
+        self.last_overwrites = overwrites
+        category = FakeChannel(self._id(), name)
         self.categories.append(category)
         return category
 
@@ -208,12 +215,92 @@ async def test_create_voice_rejects_read_only():
         )
 
 
-async def test_create_category_rejects_permission_intent():
+async def test_create_private_category_hides_and_keeps_bot_access():
+    guild = FakeGuild()
+    result = await executors.create_channel(
+        guild, CreateChannelArgs(name="Admin", kind="category", private=True)
+    )
+    assert result["created"] == "category" and result["private"] is True
+    assert guild.last_overwrites[guild.default_role].view_channel is False
+    mine = guild.last_overwrites[guild.me]
+    assert mine.view_channel is True and mine.send_messages is True
+
+
+async def test_create_category_with_grants_lets_a_role_in():
+    guild = FakeGuild()
+    admins = guild.add_role("Admins")
+    result = await executors.create_channel(
+        guild,
+        CreateChannelArgs(
+            name="Staff",
+            kind="category",
+            private=True,
+            grants=[ChannelGrant(role="Admins", allow=["view_channel"])],
+        ),
+    )
+    assert result["grants"] == ["Admins"]
+    assert guild.last_overwrites[admins].view_channel is True
+
+
+async def test_create_category_rejects_read_only():
     guild = FakeGuild()
     with pytest.raises(GuardError):
         await executors.create_channel(
-            guild, CreateChannelArgs(name="Media", kind="category", private=True)
+            guild, CreateChannelArgs(name="Media", kind="category", read_only=True)
         )
+
+
+async def test_set_permissions_can_target_a_category():
+    guild = FakeGuild()
+    category = guild.add_category("Admin")
+    result = await executors.set_permissions(
+        guild,
+        SetPermissionsArgs(
+            channel="Admin", overwrites=[Overwrite(target="@everyone", deny=["view_channel"])]
+        ),
+    )
+    assert result["channel"] == "Admin"
+    targets = [target for target, _ in category.perm_calls]
+    assert guild.default_role in targets and guild.me in targets  # @everyone denied, Roger kept
+
+
+async def test_set_permissions_keeps_bot_access_when_hiding_from_everyone():
+    guild = FakeGuild()
+    channel = guild.add_text("secret")
+    result = await executors.set_permissions(
+        guild,
+        SetPermissionsArgs(
+            channel="secret", overwrites=[Overwrite(target="everyone", deny=["view_channel"])]
+        ),
+    )
+    assert any(entry["target"] == "Roger" for entry in result["applied"])
+    me_overwrite = next(ow for target, ow in channel.perm_calls if target is guild.me)
+    assert me_overwrite.view_channel is True and me_overwrite.send_messages is True
+
+
+async def test_set_permissions_self_keyword_resolves_to_the_bot():
+    guild = FakeGuild()
+    channel = guild.add_text("room")
+    await executors.set_permissions(
+        guild,
+        SetPermissionsArgs(
+            channel="room", overwrites=[Overwrite(target="self", allow=["view_channel"])]
+        ),
+    )
+    assert any(target is guild.me for target, _ in channel.perm_calls)
+
+
+async def test_preview_set_permissions_flags_kept_access_when_hiding():
+    guild = FakeGuild()
+    guild.add_text("secret")
+    diff = await executors.preview(
+        "set_permissions",
+        guild,
+        SetPermissionsArgs(
+            channel="secret", overwrites=[Overwrite(target="@everyone", deny=["view_channel"])]
+        ),
+    )
+    assert "Roger" in diff and "kept" in diff
 
 
 async def test_create_channel_confirms_only_when_private():

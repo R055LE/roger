@@ -50,10 +50,12 @@ These hold regardless of what any model outputs. They are the load-bearing part 
 - **§2.8 Confirm-gated mutations.** Every tool that changes *existing* state — `set_permissions`,
   `edit_channel`, `post_message` — requires interactive owner approval against a rendered diff before
   it runs. Creation is exempt by default: `create_channel` / `create_role` add new, empty,
-  zero-permission objects, and setting a brand-new channel's access at creation (`read_only`,
+  zero-permission objects, and setting a brand-new channel or category's access at creation (`read_only`,
   per-role `grants`) has nil blast radius — no members, no history — so it applies immediately.
-  Whenever a creation overwrite restricts @everyone, Roger also grants *itself* an overwrite so it is
-  never locked out of a channel it just made. The **one deliberate exception is
+  Whenever an overwrite hides a channel from @everyone — at creation **or** later via
+  `set_permissions` — Roger also grants *itself* view/send, so it can never lock itself out of a
+  space it manages (@everyone includes the bot); the self-grant shows up in the confirm diff. The
+  **one deliberate exception is
   `create_channel(private=True)`**: hiding a channel is still nil-blast-radius, but it is
   confirm-gated anyway — a hidden channel is a surprising side effect, and keeping the confirm ritual
   consistent for security-relevant actions is worth more than shaving a click. Confirmation can thus

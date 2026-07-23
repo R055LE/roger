@@ -103,19 +103,6 @@ async def list_structure(
 # --------------------------------------------------------------------------- resolution
 
 
-def _resolve_channel(guild: discord.Guild, query: str) -> discord.abc.GuildChannel:
-    items = [
-        (c.id, c.name)
-        for c in guild.channels
-        if isinstance(c, (discord.TextChannel, discord.VoiceChannel))
-    ]
-    channel_id, _ = resolve_one(query, items)
-    channel = guild.get_channel(channel_id)
-    if channel is None:
-        raise GuardError(f"channel {query!r} vanished")
-    return channel
-
-
 def _resolve_editable_channel(guild: discord.Guild, query: str) -> tuple[Any, str]:
     """Resolve a text/voice/category channel and report its kind — no ``isinstance`` needed."""
     buckets = (
@@ -136,6 +123,8 @@ async def _resolve_target(guild: discord.Guild, query: str) -> discord.Role | di
     q = query.strip()
     if q.casefold() in ("@everyone", "everyone"):
         return guild.default_role
+    if q.casefold() in ("self", "me", "yourself", "roger"):
+        return guild.me  # let the owner say "add yourself" and have it reliably mean the bot
     if q.isdigit():
         role = guild.get_role(int(q))
         if role is not None:
@@ -184,12 +173,25 @@ async def create_channel(
     if args.kind == "category":
         if args.category is not None:
             raise GuardError("a category can't be nested under another category")
-        if args.read_only or args.private or args.grants:
-            raise GuardError("permissions can't be set on a category at creation")
+        if args.read_only:
+            raise GuardError("read_only is text-only; hide a whole category with private/grants")
+        if args.topic is not None:
+            raise GuardError("only text channels have a topic")
         name = sanitize_display_name(args.name)
         check_no_duplicate("category", name, [c.name for c in guild.categories])
-        created = await guild.create_category(name=name)
-        return {"created": "category", "id": created.id, "name": created.name}
+        # Categories take overwrites too — a private admin category hides itself and its synced
+        # children from @everyone, and grants let specific roles (and Roger) back in.
+        overwrites = await _creation_overwrites(
+            guild, read_only=False, private=args.private, grants=args.grants
+        )
+        created = await guild.create_category(name=name, overwrites=overwrites)
+        return {
+            "created": "category",
+            "id": created.id,
+            "name": created.name,
+            "private": args.private,
+            "grants": [g.role for g in args.grants],
+        }
 
     category_obj = None
     if args.category is not None:
@@ -260,8 +262,9 @@ async def create_role(
 async def set_permissions(
     guild: discord.Guild, args: SetPermissionsArgs, ctx: ToolContext | None = None
 ) -> dict[str, Any]:
-    channel = _resolve_channel(guild, args.channel)
+    channel, _ = _resolve_editable_channel(guild, args.channel)  # text, voice, or category
     applied: list[dict[str, Any]] = []
+    hides_from_everyone = False
     for overwrite in args.overwrites:
         target = await _resolve_target(guild, overwrite.target)
         permission_overwrite = discord.PermissionOverwrite(
@@ -276,6 +279,14 @@ async def set_permissions(
                 "deny": list(overwrite.deny),
             }
         )
+        if target == guild.default_role and "view_channel" in overwrite.deny:
+            hides_from_everyone = True
+    if hides_from_everyone:
+        # @everyone includes the bot — keep Roger's own access or it locks itself out (§2.8).
+        await channel.set_permissions(
+            guild.me, overwrite=discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        )
+        applied.append({"target": "Roger", "allow": ["view_channel", "send_messages"], "deny": []})
     return {"channel": channel.name, "applied": applied}
 
 
@@ -418,14 +429,19 @@ async def list_feeds(
 async def preview(name: str, guild: discord.Guild, args: Any) -> str:
     """Human-readable diff for a confirm-gated tool. Resolution errors surface before confirming."""
     if name == "set_permissions":
-        channel = _resolve_channel(guild, args.channel)
+        channel, _ = _resolve_editable_channel(guild, args.channel)
         lines = [f"#{channel.name}:"]
+        hides_from_everyone = False
         for overwrite in args.overwrites:
             target = await _resolve_target(guild, overwrite.target)
             tname = getattr(target, "name", str(target))
             allow = ", ".join(overwrite.allow) or "—"
             deny = ", ".join(overwrite.deny) or "—"
             lines.append(f"  {tname}: allow[{allow}] deny[{deny}]")
+            if target == guild.default_role and "view_channel" in overwrite.deny:
+                hides_from_everyone = True
+        if hides_from_everyone:
+            lines.append("  Roger: allow[view_channel, send_messages]  (kept — not locked out)")
         return "\n".join(lines)
     if name == "edit_channel":
         channel, kind = _resolve_editable_channel(guild, args.channel)
