@@ -53,18 +53,19 @@ Each alert is idempotent (dedupe key + cooldown) so a flapping condition can't s
 *Why:* the alerting surface was already built and sitting idle. Cheapest large jump in operational
 awareness on the list, on-brand with the SRE observability lab's alerting work.
 
-### 1.3 Data retention & pruning — **S**
-Every table in `store.py` grows unbounded: `audit`, `ambient_log`, `admin_log`, `seen`. Two problems:
+### 1.3 Data retention & pruning — **S** — *shipped*
+Every table in `store.py` grew unbounded: `audit`, `ambient_log`, `admin_log`, `seen`. Two problems:
 disk creep over years, and `ambient_log` retaining *other users'* message content indefinitely (a
 privacy posture issue, not just hygiene).
 
-- A startup + daily prune: delete `ambient_log` / `admin_log` older than N days (env-tunable, e.g.
-  30), `seen` older than the longest feed's practical re-post window, and cap `audit` by age or row
-  count (audit is the tamper-evident trail — prefer a generous age window over aggressive trimming).
-- `PRAGMA wal_checkpoint` / periodic `VACUUM` so the file actually shrinks.
+- [x] `Store.prune()` deletes past-window rows — `ambient_log`/`admin_log` at 30d, `seen` at 90d,
+      `audit` at 365d (the tamper-evident trail, kept longest) — via a `RETENTION_DAYS` table.
+- [x] Runs at boot and once per calendar day thereafter (`_maybe_prune`, date-guarded, also driven by
+      the watchdog). Idempotent.
+- [x] `PRAGMA wal_checkpoint(TRUNCATE)` + `VACUUM` (with cursors closed first) so the file shrinks.
 
-*Why:* unbounded PII retention is the kind of thing a security reviewer flags on sight, and it's a
-one-file change.
+*Why:* unbounded PII retention is the kind of thing a security reviewer flags on sight; one-file
+change. Retention windows are module constants for now — promote to env/runtime config if needed.
 
 ### 1.4 Liveness: `HEALTHCHECK` + heartbeat — **S**
 The `Dockerfile` has no `HEALTHCHECK`, so a wedged event loop or a gateway that reconnects-forever is
