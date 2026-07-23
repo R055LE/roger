@@ -96,17 +96,19 @@ correct, but almost no signal on a deploy.
 now live, and is it healthy?" is exactly the question a deploy ping should answer. Composes with
 **1.2** (event alerts) and reuses **1.1** (cost).
 
-### 1.5 LLM request timeout + smarter retry — **S**
-`_call_with_one_retry` retries **once**, and only on `APIConnectionError` / `APITimeoutError`. Two
-gaps: (a) no explicit per-request timeout, so a hung call can sit on an already-`defer()`ed
-interaction up to the SDK default; (b) `429` / `5xx` aren't retried at all (OpenRouter's `models`
-array handles *provider* failover, but not an account-level rate limit or a transient gateway 5xx).
+### 1.5 LLM request timeout + smarter retry — **S** — *shipped*
+`_call_with_one_retry` retried **once**, and only on `APIConnectionError` / `APITimeoutError`. Two
+gaps: (a) no explicit per-request timeout, so a hung call could sit on an already-`defer()`ed
+interaction up to the SDK default; (b) `429` / `5xx` weren't retried at all.
 
-- Set an explicit timeout on the client (or per call, tighter for ambient than admin).
-- Add bounded exponential backoff on `429` / `5xx`, honoring `Retry-After` when present.
+- [x] Explicit `timeout=REQUEST_TIMEOUT_S` (60s) on the client — a hung call can't camp on a deferred
+      interaction.
+- [x] `_call_with_retries`: bounded exponential backoff (`MAX_ATTEMPTS=3`) over transport errors,
+      timeouts, `429` (`RateLimitError`), and all `5xx` (`InternalServerError`), honoring a numeric
+      `Retry-After`. Everything else (4xx, config) still fails fast.
 
-*Why:* the current retry is thinner than the module docstring implies, and a deferred admin
-interaction is exactly where a hang is most visible to the owner.
+*Why:* the old retry was thinner than the module docstring implied, and a deferred admin interaction
+is exactly where a hang is most visible to the owner.
 
 ---
 
