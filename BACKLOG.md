@@ -149,21 +149,22 @@ to Docker if it isn't watching the base).
 
 Directly serves the "public AI/ML work + infra bridges" goal.
 
-### 3.1 Prometheus `/metrics` endpoint — **M**
-Structured JSON logs exist, but there's no metrics surface — a notable omission next to a dedicated
-SRE observability lab. Stand up a tiny aiohttp server (bound to the container only) exposing:
+### 3.1 Prometheus `/metrics` endpoint — **M** — *shipped*
+Structured JSON logs existed, but there was no metrics surface — a notable omission next to a
+dedicated SRE observability lab. Now `prometheus_client` serves `/metrics` on `METRICS_PORT` (9108)
+from a background thread; an async 30s loop refreshes the SQLite-sourced gauges (`roger/metrics.py`).
 
-- token **and dollar** spend per brain (from **1.1**), as counters,
-- tool calls by tool × outcome (`ok`/`denied`/`invalid`/`error`),
-- digest runs (success/failure) and items posted,
-- ambient rate-limit rejections (per-user / global),
-- LLM errors by type and `BudgetExceeded` events.
+- [x] Token **and dollar** spend per brain, plus caps, as gauges (from **1.1**).
+- [x] Tool calls by tool × outcome — sourced free from the `audit` table (`roger_audit_events`).
+- [x] LLM requests, errors by type, and budget rejections — in-process counters in `llm.py`.
+- [x] Feed count and `roger_build_info{version}`.
+- [x] Example Prometheus scrape job + importable Grafana dashboard in `deploy/observability/`.
+- [ ] Not yet wired: digest run and ambient rate-limit counters (both are cheap follow-ups at their
+      call sites). The audit table already covers the admin/tool surface.
 
-Doubles as the health target for **1.4**. Ship an example Grafana panel JSON to make the bridge to the
-observability lab legible to a reader.
-
-*Why:* turns Roger into a live exhibit for the SRE lab's dashboards and the clearest single "LLM app +
-production observability" artifact in the portfolio.
+*Why:* turns Roger into a live exhibit for the SRE lab's dashboards — the clearest single "LLM app +
+production observability" artifact in the portfolio. Note: publishing the port on the host is a
+deliberate, confirm-first step (see deploy notes); the repo change alone doesn't expose it.
 
 ### 3.2 Correlation IDs through logs + audit — **S**
 Thread a short request ID from each admin/ambient entry point through the log records and the `audit`

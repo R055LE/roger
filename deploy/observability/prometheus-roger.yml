@@ -1,0 +1,12 @@
+# Prometheus scrape job for Roger's /metrics endpoint (backlog 3.1).
+#
+# Merge this job into your Prometheus config. Point it at the host:port where the container's
+# METRICS_PORT (default 9108) is published — see compose.yaml's `ports:` mapping. Replace the
+# placeholder target with your own host; the public repo carries no real hostnames.
+scrape_configs:
+  - job_name: roger
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["localhost:9108"] # e.g. the Docker host publishing METRICS_PORT
+        labels:
+          app: roger

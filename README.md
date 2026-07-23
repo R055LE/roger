@@ -63,6 +63,26 @@ mkdir -p data
 sops exec-env roger.env 'docker compose up -d'        # pulls the published image
 ```
 
+## Observability
+
+Roger exposes Prometheus metrics on `:${METRICS_PORT}/metrics` (default `9108`; set `METRICS_PORT=0`
+to disable). Event counters — LLM requests, errors, and budget rejections — are incremented in
+process; state gauges — token/dollar spend, caps, feed count, and audit tallies — are refreshed from
+SQLite so they survive restarts. Key series:
+
+| Metric | Type | Labels |
+|---|---|---|
+| `roger_tokens_today` / `roger_tokens_cap` | gauge | `brain` |
+| `roger_cost_usd_today` | gauge | `brain` |
+| `roger_llm_requests_total` / `roger_llm_errors_total` | counter | `brain` (`type`) |
+| `roger_llm_budget_exceeded_total` | counter | `brain` |
+| `roger_audit_events` | gauge | `tool`, `status` |
+| `roger_feeds`, `roger_build_info` | gauge | — (`version`) |
+
+A ready-to-merge Prometheus scrape job and an importable Grafana dashboard live in
+[`deploy/observability/`](deploy/observability/) — the bridge to the
+[`sre-observability-lab`](https://github.com/R055LE/sre-observability-lab).
+
 ## Development
 
 ```bash
