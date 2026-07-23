@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
@@ -42,6 +43,12 @@ CONFIRM_TIMEOUT = 120
 # ROGER_VERSION). It's image metadata, not host-injected config, so it's read straight from the
 # environment rather than through Settings/compose. Defaults to "dev" for local runs.
 ROGER_VERSION = os.getenv("ROGER_VERSION", "dev")
+
+# Ops watchdog (§ backlog 1.2): a periodic health sweep pushes deduped alerts to the ops channel.
+WATCHDOG_INTERVAL_MIN = 10
+BUDGET_ALERT_FRACTION = 0.8  # warn once a brain crosses this share of its daily token cap
+_DAY_S = 24 * 3600  # budget/digest alerts: at most one per day (naturally re-armed by the date key)
+_PERM_ALERT_COOLDOWN_S = 6 * 3600  # a missing scope re-reminds every 6h while it stays broken
 
 
 # --------------------------------------------------------------------------- logging
@@ -175,6 +182,15 @@ def _missing_permissions(perms: discord.Permissions) -> list[str]:
 _BRAINS = ("admin", "ambient", "digest")
 
 
+def _daily_caps(settings: Settings) -> dict[str, int]:
+    """Per-brain daily token caps, keyed by brain (shared by /status and the watchdog)."""
+    return {
+        "admin": settings.daily_tokens_admin,
+        "ambient": settings.daily_tokens_ambient,
+        "digest": settings.daily_tokens_digest,
+    }
+
+
 def _boot_header(version: str, missing: list[str]) -> str:
     """Header of the boot self-report (pure): health glyph + the deployed build.
 
@@ -247,11 +263,7 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
     )
     usage = {brain: await store.usage_today(brain) for brain in _BRAINS}
     cost = {brain: await store.cost_today(brain) for brain in _BRAINS}
-    caps = {
-        "admin": settings.daily_tokens_admin,
-        "ambient": settings.daily_tokens_ambient,
-        "digest": settings.daily_tokens_digest,
-    }
+    caps = _daily_caps(settings)
     return _format_status(
         guild_name=guild_name,
         missing_perms=missing,
@@ -264,6 +276,62 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         digest_configured=settings.digest_channel_id is not None,
         tz=settings.tz,
     )
+
+
+# --------------------------------------------------------------------------- ops alerting
+
+
+class OpsNotifier:
+    """Dedupes ops-channel alerts so a persistent condition pings once per cooldown, not every tick.
+
+    State is in-memory only. A restart re-arms every key, which is fine: startup re-evaluates live
+    state and the boot self-report already re-announces health, so nothing is silently lost.
+    """
+
+    def __init__(
+        self,
+        send: Callable[[str], Awaitable[Any]],
+        *,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._send = send
+        self._clock = clock
+        self._last: dict[str, float] = {}
+
+    async def alert(self, key: str, message: str, *, cooldown_s: float) -> bool:
+        """Post the message unless this key already fired within its cooldown window."""
+        now = self._clock()
+        last = self._last.get(key)
+        if last is not None and now - last < cooldown_s:
+            return False
+        # Mark before send; _post_ops swallows its own failures and never raises.
+        self._last[key] = now
+        await self._send(message)
+        return True
+
+
+def _budget_alert(
+    brain: str, used: int, cap: int, cost: float, *, fraction: float = BUDGET_ALERT_FRACTION
+) -> str | None:
+    """Alert text when ``brain`` crosses ``fraction`` of its daily token cap, else None (pure)."""
+    if cap <= 0 or used < fraction * cap:
+        return None
+    tokens = f"{used:,} / {cap:,} tokens today (${cost:.4f})"
+    if used >= cap:
+        return f"⚠️ **{brain} budget exhausted** — {tokens}. Calls refused until the daily reset."
+    pct = round(100 * used / cap)
+    return f"⚠️ **{brain} budget {pct}%** — {tokens}. Approaching the daily cap."
+
+
+# Digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops ping.
+_DIGEST_OK_PREFIXES = ("posted", "no new items")
+
+
+def _digest_problem(status: str) -> str | None:
+    """The digest status if it signals a problem worth alerting on, else None (pure)."""
+    if any(status.startswith(prefix) for prefix in _DIGEST_OK_PREFIXES):
+        return None
+    return status
 
 
 # --------------------------------------------------------------------------- client
@@ -284,6 +352,7 @@ class RogerClient(discord.Client):
             settings.ambient_global_hourly,
         )
         self._perms_checked = False
+        self._ops = OpsNotifier(self._post_ops)
 
     async def setup_hook(self) -> None:
         self._assert_non_privileged()
@@ -305,6 +374,10 @@ class RogerClient(discord.Client):
             log.info(
                 "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
             )
+        # The watchdog only earns its keep when there's an ops channel to post alerts to.
+        if self.settings.ops_channel_id is not None:
+            self._watchdog.start()
+            log.info("ops watchdog started (every %d min)", WATCHDOG_INTERVAL_MIN)
 
     def _assert_non_privileged(self) -> None:
         i = self.intents
@@ -419,10 +492,47 @@ class RogerClient(discord.Client):
         result = await run_digest_job(
             client=self, settings=self.settings, llm=self.llm, store=self.store
         )
-        log.info("scheduled digest: %s", result.get("status"))
+        status = str(result.get("status", ""))
+        log.info("scheduled digest: %s", status)
+        problem = _digest_problem(status)
+        if problem:
+            await self._ops.alert(
+                f"digest:{time.strftime('%Y-%m-%d')}",
+                f"⚠️ **digest problem** — {problem}",
+                cooldown_s=_DAY_S,
+            )
 
     @_digest_loop.before_loop
     async def _before_digest(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(minutes=WATCHDOG_INTERVAL_MIN)
+    async def _watchdog(self) -> None:
+        """Periodic health sweep → deduped ops alerts: permission loss and budget thresholds."""
+        guild = self.get_guild(self.settings.guild_id)
+        if guild is not None and guild.me is not None:
+            missing = _missing_permissions(guild.me.guild_permissions)
+            if missing:
+                await self._ops.alert(
+                    f"perms:{','.join(sorted(missing))}",
+                    f"⚠️ **permission loss** — missing **{', '.join(missing)}**; "
+                    "re-invite per `deploy/README.md`.",
+                    cooldown_s=_PERM_ALERT_COOLDOWN_S,
+                )
+        caps = _daily_caps(self.settings)
+        today = time.strftime("%Y-%m-%d")
+        for brain in _BRAINS:
+            message = _budget_alert(
+                brain,
+                await self.store.usage_today(brain),
+                caps[brain],
+                await self.store.cost_today(brain),
+            )
+            if message:
+                await self._ops.alert(f"budget:{brain}:{today}", message, cooldown_s=_DAY_S)
+
+    @_watchdog.before_loop
+    async def _before_watchdog(self) -> None:
         await self.wait_until_ready()
 
 
