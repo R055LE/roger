@@ -70,6 +70,24 @@ class SetPermissionsArgs(ToolArgs):
     overwrites: list[Overwrite] = Field(min_length=1, max_length=10)
 
 
+class EditChannelArgs(ToolArgs):
+    channel: str  # existing channel: name or id
+    name: str | None = None  # new name (optional)
+    topic: str | None = None  # new topic — text channels only (optional)
+    category: str | None = None  # move under this category: name or id (optional)
+
+    @model_validator(mode="after")
+    def _at_least_one_change(self) -> EditChannelArgs:
+        if self.name is None and self.topic is None and self.category is None:
+            raise ValueError("specify at least one of: name, topic, category")
+        return self
+
+
+class PostMessageArgs(ToolArgs):
+    channel: str  # target text channel: name or id
+    content: str = Field(min_length=1, max_length=2000)  # body; mass mentions always suppressed
+
+
 class RunDigestArgs(ToolArgs):
     """No arguments — triggers the digest job immediately."""
 
@@ -127,6 +145,26 @@ REGISTRY: dict[str, ToolSpec] = {
             "confirm the exact change before it is applied."
         ),
         args_model=SetPermissionsArgs,
+        requires_confirm=True,
+    ),
+    "edit_channel": ToolSpec(
+        name="edit_channel",
+        description=(
+            "Rename an existing channel, change a text channel's topic, and/or move a channel "
+            "into a category. Metadata only — it cannot delete a channel and cannot change "
+            "permissions (use set_permissions for those). The owner must confirm the change first."
+        ),
+        args_model=EditChannelArgs,
+        requires_confirm=True,
+    ),
+    "post_message": ToolSpec(
+        name="post_message",
+        description=(
+            "Post a message as Roger into a text channel. Mass mentions (@everyone, @here, and "
+            "role pings) are always suppressed. The owner must confirm the exact channel and "
+            "text before it is sent."
+        ),
+        args_model=PostMessageArgs,
         requires_confirm=True,
     ),
     "run_digest": ToolSpec(

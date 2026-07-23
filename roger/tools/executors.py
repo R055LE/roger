@@ -26,8 +26,10 @@ from roger.tools.schemas import (
     AddFeedArgs,
     CreateChannelArgs,
     CreateRoleArgs,
+    EditChannelArgs,
     ListFeedsArgs,
     ListStructureArgs,
+    PostMessageArgs,
     RemoveFeedArgs,
     RunDigestArgs,
     SetPermissionsArgs,
@@ -114,6 +116,22 @@ def _resolve_channel(guild: discord.Guild, query: str) -> discord.abc.GuildChann
     return channel
 
 
+def _resolve_editable_channel(guild: discord.Guild, query: str) -> tuple[Any, str]:
+    """Resolve a text/voice/category channel and report its kind — no ``isinstance`` needed."""
+    buckets = (
+        ("text", guild.text_channels),
+        ("voice", guild.voice_channels),
+        ("category", guild.categories),
+    )
+    items = [(c.id, c.name) for _, collection in buckets for c in collection]
+    channel_id, _ = resolve_one(query, items)
+    for kind, collection in buckets:
+        for channel in collection:
+            if channel.id == channel_id:
+                return channel, kind
+    raise GuardError(f"channel {query!r} vanished")
+
+
 async def _resolve_target(guild: discord.Guild, query: str) -> discord.Role | discord.Member:
     q = query.strip()
     if q.casefold() in ("@everyone", "everyone"):
@@ -159,6 +177,11 @@ async def create_channel(
         if args.read_only:
             # New channel, blast radius nil — applied at creation without a confirm (§2.8).
             overwrites[guild.default_role] = discord.PermissionOverwrite(send_messages=False)
+            # @everyone includes the bot: without this, Roger locks *itself* out of a channel it
+            # just made read-only, and post_message/the digest couldn't reach it. Keep our access.
+            overwrites[guild.me] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True
+            )
         created = await guild.create_text_channel(
             name=name, category=category_obj, topic=args.topic, overwrites=overwrites
         )
@@ -223,6 +246,54 @@ async def set_permissions(
             }
         )
     return {"channel": channel.name, "applied": applied}
+
+
+async def edit_channel(
+    guild: discord.Guild, args: EditChannelArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    channel, kind = _resolve_editable_channel(guild, args.channel)
+    changes: dict[str, Any] = {}
+    result: dict[str, Any] = {"channel": channel.name, "kind": kind}
+
+    if args.name is not None:
+        if kind == "text":
+            new_name = sanitize_channel_name(args.name)
+            pool = [c.name for c in guild.text_channels if c.id != channel.id]
+        else:
+            new_name = sanitize_display_name(args.name)
+            source = guild.voice_channels if kind == "voice" else guild.categories
+            pool = [c.name for c in source if c.id != channel.id]
+        check_no_duplicate("category" if kind == "category" else f"{kind} channel", new_name, pool)
+        changes["name"] = new_name
+        result["name"] = new_name
+
+    if args.topic is not None:
+        if kind != "text":
+            raise GuardError("only text channels have a topic")
+        changes["topic"] = args.topic
+        result["topic"] = args.topic
+
+    if args.category is not None:
+        if kind == "category":
+            raise GuardError("a category can't be nested under another category")
+        cat_id, cat_name = resolve_one(args.category, [(c.id, c.name) for c in guild.categories])
+        changes["category"] = guild.get_channel(cat_id)
+        result["category"] = cat_name
+
+    await channel.edit(**changes)
+    result["edited"] = True
+    return result
+
+
+async def post_message(
+    guild: discord.Guild, args: PostMessageArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    channel, kind = _resolve_editable_channel(guild, args.channel)
+    if kind != "text":
+        raise GuardError("can only post to a text channel")
+    # Suppress @everyone/@here and role/user pings — Roger never mass-mentions for the owner.
+    await channel.send(args.content, allowed_mentions=discord.AllowedMentions.none())
+    return {"posted": True, "channel": channel.name, "chars": len(args.content)}
 
 
 async def run_digest(
@@ -325,6 +396,25 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
             deny = ", ".join(overwrite.deny) or "—"
             lines.append(f"  {tname}: allow[{allow}] deny[{deny}]")
         return "\n".join(lines)
+    if name == "edit_channel":
+        channel, kind = _resolve_editable_channel(guild, args.channel)
+        lines = [f"#{channel.name}:"]
+        if args.name is not None:
+            new = sanitize_channel_name(args.name) if kind == "text" else sanitize_display_name(
+                args.name
+            )
+            lines.append(f"  name: {channel.name} → {new}")
+        if args.topic is not None:
+            lines.append(f"  topic: {getattr(channel, 'topic', None) or '—'} → {args.topic}")
+        if args.category is not None:
+            _, cat_name = resolve_one(args.category, [(c.id, c.name) for c in guild.categories])
+            current = getattr(channel, "category", None)
+            lines.append(f"  category: {current.name if current else '—'} → {cat_name}")
+        return "\n".join(lines)
+    if name == "post_message":
+        channel, _ = _resolve_editable_channel(guild, args.channel)
+        body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
+        return f"post to #{channel.name}:\n{body}"
     return name
 
 
@@ -333,6 +423,8 @@ EXECUTORS = {
     "create_channel": create_channel,
     "create_role": create_role,
     "set_permissions": set_permissions,
+    "edit_channel": edit_channel,
+    "post_message": post_message,
     "run_digest": run_digest,
     "suggest_feeds": suggest_feeds,
     "add_feed": add_feed,

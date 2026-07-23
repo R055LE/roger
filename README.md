@@ -26,7 +26,8 @@ Security is structural, not prompt-deep:
 - **Owner-gated.** Admin actions require `user.id == OWNER_ID`, checked before a single token is
   spent. Everyone else gets a canned reply and an audit row.
 - **Least privilege.** Never requests Administrator. Roles it creates always have zero permissions;
-  access is granted through channel overwrites. No delete/rename/edit tools exist.
+  access is granted through channel overwrites. No delete, kick, ban, or purge tools exist — Roger
+  creates and adjusts, never destroys, and every change to existing state is owner-confirmed.
 - **Budgeted.** Per-brain daily token caps and a hard cap on tool calls per request.
 - **No secrets in git — ever, not even encrypted.** Secrets live in a `sops`+`age`-encrypted
   `roger.env` on the host; the repo carries only `.sops.yaml` and `roger.env.example`.
@@ -77,16 +78,18 @@ Feature-complete across the planned phases:
 
 - **Admin** — owner-gated via `/roger`, DM, or @mention, with short per-channel conversation
   memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`,
-  confirm-gated `set_permissions`, and feed curation (`suggest_feeds`, `add_feed`, `remove_feed`,
-  `list_feeds`); per-request tool and daily token budgets; a full SQLite audit trail.
+  confirm-gated `set_permissions` / `edit_channel` / `post_message`, and feed curation
+  (`suggest_feeds`, `add_feed`, `remove_feed`, `list_feeds`); per-request tool and daily token
+  budgets; a full SQLite audit trail.
 - **Ambient** — deadpan chat via `/chat` or any non-owner @mention/DM, rate-limited per user +
   globally, with a short own-thread memory. No tools, ever.
 - **Digest** — a scheduled daily RSS/Atom summary (also triggerable via `/roger run the digest
   now`), deduped so nothing posts twice. Roger curates its own feed list: `DIGEST_FEEDS` seeds it
   once, then Roger validates candidates against the live web and adds or drops them on request.
 
-Runs as a non-root, read-only-rootfs container. ~70 tests cover the guard rules, the tool loop, the
-rate limiter, and the digest and feed-curation paths.
+Runs as a non-root, read-only-rootfs container. ~80 tests cover the guard rules, the tool loop
+(including the confirm-gated edit and post tools), the rate limiter, and the digest and
+feed-curation paths.
 
 ## License
 

@@ -31,20 +31,30 @@ These hold regardless of what any model outputs. They are the load-bearing part 
   exactly one server and ignores everything else.
 - **§2.3 Owner gate before spend.** Admin actions require `user.id == OWNER_ID`, checked *before*
   any LLM dispatch — a non-owner costs zero tokens and gets a canned reply plus an audit row.
-- **§2.4 Least privilege.** Roger never requests Administrator. It only holds the scopes its tools
-  need (manage channels/roles).
-- **§2.5 No destructive tools.** There is no delete, rename, or edit tool. The tool surface is
-  create-only plus channel-scoped permission overwrites — the blast radius is bounded by what
-  doesn't exist.
+- **§2.4 Least privilege.** Roger never requests Administrator. The bot is invited with exactly the
+  scopes its tools need — View Channels, Manage Channels, Manage Roles, Send Messages, Embed Links
+  (the invite permission integer and the reasoning are in [`deploy/`](deploy/README.md)). `Manage
+  Roles` is broad at the Discord layer, but the *expressible* actions are bounded at the tool layer:
+  roles are always created with zero permissions (§2.6) and channel overwrites are drawn from a
+  fixed allowlist (§2.7), so the gateway permission is far wider than anything Roger can actually do.
+- **§2.5 No destructive or escalating tools.** Nothing Roger can do is irreversible: there is no
+  delete, kick, ban, or bulk-purge tool anywhere in the surface. Roger *creates*, and it *adjusts*
+  existing state — renaming a channel, editing a topic, moving it under a category, setting channel
+  overwrites, posting a message — but every adjustment is reversible and confirm-gated (§2.8). The
+  blast radius is bounded by what simply doesn't exist: no tool destroys anything.
 - **§2.6 Roles are created with zero permissions.** `create_role` always passes
   `Permissions.none()`; access is granted through channel overwrites, never role permissions.
 - **§2.7 Permission allowlist.** Only a fixed set of overwrite bits is expressible through the
   tool schema (§7). Anything outside the allowlist is *unrepresentable* — the model literally
   cannot ask for it.
-- **§2.8 Confirm-gated mutations.** `set_permissions` requires interactive owner approval against a
-  rendered diff. The one exception is making a **brand-new** channel read-only at creation
-  (`create_channel(read_only=True)`): the channel has no members and no history, so its blast
-  radius is nil and it applies without a confirm.
+- **§2.8 Confirm-gated mutations to existing state.** Every tool that touches *existing* state —
+  `set_permissions`, `edit_channel`, and `post_message` — requires interactive owner approval
+  against a rendered diff before it runs. Creation tools (`create_channel`, `create_role`) apply
+  without a confirm because they only add new, empty, zero-permission objects. The one creation-time
+  overwrite that touches @everyone — making a **brand-new** channel read-only
+  (`create_channel(read_only=True)`) — still applies without a confirm because the channel has no
+  members or history, so its blast radius is nil; Roger also grants *itself* an overwrite there so it
+  is never locked out of a channel it just restricted.
 - **§2.9 Budgets.** A hard cap of **5 tool calls per request** (`MAX_TOOL_CALLS`) and **8 model
   round-trips** (`MAX_TURNS`), plus per-brain **daily token caps** (§11) checked before every call.
 - **§2.10 No secrets in git — ever, not even encrypted.** Secrets live only in a `sops`+`age`
@@ -129,6 +139,8 @@ Registry:
 | `create_channel` | yes | no (read-only-at-creation is §2.8) |
 | `create_role` | yes | no (always zero-perm, §2.6) |
 | `set_permissions` | yes | **yes** (§2.8) |
+| `edit_channel` | yes (rename/topic/move — never delete) | **yes** (§2.8) |
+| `post_message` | side effect (mass mentions suppressed) | **yes** (§2.8) |
 | `run_digest` | side effect | no |
 | `list_feeds` | no | — |
 | `suggest_feeds` | no (validates only) | — |

@@ -27,6 +27,34 @@ push to main ──▶ GitHub Actions ──▶ ghcr.io/r055le/roger:main
 | `roger-deploy.service` / `.timer` | systemd oneshot + 5-minute poll timer. |
 | `install-systemd.sh` | Install the above and enable the timer (runs the deploy as the invoking user). |
 
+## Inviting the bot
+
+Roger needs a Discord application + bot user (Developer Portal → your app). Two things must be set
+correctly, both in service of least privilege (ARCHITECTURE §2.4):
+
+**Gateway intents — all privileged intents OFF.** In the portal's *Bot* tab, leave **Message
+Content**, **Server Members**, and **Presence** disabled. Roger asserts this at startup and refuses
+to run if any is on.
+
+**Invite with only the permissions the tools use — never Administrator.** Use OAuth2 → URL Generator
+with scopes `bot` and `applications.commands`, and tick exactly:
+
+| Permission | Why |
+|---|---|
+| View Channels | read the structure it manages |
+| Manage Channels | create and edit channels |
+| Manage Roles | create (zero-perm) roles and set channel overwrites |
+| Send Messages | post the digest, and `post_message` |
+| Embed Links | the digest is posted as an embed |
+
+That checklist is permission integer **`268454928`**. `Manage Roles` is the broad one — but Roger
+only ever creates zero-permission roles and applies overwrites from a fixed allowlist, so the tool
+surface is far narrower than the gateway grant (ARCHITECTURE §2.6, §2.7). Do **not** grant
+Administrator; nothing Roger does needs it.
+
+**Role hierarchy.** Discord only lets a bot manage roles/channels *below* its own top role, and only
+grant permissions it holds. Drag Roger's role up so it sits above anything it needs to touch.
+
 ## First-time provision
 
 Run from a checkout, against a host you can reach over SSH. Set `HOST` to that host.

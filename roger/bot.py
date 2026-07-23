@@ -80,7 +80,7 @@ def _strip_mentions(content: str) -> str:
 
 
 class _ConfirmView(discord.ui.View):
-    """Owner-only ✅/❌ buttons for a permission change. Timeout counts as a deny."""
+    """Owner-only ✅/❌ buttons for a pending change. Timeout counts as a deny."""
 
     def __init__(self, owner_id: int) -> None:
         super().__init__(timeout=CONFIRM_TIMEOUT)
@@ -111,7 +111,7 @@ def _make_confirmer(
 ) -> Callable[[str], Awaitable[bool]]:
     async def confirm(diff: str) -> bool:
         view = _ConfirmView(owner_id)
-        await send(content=f"**Confirm permission change:**\n```\n{diff}\n```", view=view)
+        await send(content=f"**Confirm this change:**\n```\n{diff}\n```", view=view)
         await view.wait()  # returns on click or timeout
         return bool(view.value)  # None (timeout) -> False
 

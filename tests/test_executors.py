@@ -13,7 +13,9 @@ from roger.tools.schemas import (
     AddFeedArgs,
     CreateChannelArgs,
     CreateRoleArgs,
+    EditChannelArgs,
     ListFeedsArgs,
+    PostMessageArgs,
     RemoveFeedArgs,
     SuggestFeedsArgs,
 )
@@ -26,6 +28,26 @@ class FakeRole:
         self.permissions = SimpleNamespace(value=permissions_value)
 
 
+class FakeChannel:
+    """A text/voice/category channel that records edits and (for text) sent messages."""
+
+    def __init__(self, cid, name, *, category=None, topic=None):
+        self.id = cid
+        self.name = name
+        self.category = category
+        self.topic = topic
+        self.edited = None
+        self.sent = []
+
+    async def edit(self, **changes):
+        self.edited = changes
+        for key, value in changes.items():
+            setattr(self, key, value)
+
+    async def send(self, content, allowed_mentions=None):
+        self.sent.append(SimpleNamespace(content=content, allowed_mentions=allowed_mentions))
+
+
 class FakeGuild:
     def __init__(self):
         self.roles = [FakeRole(0, "@everyone")]
@@ -34,10 +56,27 @@ class FakeGuild:
         self.voice_channels = []
         self._next_id = 1000
         self.last_overwrites = None
+        self.me = FakeRole(1, "Roger")  # the bot's own member (guild.me); hashable overwrite key
 
     @property
     def default_role(self):
         return self.roles[0]
+
+    def get_channel(self, channel_id):
+        for channel in (*self.categories, *self.text_channels, *self.voice_channels):
+            if channel.id == channel_id:
+                return channel
+        return None
+
+    def add_text(self, name, *, category=None, topic=None):
+        channel = FakeChannel(self._id(), name, category=category, topic=topic)
+        self.text_channels.append(channel)
+        return channel
+
+    def add_category(self, name):
+        category = FakeChannel(self._id(), name)
+        self.categories.append(category)
+        return category
 
     def _id(self):
         self._next_id += 1
@@ -86,6 +125,9 @@ async def test_create_readonly_text_channel_denies_send_for_everyone():
     overwrite = guild.last_overwrites[guild.default_role]
     assert isinstance(overwrite, discord.PermissionOverwrite)
     assert overwrite.send_messages is False
+    # ...but Roger keeps its own access, or it would lock itself out of the channel it just made.
+    mine = guild.last_overwrites[guild.me]
+    assert mine.view_channel is True and mine.send_messages is True
 
 
 async def test_create_plain_text_channel_has_no_overwrites():
@@ -100,6 +142,90 @@ async def test_create_category_cannot_be_nested():
         await executors.create_channel(
             guild, CreateChannelArgs(name="Media", kind="category", category="Other")
         )
+
+
+# --------------------------------------------------------------------------- edit_channel / post
+
+async def test_edit_channel_renames_and_slugs_text():
+    guild = FakeGuild()
+    channel = guild.add_text("general")
+    result = await executors.edit_channel(
+        guild, EditChannelArgs(channel="general", name="The Lobby")
+    )
+    assert result["name"] == "the-lobby"  # text names are slugged
+    assert channel.edited == {"name": "the-lobby"}
+
+
+async def test_edit_channel_moves_into_category():
+    guild = FakeGuild()
+    channel = guild.add_text("podcast")
+    media = guild.add_category("Media")
+    result = await executors.edit_channel(
+        guild, EditChannelArgs(channel="podcast", category="Media")
+    )
+    assert result["category"] == "Media"
+    assert channel.edited["category"] is media
+
+
+async def test_edit_channel_rejects_topic_on_non_text():
+    guild = FakeGuild()
+    guild.voice_channels.append(FakeChannel(guild._id(), "Lounge"))
+    with pytest.raises(GuardError):
+        await executors.edit_channel(guild, EditChannelArgs(channel="Lounge", topic="nope"))
+
+
+async def test_edit_channel_rejects_duplicate_rename():
+    guild = FakeGuild()
+    guild.add_text("general")
+    guild.add_text("random")
+    with pytest.raises(GuardError):
+        await executors.edit_channel(guild, EditChannelArgs(channel="random", name="general"))
+
+
+async def test_edit_channel_requires_at_least_one_change():
+    with pytest.raises(ValueError):  # pydantic model validator
+        EditChannelArgs(channel="general")
+
+
+async def test_edit_channel_unknown_channel_errors():
+    guild = FakeGuild()
+    with pytest.raises(GuardError):
+        await executors.edit_channel(guild, EditChannelArgs(channel="ghost", name="x"))
+
+
+async def test_post_message_sends_with_mentions_suppressed():
+    guild = FakeGuild()
+    channel = guild.add_text("announcements")
+    result = await executors.post_message(
+        guild, PostMessageArgs(channel="announcements", content="@everyone hi")
+    )
+    assert result == {"posted": True, "channel": "announcements", "chars": len("@everyone hi")}
+    sent = channel.sent[0]
+    assert sent.content == "@everyone hi"
+    # The raw text may contain @everyone, but AllowedMentions.none() means nobody is pinged.
+    mentions = sent.allowed_mentions
+    assert mentions.everyone is False and mentions.roles is False and mentions.users is False
+
+
+async def test_post_message_rejects_non_text_channel():
+    guild = FakeGuild()
+    guild.voice_channels.append(FakeChannel(guild._id(), "Lounge"))
+    with pytest.raises(GuardError):
+        await executors.post_message(guild, PostMessageArgs(channel="Lounge", content="hi"))
+
+
+async def test_preview_renders_edit_and_post():
+    guild = FakeGuild()
+    guild.add_text("general", topic="old topic")
+    guild.add_text("announcements")
+    edit_diff = await executors.preview(
+        "edit_channel", guild, EditChannelArgs(channel="general", name="Chat", topic="new topic")
+    )
+    assert "name: general → chat" in edit_diff and "topic: old topic → new topic" in edit_diff
+    post_diff = await executors.preview(
+        "post_message", guild, PostMessageArgs(channel="announcements", content="ship it")
+    )
+    assert "post to #announcements" in post_diff and "ship it" in post_diff
 
 
 # --------------------------------------------------------------------------- digest feed tools
