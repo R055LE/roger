@@ -72,6 +72,21 @@ invisible to Docker and the systemd deploy unit — the container stays "up" whi
 *Why:* "the container is running" and "the bot is working" are different claims; right now only the
 first is observable.
 
+### 1.6 Enrich the boot self-report — **S** — *shipped*
+The boot report was a bare line ("✅ roger online — <guild>. All required permissions present.") —
+correct, but almost no signal on a deploy.
+
+- [x] Reuse the `gather_status` readout as the report body, so every deploy pushes a full snapshot
+      (permissions · token/dollar spend · digest schedule · feeds · recent actions) instead of one
+      line. *(364ce44)*
+- [x] Add deployed **build identity** to the header — a `ROGER_VERSION` baked into the image at build
+      time (Dockerfile `ARG` ← `github.sha`), read as image metadata (not Settings/compose), so the
+      report answers "which build just came up?" — the one thing `/status` can't. *(364ce44)*
+
+*Why:* the ops channel is a deploy-notification surface; on a pull-based CD pipeline "what version is
+now live, and is it healthy?" is exactly the question a deploy ping should answer. Composes with
+**1.2** (event alerts) and reuses **1.1** (cost).
+
 ### 1.5 LLM request timeout + smarter retry — **S**
 `_call_with_one_retry` retries **once**, and only on `APIConnectionError` / `APITimeoutError`. Two
 gaps: (a) no explicit per-request timeout, so a hung call can sit on an already-`defer()`ed
