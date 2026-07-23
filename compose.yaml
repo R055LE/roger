@@ -30,6 +30,7 @@ services:
       DIGEST_FEEDS: ${DIGEST_FEEDS:-}
       DIGEST_CHANNEL_ID: ${DIGEST_CHANNEL_ID:-}
       DIGEST_HOUR: ${DIGEST_HOUR:-8}
+      OPS_CHANNEL_ID: ${OPS_CHANNEL_ID:-}
       TZ: ${TZ:-America/Detroit}
       DB_PATH: ${DB_PATH:-/data/roger.db}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
