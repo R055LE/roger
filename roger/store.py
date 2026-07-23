@@ -173,6 +173,13 @@ class Store:
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
 
+    async def audit_tally(self) -> list[dict[str, Any]]:
+        """Audit rows grouped by (tool, status) — feeds the `roger_audit_events` metric."""
+        cursor = await self._conn.execute(
+            "SELECT tool, status, COUNT(*) AS count FROM audit GROUP BY tool, status"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
     async def journal_mode(self) -> str:
         cursor = await self._conn.execute("PRAGMA journal_mode")
         row = await cursor.fetchone()

@@ -21,6 +21,7 @@ from openai import (
     RateLimitError,
 )
 
+from roger import metrics
 from roger.config import Settings
 from roger.store import Store
 
@@ -98,6 +99,7 @@ class LLM:
         used = await self._store.usage_today(brain)
         cap = self._caps[brain]
         if used >= cap:
+            metrics.LLM_BUDGET_EXCEEDED.labels(brain).inc()
             raise BudgetExceeded(brain, used, cap)
 
         extra_body: dict[str, Any] = {"models": chain}
@@ -115,7 +117,12 @@ class LLM:
         if tools:
             kwargs["tools"] = tools
 
-        response = await self._call_with_retries(kwargs)
+        metrics.LLM_REQUESTS.labels(brain).inc()
+        try:
+            response = await self._call_with_retries(kwargs)
+        except Exception as exc:
+            metrics.LLM_ERRORS.labels(brain, type(exc).__name__).inc()
+            raise
 
         usage = getattr(response, "usage", None)
         if usage is not None:

@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # where Roger posts its boot self-report; None disables the report (logs still fire).
     ops_channel_id: int | None = None
 
+    # --- observability ---
+    # Prometheus /metrics port (bound inside the container); 0 disables the endpoint.
+    metrics_port: int = 9108
+
     # --- runtime ---
     tz: str = "America/Detroit"
     db_path: str = "/data/roger.db"

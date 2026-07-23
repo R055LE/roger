@@ -25,6 +25,7 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 
+from roger import metrics
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
 from roger.brains.digest import run_digest_job, seed_feeds_if_empty
@@ -48,6 +49,9 @@ ROGER_VERSION = os.getenv("ROGER_VERSION", "dev")
 # Liveness (§ backlog 1.4): the heartbeat loop refreshes HEARTBEAT_PATH; the Dockerfile HEALTHCHECK
 # reads it via `python -m roger.health`. Kept well under health.MAX_AGE_S so a beat can be missed.
 HEARTBEAT_INTERVAL_S = 60
+
+# Metrics (§ backlog 3.1): how often the SQLite-sourced gauges are refreshed for Prometheus.
+METRICS_REFRESH_S = 30
 
 # Ops watchdog (§ backlog 1.2): a periodic health sweep pushes deduped alerts to the ops channel.
 WATCHDOG_INTERVAL_MIN = 10
@@ -365,6 +369,7 @@ class RogerClient(discord.Client):
         self._perms_checked = False
         self._ops = OpsNotifier(self._post_ops)
         self._last_prune_date: str | None = None
+        self._metrics_server: Any = None
 
     async def setup_hook(self) -> None:
         self._assert_non_privileged()
@@ -377,6 +382,10 @@ class RogerClient(discord.Client):
             log.info("seeded %d feed(s) from DIGEST_FEEDS into the store", seeded)
         await self._maybe_prune()  # tidy expired rows on boot; the watchdog repeats it daily
         self._heartbeat.start()  # liveness for the Dockerfile HEALTHCHECK (always on)
+        if self.settings.metrics_port:
+            self._metrics_server = metrics.start_server(self.settings.metrics_port)
+            await metrics.refresh(self.store, self.settings, ROGER_VERSION)
+            self._metrics_refresh.start()
         # Start the daily loop whenever a channel is configured — Roger can curate feeds at runtime.
         if self.settings.digest_channel_id is not None:
             self._digest_loop.change_interval(
@@ -566,6 +575,21 @@ class RogerClient(discord.Client):
     @_heartbeat.before_loop
     async def _before_heartbeat(self) -> None:
         await self.wait_until_ready()
+
+    @tasks.loop(seconds=METRICS_REFRESH_S)
+    async def _metrics_refresh(self) -> None:
+        await metrics.refresh(self.store, self.settings, ROGER_VERSION)
+
+    @_metrics_refresh.before_loop
+    async def _before_metrics_refresh(self) -> None:
+        await self.wait_until_ready()
+
+    async def close(self) -> None:
+        # Stop the metrics WSGI thread before the loop tears down; then hand off to discord.py.
+        if self._metrics_server is not None:
+            self._metrics_server.shutdown()
+            self._metrics_server = None
+        await super().close()
 
 
 def _register_commands(client: RogerClient) -> None:

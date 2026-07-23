@@ -10,6 +10,9 @@ services:
       - /tmp
     volumes:
       - ./data:/data
+    ports:
+      # Prometheus /metrics (backlog 3.1). Drop this mapping if METRICS_PORT=0 (endpoint disabled).
+      - "${METRICS_PORT:-9108}:${METRICS_PORT:-9108}"
     environment:
       # Secrets are injected from the process env by `sops exec-env` — never hard-coded here.
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set via sops exec-env}
@@ -31,6 +34,7 @@ services:
       DIGEST_CHANNEL_ID: ${DIGEST_CHANNEL_ID:-}
       DIGEST_HOUR: ${DIGEST_HOUR:-8}
       OPS_CHANNEL_ID: ${OPS_CHANNEL_ID:-}
+      METRICS_PORT: ${METRICS_PORT:-9108}
       TZ: ${TZ:-America/Detroit}
       DB_PATH: ${DB_PATH:-/data/roger.db}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

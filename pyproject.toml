@@ -17,6 +17,7 @@ dependencies = [
     "openai==2.47.0",
     "aiosqlite==0.22.1",
     "feedparser==6.0.12",
+    "prometheus-client==0.25.0",
 ]
 
 [project.optional-dependencies]
