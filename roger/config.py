@@ -50,12 +50,16 @@ class Settings(BaseSettings):
     digest_channel_id: int | None = None
     digest_hour: int = 8
 
+    # --- ops ---
+    # where Roger posts its boot self-report; None disables the report (logs still fire).
+    ops_channel_id: int | None = None
+
     # --- runtime ---
     tz: str = "America/Detroit"
     db_path: str = "/data/roger.db"
     log_level: str = "INFO"
 
-    @field_validator("digest_channel_id", mode="before")
+    @field_validator("digest_channel_id", "ops_channel_id", mode="before")
     @classmethod
     def _empty_to_none(cls, value: object) -> object:
         # compose interpolation yields "" for an unset optional int; treat it as absent.

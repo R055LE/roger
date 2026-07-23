@@ -164,6 +164,82 @@ def _missing_permissions(perms: discord.Permissions) -> list[str]:
     return [label for attr, label in REQUIRED_PERMISSIONS if not getattr(perms, attr)]
 
 
+# --------------------------------------------------------------------------- status & ops
+
+_BRAINS = ("admin", "ambient", "digest")
+
+
+def _boot_report_line(guild_name: str, missing: list[str]) -> str:
+    """The one-line self-report Roger posts to the ops channel on startup (pure)."""
+    if missing:
+        return (
+            f"⚠️ **roger online** — {guild_name}\n"
+            f"Missing permissions: **{', '.join(missing)}**. Admin tools that need them will fail; "
+            "re-invite per `deploy/README.md`."
+        )
+    return f"✅ **roger online** — {guild_name}. All required permissions present."
+
+
+def _hhmm(ts: float, tz: str) -> str:
+    return datetime.datetime.fromtimestamp(ts, ZoneInfo(tz)).strftime("%H:%M")
+
+
+def _format_status(
+    *,
+    guild_name: str,
+    missing_perms: list[str],
+    usage: dict[str, int],
+    caps: dict[str, int],
+    feeds_count: int,
+    recent_audit: list[dict[str, Any]],
+    digest_hour: int,
+    digest_configured: bool,
+    tz: str,
+) -> str:
+    """Render the /status readout body (pure). The caller wraps it in a code block."""
+    perms = "OK" if not missing_perms else "MISSING: " + ", ".join(missing_perms)
+    lines = [f"roger status — {guild_name}", f"permissions: {perms}", "tokens today:"]
+    for brain in _BRAINS:
+        lines.append(f"  {brain:<8}{usage.get(brain, 0):>8,} / {caps.get(brain, 0):,}")
+    digest = f"{digest_hour:02d}:00 {tz}" if digest_configured else "unconfigured"
+    lines.append(f"feeds: {feeds_count}   digest: {digest}")
+    if recent_audit:
+        lines.append("recent actions:")
+        for row in recent_audit:
+            when = _hhmm(row["ts"], tz)
+            tool = row.get("tool") or "—"
+            detail = f" ({row['detail']})" if row.get("detail") else ""
+            lines.append(f"  {when}  {tool:<15}{row.get('status', '?')}{detail}")
+    return "\n".join(lines)
+
+
+async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
+    """Gather live status and render the /status body. Kept client-free so it unit-tests alone."""
+    guild_name = guild.name if guild is not None else str(settings.guild_id)
+    missing = (
+        _missing_permissions(guild.me.guild_permissions)
+        if guild is not None and guild.me is not None
+        else []
+    )
+    usage = {brain: await store.usage_today(brain) for brain in _BRAINS}
+    caps = {
+        "admin": settings.daily_tokens_admin,
+        "ambient": settings.daily_tokens_ambient,
+        "digest": settings.daily_tokens_digest,
+    }
+    return _format_status(
+        guild_name=guild_name,
+        missing_perms=missing,
+        usage=usage,
+        caps=caps,
+        feeds_count=await store.count_feeds(),
+        recent_audit=await store.fetch_audit(limit=8),
+        digest_hour=settings.digest_hour,
+        digest_configured=settings.digest_channel_id is not None,
+        tz=settings.tz,
+    )
+
+
 # --------------------------------------------------------------------------- client
 
 
@@ -215,10 +291,10 @@ class RogerClient(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("roger online as %s (guild=%s)", self.user, self.settings.guild_id)
-        self._warn_on_missing_permissions()
+        await self._startup_report()
 
-    def _warn_on_missing_permissions(self) -> None:
-        # on_ready fires again on every reconnect; report the permission state once per process.
+    async def _startup_report(self) -> None:
+        # on_ready fires again on every reconnect; report once per process.
         if self._perms_checked:
             return
         guild = self.get_guild(self.settings.guild_id)
@@ -235,6 +311,21 @@ class RogerClient(discord.Client):
             )
         else:
             log.info("permission check ok — all required scopes granted")
+        await self._post_ops(_boot_report_line(guild.name, missing))
+
+    async def _post_ops(self, message: str) -> None:
+        """Best-effort post to the ops channel; never let a failure here take down startup."""
+        channel_id = self.settings.ops_channel_id
+        if channel_id is None:
+            return
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            log.warning("ops channel %s not found — skipping self-report", channel_id)
+            return
+        try:
+            await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
+        except discord.DiscordException:
+            log.exception("failed to post to ops channel %s", channel_id)
 
     async def on_message(self, message: discord.Message) -> None:
         route = classify_message(
@@ -326,6 +417,14 @@ def _register_commands(client: RogerClient) -> None:
     async def chat_cmd(interaction: discord.Interaction, message: str) -> None:
         await _handle_chat(client, interaction, message)
 
+    @client.tree.command(
+        name="status",
+        description="Roger's operational status: permissions, token spend, recent actions (owner).",
+        guild=client._guild,
+    )
+    async def status_cmd(interaction: discord.Interaction) -> None:
+        await _handle_status(client, interaction)
+
 
 async def _handle_roger_request(
     client: RogerClient, interaction: discord.Interaction, request: str
@@ -352,6 +451,16 @@ async def _handle_roger_request(
         request, user_id, interaction.channel_id, interaction.followup.send
     )
     await interaction.followup.send(_truncate(reply))
+
+
+async def _handle_status(client: RogerClient, interaction: discord.Interaction) -> None:
+    # Owner-only, read-only, ephemeral — a deterministic ops readout, no LLM spend.
+    if interaction.user.id != client.settings.owner_id:
+        await interaction.response.send_message(CANNED_DENY, ephemeral=True)
+        return
+    guild = client.get_guild(client.settings.guild_id)
+    body = await gather_status(store=client.store, settings=client.settings, guild=guild)
+    await interaction.response.send_message(f"```\n{body}\n```", ephemeral=True)
 
 
 async def _handle_chat(
