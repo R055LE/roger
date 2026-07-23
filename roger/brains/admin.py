@@ -41,6 +41,16 @@ async def _deny_all(_: str) -> bool:
     return False
 
 
+async def _remember(
+    store: Store, actor_id: int, channel_id: int | None, request: str, answer: str
+) -> None:
+    """Persist one completed turn so the next request in this channel has continuity."""
+    if channel_id is None:
+        return
+    await store.add_admin(actor_id, channel_id, "user", request)
+    await store.add_admin(actor_id, channel_id, "bot", answer)
+
+
 async def handle_admin_request(
     *,
     request: str,
@@ -50,6 +60,7 @@ async def handle_admin_request(
     store: Store,
     confirm: Confirmer | None = None,
     ctx: ToolContext | None = None,
+    channel_id: int | None = None,
 ) -> str:
     confirm = confirm or _deny_all
 
@@ -67,8 +78,14 @@ async def handle_admin_request(
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": "Current server state:\n" + json.dumps(snap, default=str)},
-        {"role": "user", "content": request},
     ]
+    # Short multi-turn memory for this owner+channel so follow-ups ("do that", "rename it")
+    # have context. Only the request/answer text is kept — tool machinery stays transient.
+    if channel_id is not None:
+        for turn in await store.recent_admin(actor_id, channel_id):
+            role = "assistant" if turn["role"] == "bot" else "user"
+            messages.append({"role": role, "content": turn["content"]})
+    messages.append({"role": "user", "content": request})
 
     tool_calls_used = 0
     turns = 0
@@ -82,7 +99,9 @@ async def handle_admin_request(
             message = response.choices[0].message
 
             if not getattr(message, "tool_calls", None):
-                return message.content or "(no response)"
+                answer = message.content or "(no response)"
+                await _remember(store, actor_id, channel_id, request, answer)
+                return answer
 
             messages.append(_assistant_message(message))
             for call in message.tool_calls:

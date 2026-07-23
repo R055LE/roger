@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS ambient_log (
     role       TEXT    NOT NULL,
     content    TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS admin_log (
+    id         INTEGER PRIMARY KEY,
+    ts         REAL    NOT NULL,
+    user_id    INTEGER NOT NULL,
+    channel_id INTEGER,
+    role       TEXT    NOT NULL,
+    content    TEXT    NOT NULL
+);
 """
 
 
@@ -167,6 +176,28 @@ class Store:
     async def add_ambient(self, user_id: int, channel_id: int, role: str, content: str) -> None:
         await self._conn.execute(
             "INSERT INTO ambient_log (ts, user_id, channel_id, role, content) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (time.time(), user_id, channel_id, role, content),
+        )
+        await self._conn.commit()
+
+    # --- admin conversation memory (owner multi-turn continuity) ---
+
+    async def recent_admin(
+        self, user_id: int, channel_id: int, limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """The most recent admin request/answer turns for this owner+channel, oldest first."""
+        cursor = await self._conn.execute(
+            "SELECT role, content FROM admin_log WHERE user_id = ? AND channel_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, channel_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    async def add_admin(self, user_id: int, channel_id: int, role: str, content: str) -> None:
+        await self._conn.execute(
+            "INSERT INTO admin_log (ts, user_id, channel_id, role, content) "
             "VALUES (?, ?, ?, ?, ?)",
             (time.time(), user_id, channel_id, role, content),
         )

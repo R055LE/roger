@@ -239,3 +239,71 @@ async def test_set_permissions_defaults_to_deny_without_confirmer(tmp_path, monk
         assert "done" not in applied
     finally:
         await store.close()
+
+
+class _CapturingLLM(FakeLLM):
+    """FakeLLM that records the messages it was last called with."""
+
+    def __init__(self, script, sink):
+        super().__init__(script)
+        self._sink = sink
+
+    async def complete(self, brain, messages, tools=None):
+        self._sink["messages"] = messages
+        return await super().complete(brain, messages, tools)
+
+
+async def test_admin_memory_persists_and_reloads(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        out1 = await admin.handle_admin_request(
+            request="make a media channel",
+            guild=object(),
+            actor_id=1,
+            llm=FakeLLM([_resp(content="Created #media.")]),
+            store=store,
+            channel_id=42,
+        )
+        assert out1 == "Created #media."
+
+        sink = {}
+        out2 = await admin.handle_admin_request(
+            request="rename it",
+            guild=object(),
+            actor_id=1,
+            llm=_CapturingLLM([_resp(content="Done.")], sink),
+            store=store,
+            channel_id=42,
+        )
+        assert out2 == "Done."
+        contents = [m["content"] for m in sink["messages"] if m.get("content")]
+        assert any("make a media channel" in c for c in contents)  # prior request in history
+        assert any("Created #media." in c for c in contents)  # prior answer in history
+    finally:
+        await store.close()
+
+
+async def test_admin_memory_is_scoped_per_channel(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        await admin.handle_admin_request(
+            request="channel A request",
+            guild=object(),
+            actor_id=1,
+            llm=FakeLLM([_resp(content="A done.")]),
+            store=store,
+            channel_id=1,
+        )
+        sink = {}
+        await admin.handle_admin_request(
+            request="channel B request",
+            guild=object(),
+            actor_id=1,
+            llm=_CapturingLLM([_resp(content="B done.")], sink),
+            store=store,
+            channel_id=2,
+        )
+        contents = [m["content"] for m in sink["messages"] if m.get("content")]
+        assert not any("channel A request" in c for c in contents)  # no cross-channel bleed
+    finally:
+        await store.close()

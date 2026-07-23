@@ -41,8 +41,12 @@ def test_nonowner_dm_goes_to_ambient():
     assert route(msg(OTHER, "hi roger", guild=None)) is Route.AMBIENT_DM
 
 
-def test_guild_mention_goes_to_ambient():
+def test_nonowner_guild_mention_goes_to_ambient():
     assert route(msg(OTHER, "hey roger", mentions=[BOT])) is Route.AMBIENT_MENTION
+
+
+def test_owner_guild_mention_goes_to_admin():
+    assert route(msg(OWNER, "roger make a channel", mentions=[BOT])) is Route.ADMIN_MENTION
 
 
 def test_guild_message_without_mention_is_ignored():

@@ -6,10 +6,12 @@ character, rebuilt from scratch on hosted models and modern tooling.
 
 Roger is a single-guild, owner-gated Discord assistant with three separate "brains":
 
-- **Admin** — an owner-only server concierge. Ask in plain language ("a read-only podcast channel
-  under Media that DJs can post in") and it creates channels/roles and sets permissions through a
-  small, hand-rolled tool loop. No agent framework.
-- **Ambient** — a deadpan chat persona for @mentions and DMs. No tools, no authority.
+- **Admin** — an owner-only server concierge, reachable by `/roger`, a DM, or an @mention. Ask in
+  plain language ("a read-only podcast channel under Media that DJs can post in") and it creates
+  channels/roles and sets permissions through a small, hand-rolled tool loop, with short
+  per-channel conversation memory so follow-ups have context. No agent framework.
+- **Ambient** — a deadpan chat persona (via `/chat`, or any non-owner @mention/DM). No tools, no
+  authority.
 - **Digest** — a scheduled RSS/Atom summary posted to a channel.
 
 ## Security posture
@@ -70,11 +72,12 @@ ruff check .
 
 Feature-complete across the planned phases:
 
-- **Admin** — owner-gated `/roger` and DMs; a hand-rolled tool loop with `list_structure`,
-  `create_channel`, `create_role`, and confirm-gated `set_permissions`; per-request tool and daily
-  token budgets; a full SQLite audit trail.
-- **Ambient** — deadpan chat on @mentions and non-owner DMs, rate-limited per user + globally, with
-  a short own-thread memory. No tools, ever.
+- **Admin** — owner-gated via `/roger`, DM, or @mention, with short per-channel conversation
+  memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`, and
+  confirm-gated `set_permissions`; per-request tool and daily token budgets; a full SQLite audit
+  trail.
+- **Ambient** — deadpan chat via `/chat` or any non-owner @mention/DM, rate-limited per user +
+  globally, with a short own-thread memory. No tools, ever.
 - **Digest** — a scheduled daily RSS/Atom summary (also triggerable via `/roger run the digest
   now`), deduped so nothing posts twice.
 

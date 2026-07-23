@@ -1,8 +1,9 @@
 """Client, intents, dispatch, owner gate, and the ``/roger`` slash command.
 
-Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped command, the
-owner gate with audit logging, and message routing. Owner requests (via ``/roger`` or DM) go to the
-admin brain; non-owner chat goes to the ambient brain; a scheduled digest posts on its own loop.
+Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped commands, the
+owner gate with audit logging, and message routing. Owner requests (via ``/roger``, a DM, or an
+@mention) go to the admin brain, which keeps short per-channel memory; ``/chat`` and non-owner chat
+go to the ambient brain; a scheduled digest posts on its own loop.
 """
 
 from __future__ import annotations
@@ -123,6 +124,7 @@ def _make_confirmer(
 class Route(Enum):
     IGNORE = "ignore"
     ADMIN_DM = "admin_dm"
+    ADMIN_MENTION = "admin_mention"
     AMBIENT_DM = "ambient_dm"
     AMBIENT_MENTION = "ambient_mention"
 
@@ -140,7 +142,8 @@ def classify_message(message: discord.Message, *, owner_id: int, bot_user_id: in
     if message.guild is None:  # DM
         return Route.ADMIN_DM if message.author.id == owner_id else Route.AMBIENT_DM
     if any(user.id == bot_user_id for user in message.mentions):
-        return Route.AMBIENT_MENTION
+        # Owner @mentions reach the admin brain; everyone else gets ambient.
+        return Route.ADMIN_MENTION if message.author.id == owner_id else Route.AMBIENT_MENTION
     return Route.IGNORE
 
 
@@ -194,8 +197,15 @@ class RogerClient(discord.Client):
         route = classify_message(
             message, owner_id=self.settings.owner_id, bot_user_id=self.user.id
         )
-        if route is Route.ADMIN_DM:
-            reply = await self._run_admin(message.content, message.author.id, message.channel.send)
+        if route in (Route.ADMIN_DM, Route.ADMIN_MENTION):
+            content = message.content
+            if route is Route.ADMIN_MENTION:
+                content = _strip_mentions(content)  # strip the mention first
+                if not content:
+                    return
+            reply = await self._run_admin(
+                content, message.author.id, message.channel.id, message.channel.send
+            )
             await message.channel.send(_truncate(reply))
         elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
             content = message.content
@@ -215,7 +225,11 @@ class RogerClient(discord.Client):
                 await message.channel.send(_truncate(reply))
 
     async def _run_admin(
-        self, request: str, actor_id: int, send: Callable[..., Awaitable[Any]]
+        self,
+        request: str,
+        actor_id: int,
+        channel_id: int,
+        send: Callable[..., Awaitable[Any]],
     ) -> str:
         guild = self.get_guild(self.settings.guild_id)
         if guild is None:
@@ -231,6 +245,7 @@ class RogerClient(discord.Client):
                 store=self.store,
                 confirm=confirm,
                 ctx=ctx,
+                channel_id=channel_id,
             )
         except Exception:
             # Never leave a deferred interaction hanging — reply, then surface it in the logs.
@@ -259,6 +274,15 @@ def _register_commands(client: RogerClient) -> None:
     async def roger_cmd(interaction: discord.Interaction, request: str) -> None:
         await _handle_roger_request(client, interaction, request)
 
+    @client.tree.command(
+        name="chat",
+        description="Chat with Roger's ambient persona.",
+        guild=client._guild,
+    )
+    @app_commands.describe(message="Something to say to Roger.")
+    async def chat_cmd(interaction: discord.Interaction, message: str) -> None:
+        await _handle_chat(client, interaction, message)
+
 
 async def _handle_roger_request(
     client: RogerClient, interaction: discord.Interaction, request: str
@@ -281,8 +305,26 @@ async def _handle_roger_request(
 
     # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
     await interaction.response.defer(thinking=True)
-    reply = await client._run_admin(request, user_id, interaction.followup.send)
+    reply = await client._run_admin(
+        request, user_id, interaction.channel_id, interaction.followup.send
+    )
     await interaction.followup.send(_truncate(reply))
+
+
+async def _handle_chat(
+    client: RogerClient, interaction: discord.Interaction, message: str
+) -> None:
+    # Ambient on demand — open to anyone, no owner gate; ambient has no tools or authority.
+    await interaction.response.defer(thinking=True)
+    reply = await handle_ambient(
+        content=message,
+        user_id=interaction.user.id,
+        channel_id=interaction.channel_id,
+        llm=client.llm,
+        store=client.store,
+        limiter=client.ambient_limiter,
+    )
+    await interaction.followup.send(_truncate(reply or "…"))
 
 
 # --------------------------------------------------------------------------- entrypoint
