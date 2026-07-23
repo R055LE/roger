@@ -39,17 +39,18 @@ These hold regardless of what any model outputs. They are the load-bearing part 
   fixed allowlist (§2.7), so the gateway permission is far wider than anything Roger can actually do.
 - **§2.5 No destructive or escalating tools.** Nothing Roger can do is irreversible: there is no
   delete, kick, ban, or bulk-purge tool anywhere in the surface. Roger *creates*, and it *adjusts*
-  existing state — renaming a channel, editing a topic, moving it under a category, setting channel
-  overwrites, posting a message — but every adjustment is reversible and confirm-gated (§2.8). The
-  blast radius is bounded by what simply doesn't exist: no tool destroys anything.
+  existing state — renaming a channel, editing a topic, moving it under a category, reordering
+  channels and categories, setting channel overwrites, posting a message — but every adjustment is
+  reversible and confirm-gated (§2.8). The blast radius is bounded by what simply doesn't exist: no
+  tool destroys anything.
 - **§2.6 Roles are created with zero permissions.** `create_role` always passes
   `Permissions.none()`; access is granted through channel overwrites, never role permissions.
 - **§2.7 Permission allowlist.** Only a fixed set of overwrite bits is expressible through the
   tool schema (§7). Anything outside the allowlist is *unrepresentable* — the model literally
   cannot ask for it.
 - **§2.8 Confirm-gated mutations.** Every tool that changes *existing* state — `set_permissions`,
-  `edit_channel`, `post_message` — requires interactive owner approval against a rendered diff before
-  it runs. Creation is exempt by default: `create_channel` / `create_role` add new, empty,
+  `edit_channel`, `post_message`, `move_channel` — requires interactive owner approval against a
+  rendered diff before it runs. Creation is exempt by default: `create_channel` / `create_role` add new, empty,
   zero-permission objects, and setting a brand-new channel or category's access at creation (`read_only`,
   per-role `grants`) has nil blast radius — no members, no history — so it applies immediately.
   Whenever an overwrite hides a channel from @everyone — at creation **or** later via
@@ -147,8 +148,9 @@ Registry:
 | `create_channel` | yes (read_only / private / per-role grants) | only when `private=True` (§2.8) |
 | `create_role` | yes | no (always zero-perm, §2.6) |
 | `set_permissions` | yes | **yes** (§2.8) |
-| `edit_channel` | yes (rename/topic/move — never delete) | **yes** (§2.8) |
+| `edit_channel` | yes (rename/topic/recategorize — never delete) | **yes** (§2.8) |
 | `post_message` | side effect (mass mentions suppressed) | **yes** (§2.8) |
+| `move_channel` | yes (reorder a channel/category — position only) | **yes** (§2.8) |
 | `run_digest` | side effect | no |
 | `list_feeds` | no | — |
 | `suggest_feeds` | no (validates only) | — |

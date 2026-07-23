@@ -29,6 +29,7 @@ from roger.tools.schemas import (
     EditChannelArgs,
     ListFeedsArgs,
     ListStructureArgs,
+    MoveChannelArgs,
     PostMessageArgs,
     RemoveFeedArgs,
     RunDigestArgs,
@@ -338,6 +339,45 @@ async def post_message(
     return {"posted": True, "channel": channel.name, "chars": len(args.content)}
 
 
+def _same_category(a: Any, b: Any) -> bool:
+    """Do two channels sit under the same category? (Uncategorized counts as the same group.)"""
+    ac, bc = getattr(a, "category", None), getattr(b, "category", None)
+    return (ac.id if ac else None) == (bc.id if bc else None)
+
+
+async def move_channel(
+    guild: discord.Guild, args: MoveChannelArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    channel, kind = _resolve_editable_channel(guild, args.channel)
+    if args.position == "top":
+        await channel.move(beginning=True)
+        anchor = "top"
+    elif args.position == "bottom":
+        await channel.move(end=True)
+        anchor = "bottom"
+    else:
+        ref_query = args.before if args.before is not None else args.after
+        ref, ref_kind = _resolve_editable_channel(guild, ref_query)
+        if ref.id == channel.id:
+            raise GuardError("can't move a channel relative to itself")
+        if (kind == "category") != (ref_kind == "category"):
+            raise GuardError("order a category next to a category, a channel next to a channel")
+        # Discord groups channels under their category, so a cross-category before/after renders
+        # nonsensically. Keep the move legible: same category (or both uncategorized).
+        if kind != "category" and not _same_category(channel, ref):
+            raise GuardError(
+                "before/after must name a channel in the same category — "
+                "move it into that category first with edit_channel"
+            )
+        if args.before is not None:
+            await channel.move(before=ref)
+            anchor = f"before {ref.name}"
+        else:
+            await channel.move(after=ref)
+            anchor = f"after {ref.name}"
+    return {"moved": channel.name, "kind": kind, "position": anchor}
+
+
 async def run_digest(
     guild: discord.Guild, args: RunDigestArgs, ctx: ToolContext | None = None
 ) -> dict[str, Any]:
@@ -462,6 +502,18 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
         channel, _ = _resolve_editable_channel(guild, args.channel)
         body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
         return f"post to #{channel.name}:\n{body}"
+    if name == "move_channel":
+        channel, kind = _resolve_editable_channel(guild, args.channel)
+        label = "category" if kind == "category" else f"{kind} channel"
+        if args.position is not None:
+            where = f"to the {args.position} of its group"
+        else:
+            ref, _ = _resolve_editable_channel(
+                guild, args.before if args.before is not None else args.after
+            )
+            rel = "before" if args.before is not None else "after"
+            where = f"{rel} {ref.name}"
+        return f"move {label} {channel.name} {where}"
     if name == "create_channel":
         head = f"create {args.kind} channel: {args.name}"
         if args.category:
@@ -487,6 +539,7 @@ EXECUTORS = {
     "set_permissions": set_permissions,
     "edit_channel": edit_channel,
     "post_message": post_message,
+    "move_channel": move_channel,
     "run_digest": run_digest,
     "suggest_feeds": suggest_feeds,
     "add_feed": add_feed,

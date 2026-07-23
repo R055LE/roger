@@ -16,6 +16,7 @@ from roger.tools.schemas import (
     CreateRoleArgs,
     EditChannelArgs,
     ListFeedsArgs,
+    MoveChannelArgs,
     Overwrite,
     PostMessageArgs,
     RemoveFeedArgs,
@@ -40,6 +41,7 @@ class FakeChannel:
         self.category = category
         self.topic = topic
         self.edited = None
+        self.moved = None  # kwargs from the last move() call
         self.sent = []
         self.perm_calls = []  # (target, overwrite) from set_permissions
 
@@ -47,6 +49,9 @@ class FakeChannel:
         self.edited = changes
         for key, value in changes.items():
             setattr(self, key, value)
+
+    async def move(self, **kwargs):
+        self.moved = kwargs
 
     async def send(self, content, allowed_mentions=None):
         self.sent.append(SimpleNamespace(content=content, allowed_mentions=allowed_mentions))
@@ -410,6 +415,100 @@ async def test_preview_renders_edit_and_post():
         "post_message", guild, PostMessageArgs(channel="announcements", content="ship it")
     )
     assert "post to #announcements" in post_diff and "ship it" in post_diff
+
+
+# --------------------------------------------------------------------------- move_channel
+
+
+async def test_move_channel_to_top_uses_beginning():
+    guild = FakeGuild()
+    channel = guild.add_text("rules")
+    result = await executors.move_channel(guild, MoveChannelArgs(channel="rules", position="top"))
+    assert result == {"moved": "rules", "kind": "text", "position": "top"}
+    assert channel.moved == {"beginning": True}
+
+
+async def test_move_channel_to_bottom_uses_end():
+    guild = FakeGuild()
+    channel = guild.add_text("rules")
+    await executors.move_channel(guild, MoveChannelArgs(channel="rules", position="bottom"))
+    assert channel.moved == {"end": True}
+
+
+async def test_move_channel_before_sibling_in_same_category():
+    guild = FakeGuild()
+    media = guild.add_category("Media")
+    rules = guild.add_text("rules", category=media)
+    general = guild.add_text("general", category=media)
+    result = await executors.move_channel(
+        guild, MoveChannelArgs(channel="rules", before="general")
+    )
+    assert result["position"] == "before general"
+    assert rules.moved == {"before": general}
+
+
+async def test_move_channel_after_sibling():
+    guild = FakeGuild()
+    rules = guild.add_text("rules")
+    general = guild.add_text("general")
+    await executors.move_channel(guild, MoveChannelArgs(channel="rules", after="general"))
+    assert rules.moved == {"after": general}
+
+
+async def test_move_channel_rejects_cross_category_reference():
+    guild = FakeGuild()
+    media = guild.add_category("Media")
+    admin = guild.add_category("Admin")
+    guild.add_text("rules", category=media)
+    guild.add_text("logs", category=admin)
+    with pytest.raises(GuardError):
+        await executors.move_channel(guild, MoveChannelArgs(channel="rules", before="logs"))
+
+
+async def test_move_category_before_another_category():
+    guild = FakeGuild()
+    media = guild.add_category("Media")
+    admin = guild.add_category("Admin")
+    result = await executors.move_channel(guild, MoveChannelArgs(channel="Admin", before="Media"))
+    assert result["kind"] == "category"
+    assert admin.moved == {"before": media}
+
+
+async def test_move_channel_rejects_category_vs_channel_mix():
+    guild = FakeGuild()
+    guild.add_category("Media")
+    guild.add_text("rules")
+    with pytest.raises(GuardError):
+        await executors.move_channel(guild, MoveChannelArgs(channel="rules", before="Media"))
+
+
+async def test_move_channel_rejects_relative_to_itself():
+    guild = FakeGuild()
+    guild.add_text("rules")
+    with pytest.raises(GuardError):
+        await executors.move_channel(guild, MoveChannelArgs(channel="rules", after="rules"))
+
+
+async def test_move_channel_requires_exactly_one_anchor():
+    with pytest.raises(ValueError):  # pydantic model validator — none given
+        MoveChannelArgs(channel="rules")
+    with pytest.raises(ValueError):  # two anchors given
+        MoveChannelArgs(channel="rules", position="top", before="general")
+
+
+async def test_preview_move_channel_reads_naturally():
+    guild = FakeGuild()
+    media = guild.add_category("Media")
+    guild.add_text("rules", category=media)
+    guild.add_text("general", category=media)
+    top_diff = await executors.preview(
+        "move_channel", guild, MoveChannelArgs(channel="rules", position="top")
+    )
+    assert top_diff == "move text channel rules to the top of its group"
+    rel_diff = await executors.preview(
+        "move_channel", guild, MoveChannelArgs(channel="rules", before="general")
+    )
+    assert rel_diff == "move text channel rules before general"
 
 
 # --------------------------------------------------------------------------- digest feed tools

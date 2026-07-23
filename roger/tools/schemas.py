@@ -96,6 +96,20 @@ class PostMessageArgs(ToolArgs):
     content: str = Field(min_length=1, max_length=2000)  # body; mass mentions always suppressed
 
 
+class MoveChannelArgs(ToolArgs):
+    channel: str  # channel or category to reorder: name or id
+    position: Literal["top", "bottom"] | None = None  # move to the top/bottom of its group
+    before: str | None = None  # place directly above this sibling: name or id
+    after: str | None = None  # place directly below this sibling: name or id
+
+    @model_validator(mode="after")
+    def _exactly_one_anchor(self) -> MoveChannelArgs:
+        anchors = [a for a in (self.position, self.before, self.after) if a is not None]
+        if len(anchors) != 1:
+            raise ValueError("specify exactly one of: position, before, after")
+        return self
+
+
 class RunDigestArgs(ToolArgs):
     """No arguments — triggers the digest job immediately."""
 
@@ -187,6 +201,18 @@ REGISTRY: dict[str, ToolSpec] = {
             "text before it is sent."
         ),
         args_model=PostMessageArgs,
+        requires_confirm=True,
+    ),
+    "move_channel": ToolSpec(
+        name="move_channel",
+        description=(
+            "Reorder a channel or category. Move it to the 'top' or 'bottom' of its group, or "
+            "place it directly before/after a sibling — a category next to another category, a "
+            "channel next to a channel in the same category. Position only: it never renames, "
+            "moves a channel between categories (use edit_channel for that), or changes "
+            "permissions. The owner must confirm the move first."
+        ),
+        args_model=MoveChannelArgs,
         requires_confirm=True,
     ),
     "run_digest": ToolSpec(
