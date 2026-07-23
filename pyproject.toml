@@ -14,7 +14,7 @@ dependencies = [
     "discord.py==2.7.1",
     "pydantic==2.13.4",
     "pydantic-settings==2.14.2",
-    "openai==2.47.0",
+    "openai==2.48.0",
     "aiosqlite==0.22.1",
     "feedparser==6.0.12",
     "prometheus-client==0.25.0",
