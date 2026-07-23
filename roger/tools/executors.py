@@ -7,9 +7,11 @@ would make, so the owner approves against a real diff — not the model's paraph
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import discord
+import feedparser
 
 from roger.tools.context import ToolContext
 from roger.tools.guard import (
@@ -21,11 +23,15 @@ from roger.tools.guard import (
     sanitize_display_name,
 )
 from roger.tools.schemas import (
+    AddFeedArgs,
     CreateChannelArgs,
     CreateRoleArgs,
+    ListFeedsArgs,
     ListStructureArgs,
+    RemoveFeedArgs,
     RunDigestArgs,
     SetPermissionsArgs,
+    SuggestFeedsArgs,
 )
 
 # --------------------------------------------------------------------------- snapshot
@@ -231,6 +237,79 @@ async def run_digest(
     )
 
 
+# --------------------------------------------------------------------------- digest feeds
+
+
+async def validate_feed(url: str) -> dict[str, Any]:
+    """Fetch a URL and confirm it parses as a live RSS/Atom feed. Never raises."""
+    try:
+        parsed = await asyncio.to_thread(feedparser.parse, url)
+    except Exception as exc:  # DNS failure, bad URL, etc.
+        return {"url": url, "ok": False, "error": f"fetch failed: {exc}"}
+    status = parsed.get("status")
+    if status is not None and status >= 400:
+        return {"url": url, "ok": False, "error": f"HTTP {status}"}
+    # feedparser sets a non-empty ``version`` (e.g. "rss20", "atom10") only for a recognized feed.
+    if not parsed.get("version"):
+        return {"url": url, "ok": False, "error": "not a recognized RSS/Atom feed"}
+    title = parsed.feed.get("title") if parsed.get("feed") else None
+    return {"url": url, "ok": True, "title": title, "entries": len(parsed.entries)}
+
+
+def _need_store(ctx: ToolContext | None) -> Any:
+    if ctx is None or ctx.store is None:
+        raise GuardError("the feed store is unavailable in this context")
+    return ctx.store
+
+
+async def suggest_feeds(
+    guild: discord.Guild, args: SuggestFeedsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    # Vet candidate URLs against the live web without committing. The model proposes; this grounds.
+    candidates = await asyncio.gather(*(validate_feed(url) for url in args.urls))
+    return {"candidates": list(candidates)}
+
+
+async def add_feed(
+    guild: discord.Guild, args: AddFeedArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    store = _need_store(ctx)
+    checked = await validate_feed(args.url)
+    if not checked["ok"]:
+        return {"added": False, "url": args.url, "error": checked["error"]}
+    added = await store.add_feed(args.url, checked.get("title"))
+    return {
+        "added": added,
+        "url": args.url,
+        "title": checked.get("title"),
+        "entries": checked.get("entries"),
+        "note": None if added else "already in the feed list",
+    }
+
+
+async def remove_feed(
+    guild: discord.Guild, args: RemoveFeedArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    store = _need_store(ctx)
+    removed = await store.remove_feed(args.url)
+    return {
+        "removed": removed,
+        "url": args.url,
+        "note": None if removed else "no feed with that exact URL (call list_feeds first)",
+    }
+
+
+async def list_feeds(
+    guild: discord.Guild, args: ListFeedsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    store = _need_store(ctx)
+    rows = await store.list_feeds()
+    return {
+        "feeds": [{"url": r["url"], "title": r["title"]} for r in rows],
+        "count": len(rows),
+    }
+
+
 # --------------------------------------------------------------------------- confirm preview
 
 
@@ -255,4 +334,8 @@ EXECUTORS = {
     "create_role": create_role,
     "set_permissions": set_permissions,
     "run_digest": run_digest,
+    "suggest_feeds": suggest_feeds,
+    "add_feed": add_feed,
+    "remove_feed": remove_feed,
+    "list_feeds": list_feeds,
 }

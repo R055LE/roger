@@ -25,7 +25,7 @@ from discord.ext import tasks
 
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
-from roger.brains.digest import run_digest_job
+from roger.brains.digest import run_digest_job, seed_feeds_if_empty
 from roger.config import Settings, load_settings
 from roger.llm import LLM
 from roger.store import AuditStatus, Store
@@ -170,7 +170,12 @@ class RogerClient(discord.Client):
         _register_commands(self)
         # Guild-scoped sync is instant and never leaks the command to other servers.
         await self.tree.sync(guild=self._guild)
-        if self.settings.feeds and self.settings.digest_channel_id is not None:
+        # Bootstrap the curated feed list from DIGEST_FEEDS on first run; then the store owns it.
+        seeded = await seed_feeds_if_empty(self.store, self.settings)
+        if seeded:
+            log.info("seeded %d feed(s) from DIGEST_FEEDS into the store", seeded)
+        # Start the daily loop whenever a channel is configured — Roger can curate feeds at runtime.
+        if self.settings.digest_channel_id is not None:
             self._digest_loop.change_interval(
                 time=datetime.time(
                     hour=self.settings.digest_hour, tzinfo=ZoneInfo(self.settings.tz)

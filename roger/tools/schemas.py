@@ -74,6 +74,22 @@ class RunDigestArgs(ToolArgs):
     """No arguments — triggers the digest job immediately."""
 
 
+class ListFeedsArgs(ToolArgs):
+    """No arguments — returns the digest's current feed list."""
+
+
+class SuggestFeedsArgs(ToolArgs):
+    urls: list[str] = Field(min_length=1, max_length=8)  # candidate feed URLs to vet
+
+
+class AddFeedArgs(ToolArgs):
+    url: str  # RSS/Atom feed URL; validated live before it is stored
+
+
+class RemoveFeedArgs(ToolArgs):
+    url: str  # exact stored URL (from list_feeds)
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -117,6 +133,36 @@ REGISTRY: dict[str, ToolSpec] = {
         name="run_digest",
         description="Trigger the RSS/Atom digest job immediately.",
         args_model=RunDigestArgs,
+    ),
+    "list_feeds": ToolSpec(
+        name="list_feeds",
+        description="List the RSS/Atom feeds currently in the daily digest. Read-only.",
+        args_model=ListFeedsArgs,
+    ),
+    "suggest_feeds": ToolSpec(
+        name="suggest_feeds",
+        description=(
+            "Validate candidate RSS/Atom feed URLs WITHOUT adding them. Returns, per URL, "
+            "whether it's a live feed, its title, and how many items it has. Use this to vet "
+            "feeds you propose before calling add_feed."
+        ),
+        args_model=SuggestFeedsArgs,
+    ),
+    "add_feed": ToolSpec(
+        name="add_feed",
+        description=(
+            "Validate and add one RSS/Atom feed to the daily digest. Fails if the URL isn't a "
+            "live feed. Idempotent — adding an existing feed is a no-op."
+        ),
+        args_model=AddFeedArgs,
+    ),
+    "remove_feed": ToolSpec(
+        name="remove_feed",
+        description=(
+            "Remove a feed from the daily digest by its exact URL. Call list_feeds first to get "
+            "the exact URL."
+        ),
+        args_model=RemoveFeedArgs,
     ),
 }
 

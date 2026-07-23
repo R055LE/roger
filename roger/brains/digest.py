@@ -74,11 +74,22 @@ async def _summarize(entries: list[dict[str, Any]], llm: LLM) -> str:
     return response.choices[0].message.content or "(no summary)"
 
 
+async def seed_feeds_if_empty(store: Store, settings: Any) -> int:
+    """One-time bootstrap: import DIGEST_FEEDS the first time the feed table is empty.
+
+    After the initial seed the store is authoritative — Roger adds and removes feeds at runtime,
+    and DIGEST_FEEDS acts only as the default set that returns if the list is ever fully cleared.
+    """
+    if await store.count_feeds() > 0:
+        return 0
+    return await store.seed_feeds(settings.feeds)
+
+
 async def run_digest_job(*, client: Any, settings: Any, llm: LLM, store: Store) -> dict[str, Any]:
-    feeds = settings.feeds
+    feeds = [row["url"] for row in await store.list_feeds()]
     channel_id = settings.digest_channel_id
     if not feeds or channel_id is None:
-        return {"status": "digest not configured (set DIGEST_FEEDS and DIGEST_CHANNEL_ID)"}
+        return {"status": "digest not configured (no feeds, or DIGEST_CHANNEL_ID unset)"}
 
     entries = await _collect_new(feeds, store)
     if not entries:

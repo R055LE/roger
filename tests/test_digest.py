@@ -55,12 +55,16 @@ class FakeLLM:
         return item
 
 
-def _settings(feeds=("http://f",), channel_id=42, tz="America/Detroit"):
-    return SimpleNamespace(feeds=list(feeds), digest_channel_id=channel_id, tz=tz)
+def _settings(channel_id=42, tz="America/Detroit"):
+    # feeds now live in the store, not settings — run_digest_job reads store.list_feeds().
+    return SimpleNamespace(digest_channel_id=channel_id, tz=tz)
 
 
-async def _store(tmp_path):
-    return await Store(str(tmp_path / "dig.db")).open()
+async def _store(tmp_path, feeds=("http://f",)):
+    store = await Store(str(tmp_path / "dig.db")).open()
+    for url in feeds:
+        await store.add_feed(url, None)
+    return store
 
 
 async def test_collect_new_filters_seen_and_caps(tmp_path, monkeypatch):
@@ -92,12 +96,29 @@ async def test_collect_new_survives_a_dead_feed(tmp_path, monkeypatch):
         await store.close()
 
 
+async def test_seed_feeds_if_empty_is_one_shot(tmp_path):
+    store = await _store(tmp_path, feeds=())  # start empty
+    try:
+        seeded = await digest.seed_feeds_if_empty(store, _settings_feeds(["http://s1", "http://s2"]))
+        assert seeded == 2
+        assert await store.count_feeds() == 2
+        # A later env change does NOT re-seed once the store is populated.
+        assert await digest.seed_feeds_if_empty(store, _settings_feeds(["http://s3"])) == 0
+        assert {f["url"] for f in await store.list_feeds()} == {"http://s1", "http://s2"}
+    finally:
+        await store.close()
+
+
+def _settings_feeds(feeds):
+    return SimpleNamespace(feeds=list(feeds))
+
+
 async def test_not_configured(tmp_path):
     store = await _store(tmp_path)
     try:
         out = await run_digest_job(
             client=FakeClient(FakeChannel()),
-            settings=_settings(feeds=(), channel_id=None),
+            settings=_settings(channel_id=None),
             llm=FakeLLM([]),
             store=store,
         )

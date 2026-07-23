@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS admin_log (
     role       TEXT    NOT NULL,
     content    TEXT    NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS feeds (
+    url      TEXT PRIMARY KEY,
+    title    TEXT,
+    added_ts REAL NOT NULL
+);
 """
 
 
@@ -202,6 +208,43 @@ class Store:
             (time.time(), user_id, channel_id, role, content),
         )
         await self._conn.commit()
+
+    # --- digest feed list (Roger-curated; seeded once from DIGEST_FEEDS) ---
+
+    async def list_feeds(self) -> list[dict[str, Any]]:
+        cursor = await self._conn.execute(
+            "SELECT url, title, added_ts FROM feeds ORDER BY added_ts, url"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def count_feeds(self) -> int:
+        cursor = await self._conn.execute("SELECT COUNT(*) FROM feeds")
+        row = await cursor.fetchone()
+        return int(row[0]) if row else 0
+
+    async def add_feed(self, url: str, title: str | None) -> bool:
+        """Insert a feed. Returns True if newly added, False if the URL already existed."""
+        cursor = await self._conn.execute(
+            "INSERT OR IGNORE INTO feeds (url, title, added_ts) VALUES (?, ?, ?)",
+            (url, title, time.time()),
+        )
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def remove_feed(self, url: str) -> bool:
+        """Delete a feed by exact URL. Returns True if a row was removed."""
+        cursor = await self._conn.execute("DELETE FROM feeds WHERE url = ?", (url,))
+        await self._conn.commit()
+        return cursor.rowcount > 0
+
+    async def seed_feeds(self, urls: list[str]) -> int:
+        now = time.time()
+        await self._conn.executemany(
+            "INSERT OR IGNORE INTO feeds (url, title, added_ts) VALUES (?, ?, ?)",
+            [(url, None, now) for url in urls],
+        )
+        await self._conn.commit()
+        return len(urls)
 
     # --- digest dedupe (§9) ---
 

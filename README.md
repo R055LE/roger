@@ -73,16 +73,17 @@ ruff check .
 Feature-complete across the planned phases:
 
 - **Admin** — owner-gated via `/roger`, DM, or @mention, with short per-channel conversation
-  memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`, and
-  confirm-gated `set_permissions`; per-request tool and daily token budgets; a full SQLite audit
-  trail.
+  memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`,
+  confirm-gated `set_permissions`, and feed curation (`suggest_feeds`, `add_feed`, `remove_feed`,
+  `list_feeds`); per-request tool and daily token budgets; a full SQLite audit trail.
 - **Ambient** — deadpan chat via `/chat` or any non-owner @mention/DM, rate-limited per user +
   globally, with a short own-thread memory. No tools, ever.
 - **Digest** — a scheduled daily RSS/Atom summary (also triggerable via `/roger run the digest
-  now`), deduped so nothing posts twice.
+  now`), deduped so nothing posts twice. Roger curates its own feed list: `DIGEST_FEEDS` seeds it
+  once, then Roger validates candidates against the live web and adds or drops them on request.
 
-Runs as a non-root, read-only-rootfs container. ~55 tests cover the guard rules, the tool loop, the
-rate limiter, and the digest paths.
+Runs as a non-root, read-only-rootfs container. ~70 tests cover the guard rules, the tool loop, the
+rate limiter, and the digest and feed-curation paths.
 
 ## License
 
