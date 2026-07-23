@@ -52,8 +52,13 @@ only ever creates zero-permission roles and applies overwrites from a fixed allo
 surface is far narrower than the gateway grant (ARCHITECTURE §2.6, §2.7). Do **not** grant
 Administrator; nothing Roger does needs it.
 
-**Role hierarchy.** Discord only lets a bot manage roles/channels *below* its own top role, and only
-grant permissions it holds. Drag Roger's role up so it sits above anything it needs to touch.
+**Role hierarchy — mostly a non-issue here.** Hierarchy governs *role and member* actions, not
+channel edits: a bot can only manage roles below its own top role. Roger sidesteps it — it only ever
+*creates* roles, which Discord places at the bottom of the list automatically, and it never assigns
+or edits existing ones. `edit_channel` is gated by Manage Channels, not by hierarchy. So the real
+failure modes are a missing gateway permission (above) or a channel Roger has no overwrite on (see
+§2.8 in [`../ARCHITECTURE.md`](../ARCHITECTURE.md)) — not role position. Still fine to keep Roger's
+role a little up the list if you later add role-management features.
 
 ## First-time provision
 
