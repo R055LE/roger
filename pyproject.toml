@@ -24,6 +24,7 @@ dependencies = [
 dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
     "ruff==0.15.22",
 ]
 
@@ -43,3 +44,7 @@ select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+# __main__ is the `asyncio.run(main())` entrypoint — nothing to unit-test there.
+omit = ["roger/__main__.py"]
