@@ -19,4 +19,9 @@ RUN mkdir -p /data && chown roger:roger /data
 
 USER roger
 ENV PYTHONUNBUFFERED=1
+
+# Build identity, surfaced in the boot self-report. Declared last so a new commit SHA only rebuilds
+# this trivial layer, not the dependency install above. Defaults to "dev" for local builds.
+ARG ROGER_VERSION=dev
+ENV ROGER_VERSION=${ROGER_VERSION}
 CMD ["python", "-m", "roger"]

@@ -12,6 +12,7 @@ import asyncio
 import datetime
 import json
 import logging
+import os
 import re
 import sys
 from collections.abc import Awaitable, Callable
@@ -36,6 +37,11 @@ log = logging.getLogger("roger")
 CANNED_DENY = "Sorry — Roger only takes admin requests from the server owner."
 DISCORD_MAX = 2000
 CONFIRM_TIMEOUT = 120
+
+# Deployed build identity, baked into the image by the release workflow (Dockerfile ARG →
+# ROGER_VERSION). It's image metadata, not host-injected config, so it's read straight from the
+# environment rather than through Settings/compose. Defaults to "dev" for local runs.
+ROGER_VERSION = os.getenv("ROGER_VERSION", "dev")
 
 
 # --------------------------------------------------------------------------- logging
@@ -169,15 +175,21 @@ def _missing_permissions(perms: discord.Permissions) -> list[str]:
 _BRAINS = ("admin", "ambient", "digest")
 
 
-def _boot_report_line(guild_name: str, missing: list[str]) -> str:
-    """The one-line self-report Roger posts to the ops channel on startup (pure)."""
+def _boot_header(version: str, missing: list[str]) -> str:
+    """Header of the boot self-report (pure): health glyph + the deployed build.
+
+    The full state block — permissions, token/dollar spend, digest schedule, recent actions — is
+    rendered separately by ``gather_status`` and appended under this header, so the ops channel gets
+    a complete snapshot on every deploy instead of a bare "online" line. A missing required scope
+    adds an actionable re-invite hint here (it's the one thing you must fix by hand off-box).
+    """
     if missing:
         return (
-            f"⚠️ **roger online** — {guild_name}\n"
-            f"Missing permissions: **{', '.join(missing)}**. Admin tools that need them will fail; "
-            "re-invite per `deploy/README.md`."
+            f"⚠️ **roger online** · `{version}`\n"
+            f"Missing permissions: **{', '.join(missing)}** — admin tools that need them will "
+            "fail; re-invite per `deploy/README.md`."
         )
-    return f"✅ **roger online** — {guild_name}. All required permissions present."
+    return f"✅ **roger online** · `{version}`"
 
 
 def _hhmm(ts: float, tz: str) -> str:
@@ -324,7 +336,9 @@ class RogerClient(discord.Client):
             )
         else:
             log.info("permission check ok — all required scopes granted")
-        await self._post_ops(_boot_report_line(guild.name, missing))
+        header = _boot_header(ROGER_VERSION[:12], missing)
+        body = await gather_status(store=self.store, settings=self.settings, guild=guild)
+        await self._post_ops(f"{header}\n```\n{body}\n```")
 
     async def _post_ops(self, message: str) -> None:
         """Best-effort post to the ops channel; never let a failure here take down startup."""

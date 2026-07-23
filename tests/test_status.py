@@ -4,21 +4,22 @@ from types import SimpleNamespace
 
 import discord
 
-from roger.bot import _boot_report_line, _format_status, gather_status
+from roger.bot import _boot_header, _format_status, gather_status
 from roger.store import AuditStatus, Store
 
 # The invite integer documented in deploy/README.md — grants exactly the required scopes.
 FULL_PERMS = 268454928
 
 
-def test_boot_report_line_ok_is_green_and_names_the_guild():
-    line = _boot_report_line("My Guild", [])
-    assert "✅" in line and "roger online" in line and "My Guild" in line
+def test_boot_header_ok_is_green_and_shows_the_version():
+    line = _boot_header("sha-abc1234", [])
+    assert "✅" in line and "roger online" in line and "sha-abc1234" in line
 
 
-def test_boot_report_line_warns_and_lists_missing_scopes():
-    line = _boot_report_line("My Guild", ["Manage Channels", "Manage Roles"])
+def test_boot_header_warns_lists_missing_scopes_and_shows_version():
+    line = _boot_header("dev", ["Manage Channels", "Manage Roles"])
     assert "⚠️" in line and "Manage Channels, Manage Roles" in line
+    assert "re-invite" in line and "dev" in line
 
 
 def test_format_status_renders_perms_usage_feeds_and_actions():
