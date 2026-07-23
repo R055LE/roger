@@ -67,16 +67,19 @@ privacy posture issue, not just hygiene).
 *Why:* unbounded PII retention is the kind of thing a security reviewer flags on sight; one-file
 change. Retention windows are module constants for now — promote to env/runtime config if needed.
 
-### 1.4 Liveness: `HEALTHCHECK` + heartbeat — **S**
-The `Dockerfile` has no `HEALTHCHECK`, so a wedged event loop or a gateway that reconnects-forever is
-invisible to Docker and the systemd deploy unit — the container stays "up" while doing nothing.
+### 1.4 Liveness: `HEALTHCHECK` + heartbeat — **S** — *shipped*
+The `Dockerfile` had no `HEALTHCHECK`, so a wedged event loop or a gateway that reconnects-forever was
+invisible to Docker — the container stayed "up" while doing nothing.
 
-- Heartbeat: touch a file under `/tmp` (already tmpfs) from the digest loop / an `on_socket_response`
-  tick; `HEALTHCHECK` asserts its freshness. Or expose the metrics endpoint from **3.1** and health-
-  check that — one server, two wins (preferred if 3.1 lands).
+- [x] `_heartbeat` `tasks.loop` (60s) rewrites `/tmp/roger.healthy` (already tmpfs). A turning event
+      loop keeps it fresh; a wedge lets it go stale.
+- [x] `roger/health.py` (`python -m roger.health`) checks the file's mtime against `MAX_AGE_S` (180s
+      = 3 missed beats); the `Dockerfile HEALTHCHECK` runs it. Import-free, so it's cheap and unit-
+      tested.
 
-*Why:* "the container is running" and "the bot is working" are different claims; right now only the
-first is observable.
+*Why:* "the container is running" and "the bot is working" are different claims; now the second is
+observable in `docker ps`. (Auto-restart on unhealthy is a separate host concern — Docker doesn't
+restart on health alone; an `autoheal` sidecar or systemd check would close that, out of scope here.)
 
 ### 1.6 Enrich the boot self-report — **S** — *shipped*
 The boot report was a bare line ("✅ roger online — <guild>. All required permissions present.") —
