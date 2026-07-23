@@ -36,9 +36,9 @@ class Settings(BaseSettings):
     model_digest: str = ""
 
     # --- budgets (daily in+out tokens per brain) ---
-    daily_tokens_admin: int = 50_000
-    daily_tokens_ambient: int = 30_000
-    daily_tokens_digest: int = 20_000
+    daily_tokens_admin: int = 150_000
+    daily_tokens_ambient: int = 40_000
+    daily_tokens_digest: int = 30_000
 
     # --- ambient rate limiting ---
     ambient_rate_per_user: int = 5

@@ -40,7 +40,7 @@ class FakeLLM:
 
 @pytest.fixture(autouse=True)
 def _patch_snapshot(monkeypatch):
-    async def fake_snapshot(guild):
+    async def fake_snapshot(guild, *, detailed=False):
         return {
             "categories": [{"id": 1, "name": "Media"}],
             "channels": [

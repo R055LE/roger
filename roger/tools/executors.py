@@ -41,7 +41,13 @@ def _overwrite_summary(overwrites: dict[Any, discord.PermissionOverwrite]) -> di
     return summary
 
 
-async def snapshot(guild: discord.Guild) -> dict[str, Any]:
+async def snapshot(guild: discord.Guild, *, detailed: bool = False) -> dict[str, Any]:
+    """Server state for the admin model.
+
+    The lean form (default) is the per-request context fed to the model on every turn, so it omits
+    the two costly, usually-irrelevant fields — channel topics and the permission-overwrite matrix.
+    ``list_structure`` asks for ``detailed=True`` when the model actually needs them.
+    """
     categories = [{"id": c.id, "name": c.name} for c in guild.categories]
 
     channels: list[dict[str, Any]] = []
@@ -58,28 +64,32 @@ async def snapshot(guild: discord.Guild) -> dict[str, Any]:
             topic = None
         else:
             continue
-        channels.append(
-            {
-                "id": channel.id,
-                "name": channel.name,
-                "kind": kind,
-                "category": category,
-                "topic": topic,
-                "overwrites": _overwrite_summary(channel.overwrites),
-            }
-        )
+        entry: dict[str, Any] = {
+            "id": channel.id,
+            "name": channel.name,
+            "kind": kind,
+            "category": category,
+        }
+        if detailed:
+            entry["topic"] = (topic or "")[:120] or None
+            entry["overwrites"] = _overwrite_summary(channel.overwrites)
+        channels.append(entry)
 
-    roles = [
-        {"id": r.id, "name": r.name, "position": r.position, "color": str(r.color)}
-        for r in guild.roles
-    ]
+    if detailed:
+        roles = [
+            {"id": r.id, "name": r.name, "position": r.position, "color": str(r.color)}
+            for r in guild.roles
+        ]
+    else:
+        roles = [{"id": r.id, "name": r.name} for r in guild.roles]
     return {"categories": categories, "channels": channels, "roles": roles}
 
 
 async def list_structure(
     guild: discord.Guild, args: ListStructureArgs, ctx: ToolContext | None = None
 ) -> dict[str, Any]:
-    return await snapshot(guild)
+    # The tool the model calls when it wants the full picture — topics and permission overwrites.
+    return await snapshot(guild, detailed=True)
 
 
 # --------------------------------------------------------------------------- resolution
