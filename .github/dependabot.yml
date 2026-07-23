@@ -15,3 +15,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: chore
+
+  # Track the digest-pinned base image in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
