@@ -29,6 +29,7 @@ from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
 from roger.brains.digest import run_digest_job, seed_feeds_if_empty
 from roger.config import Settings, load_settings
+from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
 from roger.store import AuditStatus, Store
 from roger.tools.context import ToolContext
@@ -43,6 +44,10 @@ CONFIRM_TIMEOUT = 120
 # ROGER_VERSION). It's image metadata, not host-injected config, so it's read straight from the
 # environment rather than through Settings/compose. Defaults to "dev" for local runs.
 ROGER_VERSION = os.getenv("ROGER_VERSION", "dev")
+
+# Liveness (§ backlog 1.4): the heartbeat loop refreshes HEARTBEAT_PATH; the Dockerfile HEALTHCHECK
+# reads it via `python -m roger.health`. Kept well under health.MAX_AGE_S so a beat can be missed.
+HEARTBEAT_INTERVAL_S = 60
 
 # Ops watchdog (§ backlog 1.2): a periodic health sweep pushes deduped alerts to the ops channel.
 WATCHDOG_INTERVAL_MIN = 10
@@ -334,6 +339,12 @@ def _digest_problem(status: str) -> str | None:
     return status
 
 
+def _touch_heartbeat(path: str = HEARTBEAT_PATH) -> None:
+    """Rewrite the liveness file so its mtime is now (content is informational only)."""
+    with open(path, "w") as handle:
+        handle.write(str(time.time()))
+
+
 # --------------------------------------------------------------------------- client
 
 
@@ -365,6 +376,7 @@ class RogerClient(discord.Client):
         if seeded:
             log.info("seeded %d feed(s) from DIGEST_FEEDS into the store", seeded)
         await self._maybe_prune()  # tidy expired rows on boot; the watchdog repeats it daily
+        self._heartbeat.start()  # liveness for the Dockerfile HEALTHCHECK (always on)
         # Start the daily loop whenever a channel is configured — Roger can curate feeds at runtime.
         if self.settings.digest_channel_id is not None:
             self._digest_loop.change_interval(
@@ -544,6 +556,15 @@ class RogerClient(discord.Client):
 
     @_watchdog.before_loop
     async def _before_watchdog(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(seconds=HEARTBEAT_INTERVAL_S)
+    async def _heartbeat(self) -> None:
+        # A tick proves the event loop is turning; a wedge stops it and the file goes stale.
+        _touch_heartbeat()
+
+    @_heartbeat.before_loop
+    async def _before_heartbeat(self) -> None:
         await self.wait_until_ready()
 
 

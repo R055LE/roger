@@ -24,4 +24,10 @@ ENV PYTHONUNBUFFERED=1
 # this trivial layer, not the dependency install above. Defaults to "dev" for local builds.
 ARG ROGER_VERSION=dev
 ENV ROGER_VERSION=${ROGER_VERSION}
+
+# Liveness: the bot's heartbeat loop refreshes /tmp/roger.healthy every 60s; a wedged event loop
+# lets it go stale and the container flips to unhealthy. start-period covers the gateway connect.
+HEALTHCHECK --interval=60s --timeout=5s --start-period=45s --retries=3 \
+  CMD ["python", "-m", "roger.health"]
+
 CMD ["python", "-m", "roger"]
