@@ -82,6 +82,19 @@ def _today() -> str:
     return time.strftime("%Y-%m-%d")
 
 
+_DAY_SECONDS = 86_400
+
+# Retention windows (days) for the time-series tables. `audit` is the tamper-evident trail, so it's
+# kept the longest; ambient/admin conversation memory is short-lived by design (privacy + it stops
+# being useful context quickly); `seen` only needs to outlive a feed's practical re-post window.
+RETENTION_DAYS: dict[str, int] = {
+    "ambient_log": 30,
+    "admin_log": 30,
+    "seen": 90,
+    "audit": 365,
+}
+
+
 class Store:
     def __init__(self, path: str) -> None:
         self._path = path
@@ -298,3 +311,28 @@ class Store:
             [(feed_url, entry_id, now) for feed_url, entry_id in pairs],
         )
         await self._conn.commit()
+
+    # --- retention (§ backlog 1.3) ---
+
+    async def prune(self, *, now: float | None = None) -> dict[str, int]:
+        """Delete rows past their retention window; reclaim space. Returns rows removed per table.
+
+        Idempotent: a second run finds nothing left to delete. ``VACUUM`` runs outside any
+        transaction (after the commit) so it can actually shrink the file on disk.
+        """
+        cutoff_now = time.time() if now is None else now
+        deleted: dict[str, int] = {}
+        for table, days in RETENTION_DAYS.items():
+            cutoff = cutoff_now - days * _DAY_SECONDS
+            # table names come from the fixed RETENTION_DAYS dict above, never user input.
+            cursor = await self._conn.execute(
+                f"DELETE FROM {table} WHERE ts < ?",  # noqa: S608
+                (cutoff,),
+            )
+            deleted[table] = cursor.rowcount
+            await cursor.close()  # VACUUM refuses to run with any statement still in progress
+        await self._conn.commit()
+        checkpoint = await self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        await checkpoint.close()
+        await self._conn.execute("VACUUM")
+        return deleted

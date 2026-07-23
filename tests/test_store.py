@@ -4,7 +4,7 @@ import time
 
 import aiosqlite
 
-from roger.store import AuditStatus, Store
+from roger.store import RETENTION_DAYS, AuditStatus, Store
 
 
 async def test_record_audit_persists(tmp_path):
@@ -101,6 +101,38 @@ async def test_migration_backfills_cost_column_on_preexisting_db(tmp_path):
         # Reopening an already-current DB must be a harmless no-op (idempotent migration).
         store = await Store(path).open()
         assert abs(await store.cost_today("admin") - 0.005) < 1e-9
+    finally:
+        await store.close()
+
+
+async def test_prune_drops_expired_rows_and_keeps_recent(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        now = time.time()
+        old = now - 100 * 86_400  # 100 days ago — past ambient(30)/admin(30)/seen(90) windows
+        recent = now - 1 * 86_400  # yesterday — inside every window
+
+        # ambient_log / admin_log go through the public writers, then we backdate one row each.
+        await store.add_ambient(1, 2, "user", "old")
+        await store.add_ambient(1, 2, "user", "fresh")
+        conn = store._conn
+        await conn.execute("UPDATE ambient_log SET ts = ? WHERE content = 'old'", (old,))
+        await conn.execute("UPDATE ambient_log SET ts = ? WHERE content = 'fresh'", (recent,))
+        await store.mark_seen([("http://f", "old"), ("http://f", "fresh")])
+        await conn.execute("UPDATE seen SET ts = ? WHERE entry_id = 'old'", (old,))
+        await conn.execute("UPDATE seen SET ts = ? WHERE entry_id = 'fresh'", (recent,))
+        await conn.commit()
+
+        deleted = await store.prune(now=now)
+        assert deleted["ambient_log"] == 1 and deleted["seen"] == 1
+
+        rows = await store.recent_ambient(1, 2)
+        assert [r["content"] for r in rows] == ["fresh"]  # only the recent row survives
+        # 'old' is unseen again (its dedupe row pruned); 'fresh' is still marked seen
+        assert await store.filter_unseen("http://f", ["old", "fresh"]) == {"old"}
+
+        # Idempotent: a second pass finds nothing left to remove.
+        assert await store.prune(now=now) == dict.fromkeys(RETENTION_DAYS, 0)
     finally:
         await store.close()
 

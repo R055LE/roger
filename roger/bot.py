@@ -353,6 +353,7 @@ class RogerClient(discord.Client):
         )
         self._perms_checked = False
         self._ops = OpsNotifier(self._post_ops)
+        self._last_prune_date: str | None = None
 
     async def setup_hook(self) -> None:
         self._assert_non_privileged()
@@ -363,6 +364,7 @@ class RogerClient(discord.Client):
         seeded = await seed_feeds_if_empty(self.store, self.settings)
         if seeded:
             log.info("seeded %d feed(s) from DIGEST_FEEDS into the store", seeded)
+        await self._maybe_prune()  # tidy expired rows on boot; the watchdog repeats it daily
         # Start the daily loop whenever a channel is configured — Roger can curate feeds at runtime.
         if self.settings.digest_channel_id is not None:
             self._digest_loop.change_interval(
@@ -506,9 +508,18 @@ class RogerClient(discord.Client):
     async def _before_digest(self) -> None:
         await self.wait_until_ready()
 
+    async def _maybe_prune(self) -> None:
+        """Prune expired rows at most once per calendar day (called at boot and by the watchdog)."""
+        today = time.strftime("%Y-%m-%d")
+        if today == self._last_prune_date:
+            return
+        self._last_prune_date = today
+        log.info("pruned expired rows: %s", await self.store.prune())
+
     @tasks.loop(minutes=WATCHDOG_INTERVAL_MIN)
     async def _watchdog(self) -> None:
         """Periodic health sweep → deduped ops alerts: permission loss and budget thresholds."""
+        await self._maybe_prune()
         guild = self.get_guild(self.settings.guild_id)
         if guild is not None and guild.me is not None:
             missing = _missing_permissions(guild.me.guild_permissions)
