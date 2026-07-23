@@ -134,14 +134,19 @@ SAST, so this is the missing supply-chain half.
 *Why:* dependency CVEs are the most common way a "finished" project rots; automating the check is the
 whole point of the labs this repo sits beside.
 
-### 2.3 Coverage measurement + threshold — **S**
-CI runs `pytest` with no coverage gate. Add `pytest-cov` with a floor (the global rules target 80%)
-so a green check means "covered," not just "didn't crash." Publish the number in the run summary.
+### 2.3 Coverage measurement + threshold — **S** — *shipped*
+CI ran `pytest` with no coverage gate. Now `pytest-cov` runs in CI with `--cov-fail-under=75` and a
+term-missing report.
 
-### 2.4 Pin the base image by digest — **S**
-`Dockerfile` uses `python:3.12-slim` — a moving tag, which contradicts the "pin versions, no `latest`"
-principle. Pin to a `@sha256:` digest and let Dependabot bump it (Dependabot already runs; extend it
-to Docker if it isn't watching the base).
+- [x] `pytest-cov==7.1.0` dev dep; `[tool.coverage.run]` omits the `__main__` entrypoint.
+- [x] CI gate at 75% (current total 78.6%; the testable core is 90–100%, `bot.py`'s Discord glue is
+      the drag — a regression guard, not a purity bar).
+
+### 2.4 Pin the base image by digest — **S** — *shipped*
+`Dockerfile` used `python:3.12-slim` — a moving tag, contradicting "pin versions, no `latest`."
+
+- [x] Pinned to `python:3.12-slim@sha256:57cd7c3a…` (tag kept for readability).
+- [x] Extended Dependabot with a `docker` ecosystem so the digest + comment get bumped weekly.
 
 ---
 
