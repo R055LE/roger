@@ -158,7 +158,7 @@ async def _run_tool(
         return {"error": f"invalid arguments: {exc}"}, AuditStatus.INVALID, "arg validation"
 
     try:
-        if spec.requires_confirm:
+        if spec.needs_confirm(args):
             diff = await executors.preview(spec.name, guild, args)
             if not await confirm(diff):
                 return {"status": "denied by owner"}, AuditStatus.DENIED, "owner denied"

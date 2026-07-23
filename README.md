@@ -87,9 +87,9 @@ Feature-complete across the planned phases:
   now`), deduped so nothing posts twice. Roger curates its own feed list: `DIGEST_FEEDS` seeds it
   once, then Roger validates candidates against the live web and adds or drops them on request.
 
-Runs as a non-root, read-only-rootfs container. ~80 tests cover the guard rules, the tool loop
-(including the confirm-gated edit and post tools), the rate limiter, and the digest and
-feed-curation paths.
+Runs as a non-root, read-only-rootfs container. ~85 tests cover the guard rules, the tool loop
+(including channel creation with access presets and the confirm-gated edit and post tools), the
+rate limiter, and the digest and feed-curation paths.
 
 ## License
 

@@ -47,14 +47,18 @@ These hold regardless of what any model outputs. They are the load-bearing part 
 - **§2.7 Permission allowlist.** Only a fixed set of overwrite bits is expressible through the
   tool schema (§7). Anything outside the allowlist is *unrepresentable* — the model literally
   cannot ask for it.
-- **§2.8 Confirm-gated mutations to existing state.** Every tool that touches *existing* state —
-  `set_permissions`, `edit_channel`, and `post_message` — requires interactive owner approval
-  against a rendered diff before it runs. Creation tools (`create_channel`, `create_role`) apply
-  without a confirm because they only add new, empty, zero-permission objects. The one creation-time
-  overwrite that touches @everyone — making a **brand-new** channel read-only
-  (`create_channel(read_only=True)`) — still applies without a confirm because the channel has no
-  members or history, so its blast radius is nil; Roger also grants *itself* an overwrite there so it
-  is never locked out of a channel it just restricted.
+- **§2.8 Confirm-gated mutations.** Every tool that changes *existing* state — `set_permissions`,
+  `edit_channel`, `post_message` — requires interactive owner approval against a rendered diff before
+  it runs. Creation is exempt by default: `create_channel` / `create_role` add new, empty,
+  zero-permission objects, and setting a brand-new channel's access at creation (`read_only`,
+  per-role `grants`) has nil blast radius — no members, no history — so it applies immediately.
+  Whenever a creation overwrite restricts @everyone, Roger also grants *itself* an overwrite so it is
+  never locked out of a channel it just made. The **one deliberate exception is
+  `create_channel(private=True)`**: hiding a channel is still nil-blast-radius, but it is
+  confirm-gated anyway — a hidden channel is a surprising side effect, and keeping the confirm ritual
+  consistent for security-relevant actions is worth more than shaving a click. Confirmation can thus
+  be *static* (a tool always confirms) or *conditional on the args* (`create_channel` confirms only
+  when `private`), via `ToolSpec.needs_confirm`.
 - **§2.9 Budgets.** A hard cap of **5 tool calls per request** (`MAX_TOOL_CALLS`) and **8 model
   round-trips** (`MAX_TURNS`), plus per-brain **daily token caps** (§11) checked before every call.
 - **§2.10 No secrets in git — ever, not even encrypted.** Secrets live only in a `sops`+`age`
@@ -121,9 +125,11 @@ Bounds: 5 tool calls, 8 turns (§2.9).
 Three layers, one per file under `roger/tools/`:
 
 - **`schemas.py`** — each tool is a `ToolSpec`: name, description, a pydantic args model
-  (`extra="forbid"`, so the model can't smuggle fields), and a `requires_confirm` flag.
-  `openai_tools()` renders the registry into the function-calling schema the model sees. The
-  permission **allowlist** (§2.7) is a `Literal` of ten overwrite bits — nothing else is expressible.
+  (`extra="forbid"`, so the model can't smuggle fields), and a confirm rule — static
+  (`requires_confirm`) or per-call (`confirm_when(args)`, e.g. `create_channel` confirms only when
+  `private=True`), evaluated through `needs_confirm`. `openai_tools()` renders the registry into the
+  function-calling schema the model sees. The permission **allowlist** (§2.7) is a `Literal` of ten
+  overwrite bits — nothing else is expressible, at creation (`grants`) or after (`set_permissions`).
 - **`guard.py`** — pure sanitizers and business logic (name sanitizing, duplicate checks, fuzzy
   resolution, color parsing). Kept import-free so it unit-tests in isolation. Raises `GuardError`.
 - **`executors.py`** — the actual Discord API calls. `snapshot()` doubles as the pre-request server
@@ -136,7 +142,7 @@ Registry:
 | Tool | Mutates? | Confirm? |
 |---|---|---|
 | `list_structure` | no | — |
-| `create_channel` | yes | no (read-only-at-creation is §2.8) |
+| `create_channel` | yes (read_only / private / per-role grants) | only when `private=True` (§2.8) |
 | `create_role` | yes | no (always zero-perm, §2.6) |
 | `set_permissions` | yes | **yes** (§2.8) |
 | `edit_channel` | yes (rename/topic/move — never delete) | **yes** (§2.8) |

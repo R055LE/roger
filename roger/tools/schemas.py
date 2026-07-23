@@ -7,6 +7,7 @@ the model can never smuggle unexpected fields), and whether it needs interactive
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -36,12 +37,19 @@ class ListStructureArgs(ToolArgs):
     """No arguments — returns the full server structure."""
 
 
+class ChannelGrant(ToolArgs):
+    role: str  # role name/id or user id, resolved live (prefer read_only/private for @everyone)
+    allow: list[PermName] = Field(min_length=1)  # permissions to allow this target at creation
+
+
 class CreateChannelArgs(ToolArgs):
     name: str
     kind: Literal["text", "voice", "category"]
     category: str | None = None  # name or id; resolved live; invalid for kind=category
     topic: str | None = None  # text channels only
     read_only: bool = False  # text: deny send_messages for @everyone at creation (no confirm, §2.8)
+    private: bool = False  # text/voice: deny @everyone view_channel — hidden channel (confirmed)
+    grants: list[ChannelGrant] = Field(default_factory=list, max_length=10)  # per-role allow bits
 
 
 class CreateRoleArgs(ToolArgs):
@@ -114,6 +122,13 @@ class ToolSpec:
     description: str
     args_model: type[ToolArgs]
     requires_confirm: bool = False
+    # Optional per-call override: gate confirmation on the validated args (e.g. only when private).
+    confirm_when: Callable[[Any], bool] | None = None
+
+    def needs_confirm(self, args: Any) -> bool:
+        if self.confirm_when is not None:
+            return self.confirm_when(args)
+        return self.requires_confirm
 
 
 REGISTRY: dict[str, ToolSpec] = {
@@ -126,9 +141,13 @@ REGISTRY: dict[str, ToolSpec] = {
         name="create_channel",
         description=(
             "Create a text, voice, or category channel. Optionally place a text/voice channel "
-            "under an existing category, and make a text channel read-only for @everyone."
+            "under a category, set a text topic, and set access at creation: read_only (deny "
+            "@everyone send), private (hide from @everyone entirely), and grants (per-role allow, "
+            "e.g. let a 'DJs' role send in an otherwise read-only channel). A private channel "
+            "requires the owner to confirm; read_only and grants apply immediately."
         ),
         args_model=CreateChannelArgs,
+        confirm_when=lambda args: args.private,
     ),
     "create_role": ToolSpec(
         name="create_role",

@@ -154,12 +154,38 @@ async def _resolve_target(guild: discord.Guild, query: str) -> discord.Role | di
 # --------------------------------------------------------------------------- mutations
 
 
+async def _creation_overwrites(
+    guild: discord.Guild, *, read_only: bool, private: bool, grants: list
+) -> dict[Any, discord.PermissionOverwrite]:
+    """Build the overwrite map for a brand-new channel from its access intent.
+
+    A new channel has no members and no history, so restricting it at creation has nil blast radius
+    (§2.8). Whenever we restrict @everyone we also keep Roger's own access, or it would lock itself
+    out of a channel it just made — @everyone includes the bot.
+    """
+    overwrites: dict[Any, discord.PermissionOverwrite] = {}
+    everyone_bits: dict[str, bool] = {}
+    if private:
+        everyone_bits["view_channel"] = False
+    if read_only:
+        everyone_bits["send_messages"] = False
+    if everyone_bits:
+        overwrites[guild.default_role] = discord.PermissionOverwrite(**everyone_bits)
+        overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+    for grant in grants:
+        target = await _resolve_target(guild, grant.role)
+        overwrites[target] = discord.PermissionOverwrite(**dict.fromkeys(grant.allow, True))
+    return overwrites
+
+
 async def create_channel(
     guild: discord.Guild, args: CreateChannelArgs, ctx: ToolContext | None = None
 ) -> dict[str, Any]:
     if args.kind == "category":
         if args.category is not None:
             raise GuardError("a category can't be nested under another category")
+        if args.read_only or args.private or args.grants:
+            raise GuardError("permissions can't be set on a category at creation")
         name = sanitize_display_name(args.name)
         check_no_duplicate("category", name, [c.name for c in guild.categories])
         created = await guild.create_category(name=name)
@@ -173,15 +199,9 @@ async def create_channel(
     if args.kind == "text":
         name = sanitize_channel_name(args.name)
         check_no_duplicate("text channel", name, [c.name for c in guild.text_channels])
-        overwrites: dict[Any, discord.PermissionOverwrite] = {}
-        if args.read_only:
-            # New channel, blast radius nil — applied at creation without a confirm (§2.8).
-            overwrites[guild.default_role] = discord.PermissionOverwrite(send_messages=False)
-            # @everyone includes the bot: without this, Roger locks *itself* out of a channel it
-            # just made read-only, and post_message/the digest couldn't reach it. Keep our access.
-            overwrites[guild.me] = discord.PermissionOverwrite(
-                view_channel=True, send_messages=True
-            )
+        overwrites = await _creation_overwrites(
+            guild, read_only=args.read_only, private=args.private, grants=args.grants
+        )
         created = await guild.create_text_channel(
             name=name, category=category_obj, topic=args.topic, overwrites=overwrites
         )
@@ -191,16 +211,27 @@ async def create_channel(
             "name": created.name,
             "category": category_obj.name if category_obj else None,
             "read_only": args.read_only,
+            "private": args.private,
+            "grants": [g.role for g in args.grants],
         }
 
+    if args.read_only:
+        raise GuardError("read_only applies to text channels only (voice has no send)")
     name = sanitize_display_name(args.name)
     check_no_duplicate("voice channel", name, [c.name for c in guild.voice_channels])
-    created = await guild.create_voice_channel(name=name, category=category_obj)
+    overwrites = await _creation_overwrites(
+        guild, read_only=False, private=args.private, grants=args.grants
+    )
+    created = await guild.create_voice_channel(
+        name=name, category=category_obj, overwrites=overwrites
+    )
     return {
         "created": "voice",
         "id": created.id,
         "name": created.name,
         "category": category_obj.name if category_obj else None,
+        "private": args.private,
+        "grants": [g.role for g in args.grants],
     }
 
 
@@ -415,6 +446,21 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
         channel, _ = _resolve_editable_channel(guild, args.channel)
         body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
         return f"post to #{channel.name}:\n{body}"
+    if name == "create_channel":
+        head = f"create {args.kind} channel: {args.name}"
+        if args.category:
+            head += f" (under {args.category})"
+        flags = []
+        if args.private:
+            flags.append("private — hidden from @everyone")
+        if args.read_only:
+            flags.append("read-only for @everyone")
+        if flags:
+            head += " — " + ", ".join(flags)
+        lines = [head]
+        for grant in args.grants:
+            lines.append(f"  {grant.role}: allow[{', '.join(grant.allow)}]")
+        return "\n".join(lines)
     return name
 
 

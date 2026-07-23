@@ -6,11 +6,12 @@ import discord
 import pytest
 
 from roger.store import Store
-from roger.tools import executors
+from roger.tools import executors, schemas
 from roger.tools.context import ToolContext
 from roger.tools.guard import GuardError
 from roger.tools.schemas import (
     AddFeedArgs,
+    ChannelGrant,
     CreateChannelArgs,
     CreateRoleArgs,
     EditChannelArgs,
@@ -67,6 +68,23 @@ class FakeGuild:
             if channel.id == channel_id:
                 return channel
         return None
+
+    def get_role(self, role_id):
+        for role in self.roles:
+            if role.id == role_id:
+                return role
+        return None
+
+    def add_role(self, name):
+        role = FakeRole(self._id(), name)
+        self.roles.append(role)
+        return role
+
+    async def create_voice_channel(self, *, name, category, overwrites):
+        self.last_overwrites = overwrites
+        channel = FakeChannel(self._id(), name, category=category)
+        self.voice_channels.append(channel)
+        return channel
 
     def add_text(self, name, *, category=None, topic=None):
         channel = FakeChannel(self._id(), name, category=category, topic=topic)
@@ -142,6 +160,85 @@ async def test_create_category_cannot_be_nested():
         await executors.create_channel(
             guild, CreateChannelArgs(name="Media", kind="category", category="Other")
         )
+
+
+async def test_create_private_text_hides_from_everyone_and_keeps_bot_access():
+    guild = FakeGuild()
+    result = await executors.create_channel(
+        guild, CreateChannelArgs(name="staff", kind="text", private=True)
+    )
+    assert result["private"] is True
+    overwrites = guild.last_overwrites
+    assert overwrites[guild.default_role].view_channel is False  # hidden from @everyone
+    mine = overwrites[guild.me]
+    assert mine.view_channel is True and mine.send_messages is True  # Roger keeps its own access
+
+
+async def test_create_private_voice_channel_hides_from_everyone():
+    guild = FakeGuild()
+    result = await executors.create_channel(
+        guild, CreateChannelArgs(name="War Room", kind="voice", private=True)
+    )
+    assert result["created"] == "voice" and result["private"] is True
+    assert guild.last_overwrites[guild.default_role].view_channel is False
+
+
+async def test_create_channel_grant_allows_a_role_at_creation():
+    guild = FakeGuild()
+    djs = guild.add_role("DJs")
+    result = await executors.create_channel(
+        guild,
+        CreateChannelArgs(
+            name="podcast",
+            kind="text",
+            read_only=True,
+            grants=[ChannelGrant(role="DJs", allow=["send_messages"])],
+        ),
+    )
+    assert result["grants"] == ["DJs"]
+    assert guild.last_overwrites[djs].send_messages is True  # DJs may post...
+    assert guild.last_overwrites[guild.default_role].send_messages is False  # ...@everyone can't
+
+
+async def test_create_voice_rejects_read_only():
+    guild = FakeGuild()
+    with pytest.raises(GuardError):
+        await executors.create_channel(
+            guild, CreateChannelArgs(name="Lounge", kind="voice", read_only=True)
+        )
+
+
+async def test_create_category_rejects_permission_intent():
+    guild = FakeGuild()
+    with pytest.raises(GuardError):
+        await executors.create_channel(
+            guild, CreateChannelArgs(name="Media", kind="category", private=True)
+        )
+
+
+async def test_create_channel_confirms_only_when_private():
+    spec = schemas.REGISTRY["create_channel"]
+    assert spec.needs_confirm(CreateChannelArgs(name="x", kind="text", private=True)) is True
+    assert spec.needs_confirm(CreateChannelArgs(name="x", kind="text", read_only=True)) is False
+    assert spec.needs_confirm(CreateChannelArgs(name="x", kind="text")) is False
+
+
+async def test_preview_create_channel_shows_private_and_grants():
+    guild = FakeGuild()
+    diff = await executors.preview(
+        "create_channel",
+        guild,
+        CreateChannelArgs(
+            name="podcast",
+            kind="text",
+            category="Media",
+            private=True,
+            read_only=True,
+            grants=[ChannelGrant(role="DJs", allow=["send_messages"])],
+        ),
+    )
+    assert "create text channel: podcast" in diff and "under Media" in diff
+    assert "private" in diff and "DJs: allow[send_messages]" in diff
 
 
 # --------------------------------------------------------------------------- edit_channel / post
