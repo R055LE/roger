@@ -34,19 +34,24 @@ is a weak proxy for the thing that actually costs money. OpenRouter returns the 
 infra+AI bridge the portfolio is aiming at, and it's the honest version of the budget the code
 already pretends to enforce.
 
-### 1.2 Make the ops channel an alerting surface, not just a boot ping — **S/M**
-`_post_ops` already exists and works; the only thing that ever calls it is `_startup_report`. Wire it
-to the events an operator actually wants pushed:
+### 1.2 Make the ops channel an alerting surface, not just a boot ping — **S/M** — *mostly shipped*
+`_post_ops` already exists and works; the only thing that used to call it was `_startup_report`. Now
+wired to the events an operator actually wants pushed, via an in-memory `OpsNotifier` (per-key
+cooldown) and a `_watchdog` `tasks.loop` (every 10 min, started only when an ops channel is set):
 
-- **Budget threshold** — first crossing of 80% of any brain's daily cap (once/day/brain).
-- **Digest failure** — `run_digest_job` returning a non-ok status.
-- **Permission loss** — a required scope missing on a later check, not just at boot.
-- **LLM error spike** — repeated `APIConnectionError`/`BudgetExceeded` inside a short window.
+- [x] **Budget threshold** — first crossing of 80% of any brain's daily token cap, quoting tokens +
+      $, deduped once per brain per day. *(next commit)*
+- [x] **Permission loss** — a required scope missing on a later sweep (not just at boot), re-reminding
+      every 6h while broken. *(next commit)*
+- [x] **Digest failure** — `run_digest_job` returning anything but a known-OK status, hooked on the
+      digest loop and deduped per day. *(next commit)*
+- [ ] **LLM error spike** — repeated `APIConnectionError` / `BudgetExceeded` inside a short window.
+      Deferred: needs error-rate tracking, more infra than the other three combined.
 
-Keep each alert idempotent (dedupe key + cooldown) so a flapping condition can't spam the channel.
+Each alert is idempotent (dedupe key + cooldown) so a flapping condition can't spam the channel.
 
-*Why:* the alerting surface is already built and sitting idle. This is the cheapest large jump in
-operational awareness on the list, and it's on-brand with the SRE observability lab's alerting work.
+*Why:* the alerting surface was already built and sitting idle. Cheapest large jump in operational
+awareness on the list, on-brand with the SRE observability lab's alerting work.
 
 ### 1.3 Data retention & pruning — **S**
 Every table in `store.py` grows unbounded: `audit`, `ambient_log`, `admin_log`, `seen`. Two problems:
