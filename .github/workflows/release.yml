@@ -7,6 +7,10 @@ name: release
 on:
   push:
     branches: [main]
+    # Docs-only pushes don't change runtime behaviour — skip the rebuild/redeploy. GitHub runs the
+    # workflow only when a push touches at least one non-markdown path (mixed code+docs still builds).
+    paths-ignore:
+      - "**.md"
 
 permissions:
   contents: read
