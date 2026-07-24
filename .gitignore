@@ -32,6 +32,10 @@ Thumbs.db
 # Build spec — workshopped locally, intentionally not published
 roger-build-spec.md
 
+# Private operational context — host-side state, deploy facts, budgets. Never committed
+# (keeps host names / ports / key paths out of the public repo). See feedback_claude_local_md_pattern.
+CLAUDE.local.md
+
 # Runtime data (sqlite db + bind-mount volume)
 data/
 *.db
