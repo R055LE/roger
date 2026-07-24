@@ -47,7 +47,34 @@ jobs:
             type=raw,value=main
             type=sha,prefix=sha-,format=short
 
-      - name: Build and push
+      # Build locally first (load, no push) so Trivy can gate on it. The host pulls :main on a timer
+      # independent of this workflow, so a scan *after* push wouldn't gate anything — the image only
+      # reaches GHCR if it's clean.
+      - name: Build (load for scanning)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          build-args: |
+            ROGER_VERSION=${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Resolve lowercase image ref
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}:main" >> "$GITHUB_OUTPUT"
+
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.img.outputs.ref }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true # only fixable vulns block a release
+          exit-code: "1"
+
+      # Cache-hit rebuild (same inputs) that pushes with attestations only after the scan passes.
+      - name: Push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .

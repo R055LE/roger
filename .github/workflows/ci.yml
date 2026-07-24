@@ -32,3 +32,9 @@ jobs:
         # Coverage gate is a regression guard, not a purity bar — the testable core sits well above
         # it; bot.py's Discord I/O glue is integration-test territory that drags the total down.
         run: pytest --cov=roger --cov-report=term-missing --cov-fail-under=75
+      - name: Audit dependencies (pip-audit)
+        # Fails the build on a known CVE in the pinned deps. --skip-editable ignores the local
+        # `roger` install (no PyPI version to resolve).
+        run: |
+          pip install pip-audit==2.10.1
+          pip-audit --skip-editable
