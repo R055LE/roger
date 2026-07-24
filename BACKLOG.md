@@ -117,13 +117,21 @@ is exactly where a hang is most visible to the owner.
 On-brand with the container-hardening and IaC-security labs — and currently the repo stops just short
 of its own preached bar.
 
-### 2.1 Sign the image with Cosign (keyless) + verify at deploy — **M**
-`release.yml` attests SBOM and provenance but doesn't sign the image. Add keyless (OIDC) `cosign sign`
-in the release workflow, and a `cosign verify` gate in `roger-deploy.sh` before `docker compose up`.
+### 2.1 Sign the image with Cosign (keyless) + verify at deploy — **M** — *signing live; host gate pending*
+`release.yml` attested SBOM and provenance but didn't sign the image.
 
-*Why:* closes the supply-chain loop the container-hardening-lab already documents, and makes the pull-
-based deploy verify *what* it's pulling — not just that a digest changed. Sets up a future Kyverno/
-admission verify story if Roger ever lands on the k8s-bootstrap-lab.
+- [x] Keyless (OIDC) `cosign sign` in `release.yml` after push — **live and verified** on the host
+      (cosign v3.1.2 pinned; identity `…/release.yml@refs/heads/main`, issuer
+      `token.actions.githubusercontent.com`).
+- [x] `cosign verify` gate in `roger-deploy.sh` between pull and `up` (fail-closed); `bootstrap.sh`
+      installs cosign to `/usr/local/bin` so the systemd service finds it.
+- [ ] **Enable on the live host:** install cosign to `/usr/local/bin` on the running host and push the
+      updated `roger-deploy.sh` to it. Deferred to a confirmed step — it gates the live deploy, so
+      cosign must land first or the timer's deploys (safely) halt.
+
+*Why:* closes the supply-chain loop the container-hardening-lab documents, and makes the pull-based
+deploy verify *what* it's pulling — not just that a digest changed. Sets up a future Kyverno/admission
+verify story if Roger ever lands on the k8s-bootstrap-lab.
 
 ### 2.2 Dependency + image vuln scanning in CI — **S** — *shipped*
 No `pip-audit` on the locked deps and no image scan in `release.yml`, despite the "check for CVEs"

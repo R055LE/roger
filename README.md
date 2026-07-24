@@ -31,6 +31,9 @@ Security is structural, not prompt-deep:
 - **Budgeted.** Per-brain daily token caps and a hard cap on tool calls per request.
 - **No secrets in git — ever, not even encrypted.** Secrets live in a `sops`+`age`-encrypted
   `roger.env` on the host; the repo carries only `.sops.yaml` and `roger.env.example`.
+- **Signed, scanned supply chain.** CI audits deps (`pip-audit`) and scans the image (Trivy, build →
+  scan → push); releases are signed keyless with cosign and the deploy host verifies the signature
+  before it runs — a bad or unsigned image fails the deploy closed.
 
 ## Stack
 

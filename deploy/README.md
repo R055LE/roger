@@ -12,18 +12,20 @@ push to main ──▶ GitHub Actions ──▶ ghcr.io/r055le/roger:main
                      docker compose pull + up -d  (secrets via sops)
 ```
 
-- **`release.yml`** builds the image on every push to `main` and publishes it to GHCR
-  (public, no secrets baked in — SBOM + provenance attestations attached).
-- **`roger-deploy.timer`** on the host polls that tag every 5 minutes and redeploys only when the
-  image digest changed. Docker's `restart: unless-stopped` keeps roger running across reboots;
-  the timer keeps it *current*.
+- **`release.yml`** builds the image on every push to `main`, scans it with **Trivy** (build → scan →
+  push, so a vulnerable image never reaches GHCR), publishes it (public, no secrets baked in — SBOM +
+  provenance attestations), and **signs it keyless with cosign** (Fulcio/Rekor, no private key).
+- **`roger-deploy.timer`** on the host polls that tag every 5 minutes, **verifies the cosign
+  signature** against the release workflow's OIDC identity, and redeploys only when the image digest
+  changed. A bad or missing signature fails the deploy closed. Docker's `restart: unless-stopped`
+  keeps roger running across reboots; the timer keeps it *current*.
 
 ## Pieces
 
 | File | Role |
 |---|---|
-| `bootstrap.sh` | Install Docker + compose + age + sops on the host. Idempotent. |
-| `roger-deploy.sh` | Pull + `up -d` + prune. Installed as `/usr/local/bin/roger-deploy`. |
+| `bootstrap.sh` | Install Docker + compose + age + sops + cosign on the host. Idempotent. |
+| `roger-deploy.sh` | Pull + **cosign verify** + `up -d` + prune. Installed as `/usr/local/bin/roger-deploy`. |
 | `roger-deploy.service` / `.timer` | systemd oneshot + 5-minute poll timer. |
 | `install-systemd.sh` | Install the above and enable the timer (runs the deploy as the invoking user). |
 
@@ -121,6 +123,11 @@ read-only container can write the SQLite DB into the bind mount.
 - **Why not watchtower.** It needs the Docker socket (root-equivalent) and nudges toward
   auto-`latest`. A plain `compose pull` on a timer is a smaller attack surface and keeps the
   version story honest.
+- **Signature gate.** `roger-deploy.sh` runs `cosign verify` between pull and `up`, pinned to the
+  release workflow's identity (`…/release.yml@refs/heads/main`) and the GitHub OIDC issuer. The gate
+  fails **closed**: no cosign, or an unsigned/tampered image, aborts the deploy and the last-good
+  container keeps running. `bootstrap.sh` installs cosign; if you enabled the gate on an already-
+  provisioned host, install cosign to `/usr/local/bin` first or the timer's deploys will (safely) halt.
 - **Later, over a private overlay.** If the host joins a mesh VPN, a push-on-merge deploy
   (Actions → SSH over the overlay) becomes possible without exposing the host. The pull timer is
   a fine permanent fallback either way.
