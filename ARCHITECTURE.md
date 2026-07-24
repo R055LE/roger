@@ -4,6 +4,10 @@ How Roger is put together and why. Source comments cite these sections as `(§N)
 what they point to. It's a design reference, not a spec to implement against; the code is the
 source of truth, and where they ever disagree, the code wins.
 
+Decisions that had real tradeoffs — the *why* behind a choice, and what it cost — are recorded as
+short ADRs in [`docs/decisions/`](docs/decisions/). This file describes the shape; those explain the
+turns.
+
 ## §1 Overview
 
 Roger is a **single-guild, owner-gated Discord assistant** built on hosted models via OpenRouter.
