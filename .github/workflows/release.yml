@@ -38,6 +38,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
       - name: Image metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -63,7 +66,10 @@ jobs:
 
       - name: Resolve lowercase image ref
         id: img
-        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY,,}:main" >> "$GITHUB_OUTPUT"
+        run: |
+          repo="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "name=$repo" >> "$GITHUB_OUTPUT"
+          echo "ref=$repo:main" >> "$GITHUB_OUTPUT"
 
       - name: Scan image (Trivy)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -75,6 +81,7 @@ jobs:
 
       # Cache-hit rebuild (same inputs) that pushes with attestations only after the scan passes.
       - name: Push
+        id: push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -87,3 +94,11 @@ jobs:
           sbom: true # SBOM attestation
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Keyless signature (Fulcio/Rekor) tied to this workflow's OIDC identity — no private key.
+      # The deploy host verifies it before running the image (see deploy/roger-deploy.sh).
+      - name: Sign image (keyless)
+        env:
+          IMAGE: ${{ steps.img.outputs.name }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
