@@ -11,6 +11,7 @@
 set -euo pipefail
 
 SOPS_VERSION="v3.13.2"
+COSIGN_VERSION="v3.1.2"
 DEPLOY_USER="${SUDO_USER:-$(id -un)}"
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -54,11 +55,33 @@ else
   install -m 0755 "${tmp}/sops" /usr/local/bin/sops
 fi
 
+# cosign verifies the image signature before each deploy (backlog 2.1 / roger-deploy.sh). Same
+# pinned + checksum-verified pattern as sops, installed to /usr/local/bin so the systemd service
+# (minimal PATH) can find it.
+if command -v cosign >/dev/null 2>&1 && cosign version 2>/dev/null | grep -q "${COSIGN_VERSION#v}"; then
+  log "cosign ${COSIGN_VERSION} already installed"
+else
+  log "Installing cosign ${COSIGN_VERSION} (checksum-verified)"
+  ctmp="$(mktemp -d)"
+  cbase="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}"
+  curl -fsSL "${cbase}/cosign-linux-amd64" -o "${ctmp}/cosign"
+  curl -fsSL "${cbase}/cosign_checksums.txt" -o "${ctmp}/checksums.txt"
+  cwant="$(grep ' cosign-linux-amd64$' "${ctmp}/checksums.txt" | awk '{print $1}')"
+  cgot="$(sha256sum "${ctmp}/cosign" | awk '{print $1}')"
+  if [ -z "$cwant" ] || [ "$cwant" != "$cgot" ]; then
+    echo "cosign checksum verification failed (want='$cwant' got='$cgot')" >&2
+    exit 1
+  fi
+  install -m 0755 "${ctmp}/cosign" /usr/local/bin/cosign
+  rm -rf "$ctmp"
+fi
+
 log "Installed versions:"
 docker --version
 docker compose version | head -1
 age --version | head -1
 sops --version | head -1
+cosign version 2>/dev/null | grep -i gitversion || cosign version | head -1
 
 cat <<'EOF'
 

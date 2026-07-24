@@ -16,9 +16,25 @@ exec 9>"${DEPLOY_DIR}/.deploy.lock"
 flock -n 9 || { echo "roger-deploy: another run holds the lock, skipping"; exit 0; }
 
 # compose interpolates the whole file (including required ${VAR:?} vars) on every subcommand,
-# so even `pull` needs the env populated — run both inside the sops-decrypted environment.
-echo "roger-deploy: pulling + applying"
-sops exec-env roger.env 'docker compose pull --quiet && docker compose up -d'
+# so even `pull` needs the env populated — run inside the sops-decrypted environment.
+echo "roger-deploy: pulling"
+sops exec-env roger.env 'docker compose pull --quiet'
+
+# Supply-chain gate (backlog 2.1): only run an image this repo's release workflow signed. cosign
+# resolves :main to its current digest and checks the keyless signature against the workflow's OIDC
+# identity. set -e means a bad/absent signature (or a missing cosign) aborts before `up` — fail closed.
+# cosign must be on PATH for the systemd service (install to /usr/local/bin); see deploy/README.md.
+IMAGE="ghcr.io/r055le/roger:main"
+COSIGN_IDENTITY="https://github.com/R055LE/roger/.github/workflows/release.yml@refs/heads/main"
+COSIGN_ISSUER="https://token.actions.githubusercontent.com"
+echo "roger-deploy: verifying image signature (cosign)"
+cosign verify \
+  --certificate-identity "$COSIGN_IDENTITY" \
+  --certificate-oidc-issuer "$COSIGN_ISSUER" \
+  "$IMAGE" >/dev/null
+
+echo "roger-deploy: applying"
+sops exec-env roger.env 'docker compose up -d'
 
 echo "roger-deploy: pruning superseded images"
 docker image prune -f >/dev/null
