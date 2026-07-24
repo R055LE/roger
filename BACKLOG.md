@@ -125,14 +125,17 @@ in the release workflow, and a `cosign verify` gate in `roger-deploy.sh` before 
 based deploy verify *what* it's pulling — not just that a digest changed. Sets up a future Kyverno/
 admission verify story if Roger ever lands on the k8s-bootstrap-lab.
 
-### 2.2 Dependency + image vuln scanning in CI — **S**
-No `pip-audit` on the locked deps and no image scan (Trivy/Grype) in `release.yml`, despite the global
-"check for CVEs before pinning" principle. Add `pip-audit` to the `ci` job and a Trivy scan of the
-built image to `release` (fail on fixable HIGH/CRITICAL). `ruff`'s `S` (bandit) rules already cover
-SAST, so this is the missing supply-chain half.
+### 2.2 Dependency + image vuln scanning in CI — **S** — *shipped*
+No `pip-audit` on the locked deps and no image scan in `release.yml`, despite the "check for CVEs"
+principle. `ruff`'s `S` (bandit) rules already cover SAST; this adds the supply-chain half.
 
-*Why:* dependency CVEs are the most common way a "finished" project rots; automating the check is the
-whole point of the labs this repo sits beside.
+- [x] `pip-audit==2.10.1` step in `ci` (`--skip-editable`), fails on a known dep CVE.
+- [x] Trivy scan in `release`, restructured to **build (load) → scan → push** so the gate is real:
+      the host pulls `:main` on a timer regardless of workflow status, so a scan *after* push wouldn't
+      stop a bad image. Fails on fixable CRITICAL/HIGH (`ignore-unfixed`).
+
+*Why:* dependency + image CVEs are the most common way a "finished" project rots; automating the
+check is the whole point of the labs this repo sits beside.
 
 ### 2.3 Coverage measurement + threshold — **S** — *shipped*
 CI ran `pytest` with no coverage gate. Now `pytest-cov` runs in CI with `--cov-fail-under=75` and a
