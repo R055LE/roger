@@ -300,7 +300,10 @@ REGISTRY: dict[str, ToolSpec] = {
             "Set your own presence: status (online, idle, dnd, invisible) and/or an activity line "
             "— 'playing', 'watching', 'listening', or 'competing' plus text, or 'none' to clear "
             "it. Only the fields you pass change; the rest are kept. It's persisted, so it "
-            "survives restarts. Cosmetic and self-only — no confirmation needed."
+            "survives restarts. Discord shows the verb only in the profile popout — the member "
+            "list shows your text alone — so pick text that reads naturally both after the verb "
+            "and on its own (prefer 'the server logs' over 'over the server'). Cosmetic and "
+            "self-only — no confirmation needed."
         ),
         args_model=SetPresenceArgs,
     ),
