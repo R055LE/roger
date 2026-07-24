@@ -48,8 +48,13 @@ with scopes `bot` and `applications.commands`, and tick exactly:
 | Manage Roles | create (zero-perm) roles and set channel overwrites |
 | Send Messages | post the digest, and `post_message` |
 | Embed Links | the digest is posted as an embed |
+| Add Reactions | the `add_reaction` tool |
+| Read Message History | Discord requires it to react to a message |
+| Change Nickname | the `set_nickname` tool (its own nick only) |
 
-That checklist is permission integer **`268454928`**. `Manage Roles` is the broad one — but Roger
+That checklist is permission integer **`335629392`**. The last three are for the cosmetic "toy"
+tools (`add_reaction`, `set_nickname`); drop them and only those tools go dark — grant them to
+Roger's role later without a re-invite if you'd rather. `Manage Roles` is the broad one — but Roger
 only ever creates zero-permission roles and applies overwrites from a fixed allowlist, so the tool
 surface is far narrower than the gateway grant (ARCHITECTURE §2.6, §2.7). Do **not** grant
 Administrator; nothing Roger does needs it.

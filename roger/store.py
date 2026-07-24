@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS feeds (
     title    TEXT,
     added_ts REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -215,6 +220,23 @@ class Store:
         )
         row = await cursor.fetchone()
         return float(row[0]) if row and row[0] is not None else 0.0
+
+    # --- small key/value bot state (presence outfit, etc.) ---
+
+    async def get_meta(self, key: str) -> str | None:
+        """Read one persisted bot-state value (opaque string), or None if unset."""
+        cursor = await self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def set_meta(self, key: str, value: str) -> None:
+        """Upsert one persisted bot-state value. Not a time-series table — never pruned."""
+        await self._conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        await self._conn.commit()
 
     # --- ambient own-thread memory (§8) ---
 

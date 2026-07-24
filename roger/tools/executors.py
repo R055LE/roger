@@ -8,6 +8,8 @@ would make, so the owner approves against a real diff — not the model's paraph
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import Any
 
 import discord
@@ -24,6 +26,7 @@ from roger.tools.guard import (
 )
 from roger.tools.schemas import (
     AddFeedArgs,
+    AddReactionArgs,
     CreateChannelArgs,
     CreateRoleArgs,
     EditChannelArgs,
@@ -33,7 +36,10 @@ from roger.tools.schemas import (
     PostMessageArgs,
     RemoveFeedArgs,
     RunDigestArgs,
+    ServerStatsArgs,
+    SetNicknameArgs,
     SetPermissionsArgs,
+    SetPresenceArgs,
     SuggestFeedsArgs,
 )
 
@@ -463,6 +469,167 @@ async def list_feeds(
     }
 
 
+# --------------------------------------------------------------------------- toys (self / read)
+
+# Where the persisted presence "outfit" lives in the meta table. bot.py reads this key on boot to
+# reapply it — Discord clears presence on every reconnect (i.e. every pull-based redeploy).
+PRESENCE_META_KEY = "presence"
+
+_ACTIVITY_TYPES = {
+    "playing": discord.ActivityType.playing,
+    "watching": discord.ActivityType.watching,
+    "listening": discord.ActivityType.listening,
+    "competing": discord.ActivityType.competing,
+}
+_STATUS_VALUES = {
+    "online": discord.Status.online,
+    "idle": discord.Status.idle,
+    "dnd": discord.Status.dnd,
+    "invisible": discord.Status.invisible,
+}
+
+
+def _build_activity(activity: str | None, text: str | None) -> discord.Activity | None:
+    if not activity or activity == "none" or not text:
+        return None
+    return discord.Activity(type=_ACTIVITY_TYPES[activity], name=text)
+
+
+async def apply_presence(client: Any, state: dict[str, Any]) -> None:
+    """Push a stored presence dict onto the gateway. Shared by the tool and bot.py's reapply."""
+    status = _STATUS_VALUES.get(state.get("status") or "online", discord.Status.online)
+    activity = _build_activity(state.get("activity"), state.get("text"))
+    await client.change_presence(status=status, activity=activity)
+
+
+async def set_presence(
+    guild: discord.Guild, args: SetPresenceArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    if ctx is None or ctx.client is None or ctx.store is None:
+        raise GuardError("presence control isn't available in this context")
+    raw = await ctx.store.get_meta(PRESENCE_META_KEY)
+    state: dict[str, Any] = json.loads(raw) if raw else {}
+    if args.status is not None:
+        state["status"] = args.status
+    if args.activity is not None:
+        if args.activity == "none":
+            state["activity"] = state["text"] = None
+        else:
+            state["activity"], state["text"] = args.activity, args.text
+    await apply_presence(ctx.client, state)
+    await ctx.store.set_meta(PRESENCE_META_KEY, json.dumps(state))
+    return {
+        "status": state.get("status") or "online",
+        "activity": state.get("activity"),
+        "text": state.get("text"),
+    }
+
+
+async def set_nickname(
+    guild: discord.Guild, args: SetNicknameArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    nick = args.nickname.strip() or None  # empty string → reset to the default name
+    try:
+        await guild.me.edit(nick=nick)
+    except discord.Forbidden as exc:
+        raise GuardError(
+            "I need the 'Change Nickname' permission — grant it to my role (see deploy/README.md)"
+        ) from exc
+    return {"nickname": nick, "reset": nick is None}
+
+
+async def server_stats(
+    guild: discord.Guild, args: ServerStatsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    # Everything here is read from the cached guild object — no extra API calls, no member intent.
+    age_days = (discord.utils.utcnow() - guild.created_at).days
+    return {
+        "name": guild.name,
+        "members": guild.member_count,  # available without the members intent (from GUILD_CREATE)
+        "channels": {
+            "text": len(guild.text_channels),
+            "voice": len(guild.voice_channels),
+            "categories": len(guild.categories),
+            "stage": len(getattr(guild, "stage_channels", [])),
+            "forums": len(getattr(guild, "forums", [])),
+        },
+        "roles": max(len(guild.roles) - 1, 0),  # exclude @everyone
+        "custom_emoji": len(guild.emojis),
+        "boost_tier": guild.premium_tier,
+        "boosts": guild.premium_subscription_count,
+        "created": guild.created_at.date().isoformat(),
+        "age_days": age_days,
+    }
+
+
+_MESSAGE_LINK_RE = re.compile(
+    r"(?:https?://)?(?:\w+\.)?discord(?:app)?\.com/channels/(\d+)/(\d+)/(\d+)"
+)
+
+
+def _resolve_message(
+    guild: discord.Guild, message: str, channel_query: str | None
+) -> tuple[str, int]:
+    """From a link, or a bare id plus a channel, return (channel name/id query, message id)."""
+    link = _MESSAGE_LINK_RE.search(message.strip())
+    if link:
+        link_guild, channel_id, message_id = (int(part) for part in link.groups())
+        if link_guild != guild.id:
+            raise GuardError("that message link points at a different server")
+        return str(channel_id), message_id
+    ref = message.strip()
+    if not ref.isdigit():
+        raise GuardError("give me a message link, or a message id plus the channel")
+    if channel_query is None:
+        raise GuardError("a bare message id needs the channel too")
+    return channel_query, int(ref)
+
+
+def _resolve_emoji(guild: discord.Guild, raw: str) -> Any:
+    """Return what ``add_reaction`` accepts: a guild Emoji/PartialEmoji, or a unicode string."""
+    value = raw.strip()
+    try:
+        partial = discord.PartialEmoji.from_str(value)
+    except Exception:  # malformed custom-emoji syntax — fall back to treating it as unicode
+        partial = None
+    if partial is not None and partial.id is not None:  # <:name:id> form
+        return guild.get_emoji(partial.id) or partial
+    if value.startswith(":") and value.endswith(":") and len(value) > 2:  # :name: form
+        name = value.strip(":")
+        for emoji in guild.emojis:
+            if emoji.name == name:
+                return emoji
+        raise GuardError(f"no custom emoji named :{name}: in this server")
+    return value  # a standard unicode emoji
+
+
+async def add_reaction(
+    guild: discord.Guild, args: AddReactionArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    channel_query, message_id = _resolve_message(guild, args.message, args.channel)
+    channel, kind = _resolve_editable_channel(guild, channel_query)
+    if kind != "text":
+        raise GuardError("can only react to messages in a text channel")
+    emoji = _resolve_emoji(guild, args.emoji)
+    # A partial message skips a fetch — the react endpoint needs no message body, just the id.
+    try:
+        await channel.get_partial_message(message_id).add_reaction(emoji)
+    except discord.NotFound as exc:
+        raise GuardError("no message with that id in that channel") from exc
+    except discord.Forbidden as exc:
+        raise GuardError(
+            "I need 'Add Reactions' and 'Read Message History' there (see deploy/README.md)"
+        ) from exc
+    except discord.HTTPException as exc:
+        raise GuardError(f"Discord rejected that reaction: {exc.text or exc}") from exc
+    return {
+        "reacted": True,
+        "channel": channel.name,
+        "message_id": message_id,
+        "emoji": str(emoji),
+    }
+
+
 # --------------------------------------------------------------------------- confirm preview
 
 
@@ -545,4 +712,8 @@ EXECUTORS = {
     "add_feed": add_feed,
     "remove_feed": remove_feed,
     "list_feeds": list_feeds,
+    "set_presence": set_presence,
+    "set_nickname": set_nickname,
+    "server_stats": server_stats,
+    "add_reaction": add_reaction,
 }

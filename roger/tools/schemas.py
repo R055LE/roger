@@ -130,6 +130,50 @@ class RemoveFeedArgs(ToolArgs):
     url: str  # exact stored URL (from list_feeds)
 
 
+# --------------------------------------------------------------------------- toys (self / read)
+
+StatusName = Literal["online", "idle", "dnd", "invisible"]
+# "none" clears the activity line; the four verbs render as "Playing/Watching/Listening to/
+# Competing in <text>". Custom statuses are omitted — they don't render reliably for bots.
+ActivityKind = Literal["playing", "watching", "listening", "competing", "none"]
+_ACTIVITY_VERBS = {"playing", "watching", "listening", "competing"}
+
+
+class SetPresenceArgs(ToolArgs):
+    # All three are optional and merge over the stored presence — passing only `status` keeps the
+    # current activity, and vice versa. At least one must be given.
+    status: StatusName | None = None
+    activity: ActivityKind | None = None  # a verb, or "none" to clear the line
+    text: str | None = Field(default=None, max_length=100)  # the activity line; needed with a verb
+
+    @model_validator(mode="after")
+    def _coherent(self) -> SetPresenceArgs:
+        if self.status is None and self.activity is None and self.text is None:
+            raise ValueError("specify at least one of: status, activity, text")
+        if self.activity in _ACTIVITY_VERBS and not (self.text and self.text.strip()):
+            raise ValueError(f"activity {self.activity!r} needs non-empty text")
+        if self.activity == "none" and self.text:
+            raise ValueError("activity 'none' clears the line — don't also pass text")
+        if self.text is not None and self.activity is None:
+            raise ValueError("pass activity (a verb) together with text")
+        return self
+
+
+class SetNicknameArgs(ToolArgs):
+    # Roger's own guild nickname. Empty string resets to the default name. Discord's cap is 32.
+    nickname: str = Field(max_length=32)
+
+
+class ServerStatsArgs(ToolArgs):
+    """No arguments — returns a read-only snapshot of server stats."""
+
+
+class AddReactionArgs(ToolArgs):
+    message: str  # message link (right-click → Copy Message Link) or a bare message id
+    emoji: str  # a standard emoji, or a custom server emoji as :name: or <:name:id>
+    channel: str | None = None  # channel name/id — required only when `message` is a bare id
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -249,6 +293,42 @@ REGISTRY: dict[str, ToolSpec] = {
             "the exact URL."
         ),
         args_model=RemoveFeedArgs,
+    ),
+    "set_presence": ToolSpec(
+        name="set_presence",
+        description=(
+            "Set your own presence: status (online, idle, dnd, invisible) and/or an activity line "
+            "— 'playing', 'watching', 'listening', or 'competing' plus text, or 'none' to clear "
+            "it. Only the fields you pass change; the rest are kept. It's persisted, so it "
+            "survives restarts. Cosmetic and self-only — no confirmation needed."
+        ),
+        args_model=SetPresenceArgs,
+    ),
+    "set_nickname": ToolSpec(
+        name="set_nickname",
+        description=(
+            "Set your own nickname in this server (max 32 characters; an empty string resets to "
+            "the default name). Self-only and reversible — no confirmation needed."
+        ),
+        args_model=SetNicknameArgs,
+    ),
+    "server_stats": ToolSpec(
+        name="server_stats",
+        description=(
+            "Return a read-only snapshot of the server: member count, channels by type, roles, "
+            "custom emoji, boost tier, and how old the server is."
+        ),
+        args_model=ServerStatsArgs,
+    ),
+    "add_reaction": ToolSpec(
+        name="add_reaction",
+        description=(
+            "React to a message with an emoji. Identify the message by its link (right-click → "
+            "Copy Message Link) or by its id together with the channel. The emoji may be a "
+            "standard emoji or a custom server emoji (:name: or <:name:id>). Reversible — no "
+            "confirmation needed."
+        ),
+        args_model=AddReactionArgs,
     ),
 }
 

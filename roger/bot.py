@@ -33,6 +33,7 @@ from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
 from roger.store import AuditStatus, Store
+from roger.tools import executors
 from roger.tools.context import ToolContext
 
 log = logging.getLogger("roger")
@@ -413,7 +414,18 @@ class RogerClient(discord.Client):
 
     async def on_ready(self) -> None:
         log.info("roger online as %s (guild=%s)", self.user, self.settings.guild_id)
+        await self._restore_presence()  # reconnects clear presence — reapply the saved outfit
         await self._startup_report()
+
+    async def _restore_presence(self) -> None:
+        """Reapply the persisted presence outfit. Runs each on_ready — reconnects reset it."""
+        raw = await self.store.get_meta(executors.PRESENCE_META_KEY)
+        if not raw:
+            return
+        try:
+            await executors.apply_presence(self, json.loads(raw))
+        except (json.JSONDecodeError, discord.DiscordException):
+            log.exception("failed to restore persisted presence")
 
     async def _startup_report(self) -> None:
         # on_ready fires again on every reconnect; report once per process.

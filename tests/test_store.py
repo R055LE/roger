@@ -27,6 +27,18 @@ async def test_record_audit_persists(tmp_path):
         await store.close()
 
 
+async def test_meta_roundtrip_and_upsert(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        assert await store.get_meta("presence") is None  # unset reads as None
+        await store.set_meta("presence", '{"status": "idle"}')
+        assert await store.get_meta("presence") == '{"status": "idle"}'
+        await store.set_meta("presence", '{"status": "dnd"}')  # upsert, not a second row
+        assert await store.get_meta("presence") == '{"status": "dnd"}'
+    finally:
+        await store.close()
+
+
 async def test_wal_mode_enabled(tmp_path):
     store = await Store(str(tmp_path / "roger.db")).open()
     try:

@@ -160,6 +160,16 @@ Registry:
 | `suggest_feeds` | no (validates only) | — |
 | `add_feed` | yes | no |
 | `remove_feed` | yes | no |
+| `set_presence` | self only (own status/activity, persisted) | no |
+| `set_nickname` | self only (own guild nickname) | no |
+| `server_stats` | no | — |
+| `add_reaction` | side effect (adds one reaction) | no |
+
+The last four are cosmetic "toys" — self-directed (presence, nickname), read-only (server stats),
+or a single reversible reaction. `set_presence` persists its outfit to the `meta` table and is
+reapplied on every reconnect (Discord clears presence on reconnect). `add_reaction` / `set_nickname`
+need the extra gateway scopes noted in `deploy/README.md`; without them they fail with a clear
+message instead of breaking anything.
 
 Executors needing more than the guild (store, settings, llm, client) receive a `ToolContext` — a
 dependency bag kept `Any`-typed so the tools package never imports the bot/llm/store modules
@@ -200,6 +210,7 @@ behaviour adds rows, not migrations.
 | `ambient_log` | Ambient own-thread memory, per user+channel (§8) |
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `feeds` | The curated digest feed list (§9) |
+| `meta` | Small key/value bot state (e.g. the persisted presence outfit) — never pruned |
 
 ## §11 LLM layer & budgets
 
