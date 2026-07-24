@@ -182,6 +182,9 @@ keeps a short own-thread memory (per user+channel, from `ambient_log`) and is ra
 ways (§11): per-user, per-user notify-once-then-go-silent, and a global hourly ceiling. Ambient
 never touches the admin path.
 
+Roger's emerging character (and where a future personality pass would steer it) is logged in
+[`docs/personality.md`](docs/personality.md) — tone only; it never loosens §2/§7/§8.
+
 ## §9 Digest brain
 
 A scheduled RSS/Atom summary, on a daily `tasks.loop` fired at `DIGEST_HOUR` in `TZ`, also
