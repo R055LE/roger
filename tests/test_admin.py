@@ -127,20 +127,33 @@ async def test_unknown_tool_is_structured_error(tmp_path):
         await store.close()
 
 
-async def test_tool_call_budget_caps_at_five(tmp_path):
+async def test_tool_call_budget_caps_at_default(tmp_path):
     store = await _open_store(tmp_path)
     try:
-        six_calls = [_tool_call(f"c{i}", "list_structure") for i in range(6)]
-        llm = FakeLLM([_resp(tool_calls=six_calls), _resp(content="done")])
+        cap = admin.MAX_TOOL_CALLS
+        calls = [_tool_call(f"c{i}", "list_structure") for i in range(cap + 1)]
+        llm = FakeLLM([_resp(tool_calls=calls), _resp(content="done")])
+        notified = []
+
+        async def fake_notify(message):
+            notified.append(message)
+
         out = await admin.handle_admin_request(
-            request="spam tools", guild=object(), actor_id=1, llm=llm, store=store
+            request="spam tools",
+            guild=object(),
+            actor_id=1,
+            llm=llm,
+            store=store,
+            notify_ops=fake_notify,
         )
         assert out == "done"
         rows = await store.fetch_audit()
         ok = [r for r in rows if r["tool"] == "list_structure" and r["status"] == "ok"]
         denied = [r for r in rows if r["status"] == "denied" and r["detail"] == "tool budget"]
-        assert len(ok) == 5
+        assert len(ok) == cap
         assert len(denied) == 1
+        assert len(notified) == 1
+        assert "tool-call budget" in notified[0]
     finally:
         await store.close()
 

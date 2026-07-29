@@ -516,6 +516,7 @@ class RogerClient(discord.Client):
                 confirm=confirm,
                 ctx=ctx,
                 channel_id=channel_id,
+                notify_ops=self._post_ops,
             )
         except Exception:
             # Never leave a deferred interaction hanging — reply, then surface it in the logs.

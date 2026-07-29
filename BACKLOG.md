@@ -110,6 +110,21 @@ interaction up to the SDK default; (b) `429` / `5xx` weren't retried at all.
 *Why:* the old retry was thinner than the module docstring implied, and a deferred admin interaction
 is exactly where a hang is most visible to the owner.
 
+### 1.7 On-demand override for the admin tool-call budget — **S** — *idea only*
+`ADMIN_MAX_TOOL_CALLS` / `ADMIN_MAX_TURNS` (§2.9) are a per-request hard wall against runaway tool
+use, not a spend control — actual $ headroom on a real day is nowhere near the daily token cap (a
+full remediation session cost $0.07). The wall is still useful as a blast-radius bound, but a
+legitimate multi-channel task can need more than one request's worth of steps to finish.
+
+- [ ] Some kind of owner-triggered override for a single heavy request — e.g. a `continue` follow-up
+      that resumes the same tool budget instead of starting a fresh 10-call allowance, or a one-off
+      `/admin` flag to raise the cap for just that request.
+
+*Why:* noted while fixing the confusing "try again after the budget resets" message (the cap is
+per-request already, so a plain retry works today) — an explicit continue/override would remove the
+retry step entirely for genuinely large jobs. Not yet clear the wall is the right shape at all outside
+of guarding against a runaway loop, so this is a raised idea, not a committed design.
+
 ---
 
 ## Tier 2 — Supply chain & CI hardening

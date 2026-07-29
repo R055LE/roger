@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     daily_tokens_ambient: int = 40_000
     daily_tokens_digest: int = 30_000
 
+    # --- admin tool loop bounds (§2.9) ---
+    admin_max_tool_calls: int = 10
+    admin_max_turns: int = 14
+
     # --- ambient rate limiting ---
     ambient_rate_per_user: int = 5
     ambient_rate_window_s: int = 600

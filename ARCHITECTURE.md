@@ -66,8 +66,11 @@ These hold regardless of what any model outputs. They are the load-bearing part 
   consistent for security-relevant actions is worth more than shaving a click. Confirmation can thus
   be *static* (a tool always confirms) or *conditional on the args* (`create_channel` confirms only
   when `private`), via `ToolSpec.needs_confirm`.
-- **§2.9 Budgets.** A hard cap of **5 tool calls per request** (`MAX_TOOL_CALLS`) and **8 model
-  round-trips** (`MAX_TURNS`), plus per-brain **daily token caps** (§11) checked before every call.
+- **§2.9 Budgets.** A hard cap of **10 tool calls per request** (`ADMIN_MAX_TOOL_CALLS`) and **14
+  model round-trips** (`ADMIN_MAX_TURNS`), plus per-brain **daily token caps** (§11) checked before
+  every call. Both caps are env-overridable per deployment; hitting the tool-call cap mid-request
+  logs a warning and posts once to the ops channel (if configured), and the model is told to say so
+  plainly — the cap resets on the next request, not on a timer.
 - **§2.10 No secrets in git — ever, not even encrypted.** Secrets live only in a `sops`+`age`
   encrypted `roger.env` on the host. The repo carries `.sops.yaml` (the public recipient) and
   `roger.env.example`. See [`deploy/`](deploy/README.md).
@@ -125,7 +128,7 @@ sees a clean request; an empty remainder is dropped.
 
 Every outcome — ok, denied, invalid args, guard rejection, executor error, budget exhaustion — is
 recorded to `audit` and surfaced to the model as a **structured result**, never a raised exception.
-Bounds: 5 tool calls, 8 turns (§2.9).
+Bounds: 10 tool calls, 14 turns (§2.9).
 
 ## §7 Tools — schemas, guards, executors
 
@@ -228,6 +231,6 @@ Limits at a glance (defaults; all env-overridable):
 | Control | Default |
 |---|---|
 | Daily tokens — admin / ambient / digest | 150k / 40k / 30k |
-| Tool calls per admin request | 5 |
-| Model round-trips per admin request | 8 |
+| Tool calls per admin request | 10 |
+| Model round-trips per admin request | 14 |
 | Ambient — per user / window / global hourly | 5 / 600s / 30 |

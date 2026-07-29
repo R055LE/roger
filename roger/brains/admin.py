@@ -25,10 +25,16 @@ from roger.tools.guard import GuardError
 
 log = logging.getLogger("roger.admin")
 
-MAX_TOOL_CALLS = 5  # hard budget per request (§2.9)
-MAX_TURNS = 8  # safety bound on model round-trips
+MAX_TOOL_CALLS = 10  # fallback hard budget per request when no settings are given (§2.9)
+MAX_TURNS = 14  # fallback safety bound on model round-trips when no settings are given
 
 Confirmer = Callable[[str], Awaitable[bool]]
+NotifyOps = Callable[[str], Awaitable[None]]
+
+
+async def _notify_nothing(_: str) -> None:
+    return None
+
 
 SYSTEM_PROMPT = (
     "You are Roger, a Discord server admin assistant. You may only act through the provided "
@@ -61,8 +67,13 @@ async def handle_admin_request(
     confirm: Confirmer | None = None,
     ctx: ToolContext | None = None,
     channel_id: int | None = None,
+    notify_ops: NotifyOps | None = None,
 ) -> str:
     confirm = confirm or _deny_all
+    notify_ops = notify_ops or _notify_nothing
+    settings = ctx.settings if ctx is not None else None
+    max_tool_calls = getattr(settings, "admin_max_tool_calls", None) or MAX_TOOL_CALLS
+    max_turns = getattr(settings, "admin_max_turns", None) or MAX_TURNS
 
     await store.record_audit(
         actor_id=actor_id,
@@ -89,10 +100,11 @@ async def handle_admin_request(
 
     tool_calls_used = 0
     turns = 0
+    tool_budget_notified = False
     try:
         while True:
             turns += 1
-            if turns > MAX_TURNS:
+            if turns > max_turns:
                 return "I couldn't finish that within my step budget."
 
             response = await llm.complete("admin", messages, tools=tools)
@@ -105,7 +117,7 @@ async def handle_admin_request(
 
             messages.append(_assistant_message(message))
             for call in message.tool_calls:
-                if tool_calls_used >= MAX_TOOL_CALLS:
+                if tool_calls_used >= max_tool_calls:
                     await store.record_audit(
                         actor_id=actor_id,
                         brain="admin",
@@ -114,8 +126,31 @@ async def handle_admin_request(
                         status=AuditStatus.DENIED,
                         detail="tool budget",
                     )
+                    if not tool_budget_notified:
+                        tool_budget_notified = True
+                        log.warning(
+                            "admin request by %s hit the tool-call budget (%d) — "
+                            "remaining steps skipped for this request",
+                            actor_id,
+                            max_tool_calls,
+                        )
+                        await notify_ops(
+                            f"⚠️ **admin tool-call budget hit** — actor {actor_id} needed more "
+                            f"than {max_tool_calls} tool calls for one request; remaining steps "
+                            "were skipped. Raise ADMIN_MAX_TOOL_CALLS if this is routine."
+                        )
                     messages.append(
-                        _tool_message(call.id, {"error": "tool-call budget (5) exhausted"})
+                        _tool_message(
+                            call.id,
+                            {
+                                "error": (
+                                    f"tool-call limit for this request reached ({max_tool_calls} "
+                                    "calls). This is a per-request cap, not a timed cooldown — "
+                                    "tell the user to send a new message to continue with any "
+                                    "remaining steps."
+                                )
+                            },
+                        )
                     )
                     continue
 
