@@ -34,9 +34,16 @@ push to main ──▶ GitHub Actions ──▶ ghcr.io/r055le/roger:main
 Roger needs a Discord application + bot user (Developer Portal → your app). Two things must be set
 correctly, both in service of least privilege (ARCHITECTURE §2.4):
 
-**Gateway intents — all privileged intents OFF.** In the portal's *Bot* tab, leave **Message
-Content**, **Server Members**, and **Presence** disabled. Roger asserts this at startup and refuses
-to run if any is on.
+**Gateway intents — Message Content and Presence stay OFF, always.** Roger asserts this at startup
+(against what its own gateway connection requests) and refuses to run if either is on.
+
+**Server Members — off by default, optional.** Leave it disabled unless you want `delete_role`'s
+confirm dialog to show who currently holds a role before you delete it (ADR-0008). Flipping this
+portal toggle does **not** give Roger a live member cache or member-change events — those stay off
+regardless, since Roger's gateway connection never requests the Members intent (`Intents.default()`,
+§2.1). It only unlocks the on-demand REST lookup used in exactly that one confirm preview
+(`roger/tools/members.py`); leave it off and `delete_role` just falls back to "Roger cannot see who
+currently holds it."
 
 **Invite with only the permissions the tools use — never Administrator.** Use OAuth2 → URL Generator
 with scopes `bot` and `applications.commands`, and tick exactly:

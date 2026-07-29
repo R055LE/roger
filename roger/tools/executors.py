@@ -15,6 +15,7 @@ from typing import Any
 import discord
 import feedparser
 
+from roger.tools import members
 from roger.tools.context import ToolContext
 from roger.tools.guard import (
     GuardError,
@@ -734,10 +735,18 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
         return "\n".join(lines)
     if name == "delete_role":
         role = _resolve_role(guild, args.role)
-        return (
-            f"PERMANENTLY DELETE role @{role.name} — Roger cannot see who currently holds it "
-            "(no Members intent); check Discord's member list first if that matters."
-        )
+        header = f"PERMANENTLY DELETE role @{role.name}"
+        try:
+            holders = await members.role_holders(guild, role)
+        except discord.HTTPException:
+            return (
+                f"{header} — Roger cannot see who currently holds it (Members intent not "
+                "enabled); check Discord's member list first if that matters."
+            )
+        if not holders:
+            return f"{header} — currently held by no one."
+        names = ", ".join(m.display_name for m in holders)
+        return f"{header} — currently held by {len(holders)} member(s): {names}"
     if name == "post_message":
         channel, _ = _resolve_editable_channel(guild, args.channel)
         body = args.content if len(args.content) <= 300 else args.content[:300] + "…"

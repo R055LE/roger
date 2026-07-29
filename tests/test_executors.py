@@ -6,7 +6,7 @@ import discord
 import pytest
 
 from roger.store import Store
-from roger.tools import executors, schemas
+from roger.tools import executors, members, schemas
 from roger.tools.context import ToolContext
 from roger.tools.guard import GuardError
 from roger.tools.schemas import (
@@ -25,6 +25,12 @@ from roger.tools.schemas import (
     SetPermissionsArgs,
     SuggestFeedsArgs,
 )
+
+
+def _http_error(kind, status):
+    """Build a real discord HTTP error without a live aiohttp response."""
+    response = SimpleNamespace(status=status, reason="test")
+    return kind(response, "boom")
 
 
 class FakeRole:
@@ -73,6 +79,13 @@ class FakeChannel:
         self.perm_calls.append((target, overwrite))
 
 
+class FakeMember:
+    def __init__(self, member_id, display_name, roles=()):
+        self.id = member_id
+        self.display_name = display_name
+        self.roles = list(roles)
+
+
 class FakeGuild:
     def __init__(self):
         self.roles = [FakeRole(0, "@everyone")]
@@ -82,6 +95,19 @@ class FakeGuild:
         self._next_id = 1000
         self.last_overwrites = None
         self.me = FakeRole(1, "Roger")  # the bot's own member (guild.me); hashable overwrite key
+        self.members = []  # populated via add_member(); fetch_members() yields these
+        self.member_fetch_error = None  # set to an exception to simulate no Members intent
+
+    async def fetch_members(self, *, limit=None):
+        if self.member_fetch_error is not None:
+            raise self.member_fetch_error
+        for member in self.members:
+            yield member
+
+    def add_member(self, name, *, roles=()):
+        member = FakeMember(self._id(), name, roles=roles)
+        self.members.append(member)
+        return member
 
     @property
     def default_role(self):
@@ -238,12 +264,40 @@ async def test_preview_edit_role_shows_changes():
     assert "hoist: → True" in preview
 
 
-async def test_preview_delete_role_warns_about_membership():
+async def test_preview_delete_role_falls_back_without_members_intent():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    guild.member_fetch_error = _http_error(discord.Forbidden, 403)
+    preview = await executors.preview("delete_role", guild, DeleteRoleArgs(role="DJs"))
+    assert "PERMANENTLY DELETE" in preview
+    assert "Members intent not enabled" in preview
+
+
+async def test_preview_delete_role_shows_no_current_holders():
     guild = FakeGuild()
     guild.add_role("DJs")
     preview = await executors.preview("delete_role", guild, DeleteRoleArgs(role="DJs"))
-    assert "PERMANENTLY DELETE" in preview
-    assert "cannot see who currently holds it" in preview
+    assert "held by no one" in preview
+
+
+async def test_preview_delete_role_lists_current_holders():
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    other = guild.add_role("MCs")
+    guild.add_member("Alice", roles=[role])
+    guild.add_member("Bob", roles=[other])
+    guild.add_member("Carol", roles=[role])
+    preview = await executors.preview("delete_role", guild, DeleteRoleArgs(role="DJs"))
+    assert "held by 2 member(s): Alice, Carol" in preview
+
+
+async def test_role_holders_filters_by_role():
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    other = guild.add_role("MCs")
+    alice = guild.add_member("Alice", roles=[role])
+    guild.add_member("Bob", roles=[other])
+    assert await members.role_holders(guild, role) == [alice]
 
 
 async def test_create_readonly_text_channel_denies_send_for_everyone():

@@ -29,8 +29,13 @@ which tools exist, and which permissions are expressible — not by prompt wordi
 These hold regardless of what any model outputs. They are the load-bearing part of the design.
 
 - **§2.1 No privileged gateway intents.** The client uses `Intents.default()` — `message_content`,
-  `members`, and `presences` stay **off**, asserted at startup (`_assert_non_privileged`). Roger
-  only ever sees content in DMs, @mentions, and its own messages.
+  `members`, and `presences` stay **off** on the gateway connection itself, asserted at startup
+  (`_assert_non_privileged`). Roger only ever sees content in DMs, @mentions, and its own messages,
+  and never gets an ambient member cache or member-change event stream. Discord's privileged-intent
+  gate on REST endpoints is a *separate*, independent toggle (an app-level Developer Portal switch,
+  not something `Intents.default()` touches) — `roger/tools/members.py` uses it for one narrow,
+  on-demand, uncached lookup; see its module docstring and ADR-0008 for why that doesn't weaken this
+  invariant.
 - **§2.2 Single-guild scope.** Commands are registered guild-scoped to `GUILD_ID`; the bot serves
   exactly one server and ignores everything else.
 - **§2.3 Owner gate before spend.** Admin actions require `user.id == OWNER_ID`, checked *before*
@@ -51,7 +56,9 @@ These hold regardless of what any model outputs. They are the load-bearing part 
   messages or history), and the real safety mechanism for every mutation here is confirm-gating, not
   "the tool doesn't exist" — an owner who explicitly approves a rendered diff isn't meaningfully
   safer typing the same action into Discord's own UI. Content-bearing objects (channels, messages,
-  members) keep the blanket rule; a bare, historyless role does not.
+  members) keep the blanket rule; a bare, historyless role does not. Its confirm preview optionally
+  names current holders via the on-demand lookup in §2.1/ADR-0008 — informational only, never a
+  block, so the owner keeps final say even when a role is still assigned to someone.
 - **§2.6 Roles are created with zero permissions.** `create_role` always passes
   `Permissions.none()`; access is granted through channel overwrites, never role permissions.
 - **§2.7 Permission allowlist.** Only a fixed set of overwrite bits is expressible through the
@@ -160,7 +167,7 @@ Registry:
 | `create_channel` | yes (read_only / private / per-role grants) | only when `private=True` (§2.8) |
 | `create_role` | yes | no (always zero-perm, §2.6) |
 | `edit_role` | yes (rename/color/hoist/mentionable — never permissions) | **yes** (§2.8) |
-| `delete_role` | **yes, irreversibly** (refuses @everyone / managed roles) | **yes** (§2.8, ADR-0007) |
+| `delete_role` | **yes, irreversibly** (refuses @everyone / managed roles) | **yes** (§2.8, ADR-0007) — diff optionally names current holders (§2.1, ADR-0008) |
 | `set_permissions` | yes | **yes** (§2.8) |
 | `edit_channel` | yes (rename/topic/recategorize — never delete) | **yes** (§2.8) |
 | `post_message` | side effect (mass mentions suppressed) | **yes** (§2.8) |
