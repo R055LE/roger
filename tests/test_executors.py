@@ -14,7 +14,9 @@ from roger.tools.schemas import (
     ChannelGrant,
     CreateChannelArgs,
     CreateRoleArgs,
+    DeleteRoleArgs,
     EditChannelArgs,
+    EditRoleArgs,
     ListFeedsArgs,
     MoveChannelArgs,
     Overwrite,
@@ -26,10 +28,21 @@ from roger.tools.schemas import (
 
 
 class FakeRole:
-    def __init__(self, role_id, name, permissions_value=0):
+    def __init__(self, role_id, name, permissions_value=0, *, managed=False):
         self.id = role_id
         self.name = name
         self.permissions = SimpleNamespace(value=permissions_value)
+        self.managed = managed
+        self.edited = None
+        self.deleted = False
+
+    async def edit(self, **changes):
+        self.edited = changes
+        for key, value in changes.items():
+            setattr(self, key, value)
+
+    async def delete(self):
+        self.deleted = True
 
 
 class FakeChannel:
@@ -86,8 +99,8 @@ class FakeGuild:
                 return role
         return None
 
-    def add_role(self, name):
-        role = FakeRole(self._id(), name)
+    def add_role(self, name, *, managed=False):
+        role = FakeRole(self._id(), name, managed=managed)
         self.roles.append(role)
         return role
 
@@ -143,6 +156,94 @@ async def test_create_role_rejects_duplicate():
     await executors.create_role(guild, CreateRoleArgs(name="DJs"))
     with pytest.raises(GuardError):
         await executors.create_role(guild, CreateRoleArgs(name="djs"))
+
+
+# ------------------------------------------------------------------ edit_role / delete_role
+
+
+async def test_edit_role_renames():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    result = await executors.edit_role(guild, EditRoleArgs(role="DJs", name="Selectors"))
+    assert result["name"] == "Selectors"
+    assert guild.roles[-1].name == "Selectors"
+
+
+async def test_edit_role_changes_color_hoist_mentionable():
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    result = await executors.edit_role(
+        guild, EditRoleArgs(role="DJs", color="#00FF00", hoist=True, mentionable=True)
+    )
+    assert result["hoist"] is True
+    assert result["mentionable"] is True
+    assert role.edited["hoist"] is True
+    assert role.edited["mentionable"] is True
+
+
+async def test_edit_role_rejects_duplicate_rename():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    guild.add_role("MCs")
+    with pytest.raises(GuardError):
+        await executors.edit_role(guild, EditRoleArgs(role="MCs", name="DJs"))
+
+
+async def test_edit_role_rejects_everyone():
+    guild = FakeGuild()
+    with pytest.raises(GuardError):
+        await executors.edit_role(guild, EditRoleArgs(role="@everyone", name="Nope"))
+
+
+async def test_edit_role_rejects_managed():
+    guild = FakeGuild()
+    guild.add_role("Booster", managed=True)
+    with pytest.raises(GuardError):
+        await executors.edit_role(guild, EditRoleArgs(role="Booster", name="Nope"))
+
+
+async def test_edit_role_requires_at_least_one_change():
+    with pytest.raises(ValueError):  # pydantic model validator
+        EditRoleArgs(role="DJs")
+
+
+async def test_delete_role_removes_it():
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    result = await executors.delete_role(guild, DeleteRoleArgs(role="DJs"))
+    assert result == {"deleted": "role", "name": "DJs"}
+    assert role.deleted is True
+
+
+async def test_delete_role_rejects_everyone():
+    guild = FakeGuild()
+    with pytest.raises(GuardError):
+        await executors.delete_role(guild, DeleteRoleArgs(role="@everyone"))
+
+
+async def test_delete_role_rejects_managed():
+    guild = FakeGuild()
+    guild.add_role("Booster", managed=True)
+    with pytest.raises(GuardError):
+        await executors.delete_role(guild, DeleteRoleArgs(role="Booster"))
+
+
+async def test_preview_edit_role_shows_changes():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    preview = await executors.preview(
+        "edit_role", guild, EditRoleArgs(role="DJs", name="Selectors", hoist=True)
+    )
+    assert "DJs → Selectors" in preview
+    assert "hoist: → True" in preview
+
+
+async def test_preview_delete_role_warns_about_membership():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    preview = await executors.preview("delete_role", guild, DeleteRoleArgs(role="DJs"))
+    assert "PERMANENTLY DELETE" in preview
+    assert "cannot see who currently holds it" in preview
 
 
 async def test_create_readonly_text_channel_denies_send_for_everyone():

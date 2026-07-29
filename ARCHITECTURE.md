@@ -41,12 +41,17 @@ These hold regardless of what any model outputs. They are the load-bearing part 
   Roles` is broad at the Discord layer, but the *expressible* actions are bounded at the tool layer:
   roles are always created with zero permissions (§2.6) and channel overwrites are drawn from a
   fixed allowlist (§2.7), so the gateway permission is far wider than anything Roger can actually do.
-- **§2.5 No destructive or escalating tools.** Nothing Roger can do is irreversible: there is no
-  delete, kick, ban, or bulk-purge tool anywhere in the surface. Roger *creates*, and it *adjusts*
-  existing state — renaming a channel, editing a topic, moving it under a category, reordering
-  channels and categories, setting channel overwrites, posting a message — but every adjustment is
-  reversible and confirm-gated (§2.8). The blast radius is bounded by what simply doesn't exist: no
-  tool destroys anything.
+- **§2.5 No destructive or escalating tools, except one narrow, deliberate exception.** Nothing else
+  Roger can do is irreversible: there is no kick, ban, bulk-purge, or channel-delete tool anywhere
+  in the surface. Roger *creates*, and it *adjusts* existing state — renaming a channel, editing a
+  topic, moving it under a category, reordering channels and categories, setting channel overwrites,
+  posting a message — but every adjustment is reversible and confirm-gated (§2.8). The blast radius
+  is bounded by what simply doesn't exist: almost no tool destroys anything. `delete_role` is the one
+  exception (ADR-0007): roles are already deliberately powerless (zero permissions, §2.6, no
+  messages or history), and the real safety mechanism for every mutation here is confirm-gating, not
+  "the tool doesn't exist" — an owner who explicitly approves a rendered diff isn't meaningfully
+  safer typing the same action into Discord's own UI. Content-bearing objects (channels, messages,
+  members) keep the blanket rule; a bare, historyless role does not.
 - **§2.6 Roles are created with zero permissions.** `create_role` always passes
   `Permissions.none()`; access is granted through channel overwrites, never role permissions.
 - **§2.7 Permission allowlist.** Only a fixed set of overwrite bits is expressible through the
@@ -154,6 +159,8 @@ Registry:
 | `list_structure` | no | — |
 | `create_channel` | yes (read_only / private / per-role grants) | only when `private=True` (§2.8) |
 | `create_role` | yes | no (always zero-perm, §2.6) |
+| `edit_role` | yes (rename/color/hoist/mentionable — never permissions) | **yes** (§2.8) |
+| `delete_role` | **yes, irreversibly** (refuses @everyone / managed roles) | **yes** (§2.8, ADR-0007) |
 | `set_permissions` | yes | **yes** (§2.8) |
 | `edit_channel` | yes (rename/topic/recategorize — never delete) | **yes** (§2.8) |
 | `post_message` | side effect (mass mentions suppressed) | **yes** (§2.8) |

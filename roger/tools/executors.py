@@ -29,7 +29,9 @@ from roger.tools.schemas import (
     AddReactionArgs,
     CreateChannelArgs,
     CreateRoleArgs,
+    DeleteRoleArgs,
     EditChannelArgs,
+    EditRoleArgs,
     ListFeedsArgs,
     ListStructureArgs,
     MoveChannelArgs,
@@ -145,6 +147,21 @@ async def _resolve_target(guild: discord.Guild, query: str) -> discord.Role | di
     if role is None:
         raise GuardError(f"role {query!r} vanished")
     return role
+
+
+def _resolve_role(guild: discord.Guild, query: str) -> discord.Role:
+    role_id, _ = resolve_one(query, [(r.id, r.name) for r in guild.roles])
+    role = guild.get_role(role_id)
+    if role is None:
+        raise GuardError(f"role {query!r} vanished")
+    return role
+
+
+def _check_role_editable(guild: discord.Guild, role: discord.Role) -> None:
+    if role.id == guild.default_role.id:
+        raise GuardError("can't edit or delete @everyone")
+    if getattr(role, "managed", False):
+        raise GuardError("can't edit or delete a Discord-managed role (bot/integration/booster)")
 
 
 # --------------------------------------------------------------------------- mutations
@@ -264,6 +281,44 @@ async def create_role(
         "name": role.name,
         "permissions": role.permissions.value,
     }
+
+
+async def edit_role(
+    guild: discord.Guild, args: EditRoleArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    role = _resolve_role(guild, args.role)
+    _check_role_editable(guild, role)
+    changes: dict[str, Any] = {}
+    result: dict[str, Any] = {"role": role.name}
+
+    if args.name is not None:
+        new_name = sanitize_display_name(args.name)
+        check_no_duplicate("role", new_name, [r.name for r in guild.roles if r.id != role.id])
+        changes["name"] = new_name
+        result["name"] = new_name
+    if args.color is not None:
+        changes["color"] = discord.Color(parse_color(args.color))
+        result["color"] = args.color
+    if args.hoist is not None:
+        changes["hoist"] = args.hoist
+        result["hoist"] = args.hoist
+    if args.mentionable is not None:
+        changes["mentionable"] = args.mentionable
+        result["mentionable"] = args.mentionable
+
+    await role.edit(**changes)
+    result["edited"] = True
+    return result
+
+
+async def delete_role(
+    guild: discord.Guild, args: DeleteRoleArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    role = _resolve_role(guild, args.role)
+    _check_role_editable(guild, role)
+    name = role.name
+    await role.delete()
+    return {"deleted": "role", "name": name}
 
 
 async def set_permissions(
@@ -665,6 +720,24 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
             current = getattr(channel, "category", None)
             lines.append(f"  category: {current.name if current else '—'} → {cat_name}")
         return "\n".join(lines)
+    if name == "edit_role":
+        role = _resolve_role(guild, args.role)
+        lines = [f"@{role.name}:"]
+        if args.name is not None:
+            lines.append(f"  name: {role.name} → {sanitize_display_name(args.name)}")
+        if args.color is not None:
+            lines.append(f"  color: → {args.color}")
+        if args.hoist is not None:
+            lines.append(f"  hoist: → {args.hoist}")
+        if args.mentionable is not None:
+            lines.append(f"  mentionable: → {args.mentionable}")
+        return "\n".join(lines)
+    if name == "delete_role":
+        role = _resolve_role(guild, args.role)
+        return (
+            f"PERMANENTLY DELETE role @{role.name} — Roger cannot see who currently holds it "
+            "(no Members intent); check Discord's member list first if that matters."
+        )
     if name == "post_message":
         channel, _ = _resolve_editable_channel(guild, args.channel)
         body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
@@ -703,6 +776,8 @@ EXECUTORS = {
     "list_structure": list_structure,
     "create_channel": create_channel,
     "create_role": create_role,
+    "edit_role": edit_role,
+    "delete_role": delete_role,
     "set_permissions": set_permissions,
     "edit_channel": edit_channel,
     "post_message": post_message,

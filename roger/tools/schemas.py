@@ -60,6 +60,24 @@ class CreateRoleArgs(ToolArgs):
     # permissions are intentionally NOT a parameter — the executor always passes Permissions.none()
 
 
+class EditRoleArgs(ToolArgs):
+    role: str  # existing role: name or id
+    name: str | None = None  # new name (optional)
+    color: str | None = None  # new hex "#RRGGBB" (optional)
+    hoist: bool | None = None  # show separately in the member list (optional)
+    mentionable: bool | None = None  # anyone can @mention it (optional)
+
+    @model_validator(mode="after")
+    def _at_least_one_change(self) -> EditRoleArgs:
+        if all(v is None for v in (self.name, self.color, self.hoist, self.mentionable)):
+            raise ValueError("specify at least one of: name, color, hoist, mentionable")
+        return self
+
+
+class DeleteRoleArgs(ToolArgs):
+    role: str  # existing role: name or id
+
+
 class Overwrite(ToolArgs):
     target: str  # role name/id or user id; "@everyone" allowed (channel-scoped)
     allow: list[PermName] = Field(default_factory=list)
@@ -215,6 +233,28 @@ REGISTRY: dict[str, ToolSpec] = {
             "access via channel overwrites, never role permissions."
         ),
         args_model=CreateRoleArgs,
+    ),
+    "edit_role": ToolSpec(
+        name="edit_role",
+        description=(
+            "Rename an existing role, and/or change its color, hoist (show separately in the "
+            "member list), or mentionable flag. Metadata only — it cannot touch permissions "
+            "(roles are always zero-permission) and cannot target @everyone or a Discord-managed "
+            "role (bot/integration/booster). The owner must confirm the change first."
+        ),
+        args_model=EditRoleArgs,
+        requires_confirm=True,
+    ),
+    "delete_role": ToolSpec(
+        name="delete_role",
+        description=(
+            "Permanently delete a role. Refuses @everyone and Discord-managed roles "
+            "(bot/integration/booster). Roger cannot see who currently holds a role (no Members "
+            "intent, §2.1) so this does not check membership — the owner must confirm the exact "
+            "role first, and deletion cannot be undone."
+        ),
+        args_model=DeleteRoleArgs,
+        requires_confirm=True,
     ),
     "set_permissions": ToolSpec(
         name="set_permissions",
