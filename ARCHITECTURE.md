@@ -272,7 +272,7 @@ behaviour adds rows, not migrations.
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |
 | `feeds` | The curated digest feed list (§9) |
-| `meta` | Small key/value bot state (e.g. the persisted presence outfit) — never pruned |
+| `meta` | Small key/value bot state (persisted presence outfit, gigabrain's last-run date) — never pruned |
 
 ## §11 LLM layer & budgets
 
@@ -290,6 +290,7 @@ Limits at a glance (defaults; all env-overridable):
 | Tool calls per admin request | 10 |
 | Model round-trips per admin request | 14 |
 | Tool calls / round-trips per gigabrain request | 10 / 14 |
+| Gigabrain periodic check-in interval | off (0 days) |
 | Ambient — per user / window / global hourly | 5 / 600s / 30 |
 
 ## §12 Giga Brain — read-only strategic analysis
@@ -318,5 +319,14 @@ no confirm flow anywhere in the module, because neither is ever needed:
 - System prompt instructs the model to phrase output as analysis/suggestions, never as actions
   taken, and to point the owner at `/roger` (admin) for anything concrete enough to execute.
 
-Triggered on demand only, via `/gigabrain <question>` — there is no periodic self-triggered
-suggestion loop (yet); that's tracked as a possible follow-up, not built.
+Triggered two ways: on demand via `/gigabrain <question>`, and optionally on a periodic,
+unprompted check-in (`run_gigabrain_suggestion`) — a fixed "review the server, propose
+improvements" prompt through the same read-only loop, **DMed directly to the owner**, not posted to
+any channel (these are meant to be candid, owner-only musings, unlike the digest's public post).
+Off by default (`GIGABRAIN_INTERVAL_DAYS=0`); when set, a daily `tasks.loop` tick at
+`GIGABRAIN_HOUR` calls it unconditionally and the function decides for itself whether it's actually
+due, the same "the job decides, not the caller" shape as `run_digest_job`'s "no new items". Cadence
+is tracked via a `gigabrain_last_run_date` key in `meta` (§10) rather than an in-memory guard,
+because a several-day interval must survive a mid-cycle restart. A failed DM (owner has DMs closed,
+blocked the bot, etc.) is logged and surfaced once via the ops watchdog, not retried — the next
+scheduled tick will naturally try again once the interval elapses.

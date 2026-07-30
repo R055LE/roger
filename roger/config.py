@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # OpenRouter unified `reasoning.effort` (e.g. "high") — sent only if set; opt-in per model.
     gigabrain_reasoning_effort: str = ""
 
+    # --- gigabrain periodic suggestions (owner DM) ---
+    gigabrain_interval_days: int = 0  # 0 = disabled; e.g. 7 for weekly
+    gigabrain_hour: int = 9
+
     # --- ambient rate limiting ---
     ambient_rate_per_user: int = 5
     ambient_rate_window_s: int = 600

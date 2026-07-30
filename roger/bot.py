@@ -29,7 +29,7 @@ from roger import metrics
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
 from roger.brains.digest import run_digest_job, seed_feeds_if_empty
-from roger.brains.gigabrain import handle_gigabrain_request
+from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
@@ -346,6 +346,17 @@ def _digest_problem(status: str) -> str | None:
     return status
 
 
+# Gigabrain statuses that mean "nothing to flag" — including its own self-gating no-ops.
+_GIGABRAIN_OK_PREFIXES = ("delivered", "not due yet", "periodic suggestions not configured")
+
+
+def _gigabrain_problem(status: str) -> str | None:
+    """The gigabrain suggestion status if it signals a problem worth alerting on, else None."""
+    if any(status.startswith(prefix) for prefix in _GIGABRAIN_OK_PREFIXES):
+        return None
+    return status
+
+
 def _touch_heartbeat(path: str = HEARTBEAT_PATH) -> None:
     """Rewrite the liveness file so its mtime is now (content is informational only)."""
     with open(path, "w") as handle:
@@ -399,6 +410,20 @@ class RogerClient(discord.Client):
             self._digest_loop.start()
             log.info(
                 "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
+            )
+        # Same pattern as digest: a daily tick that self-gates on the configured interval (§12).
+        if self.settings.gigabrain_interval_days > 0:
+            self._gigabrain_loop.change_interval(
+                time=datetime.time(
+                    hour=self.settings.gigabrain_hour, tzinfo=ZoneInfo(self.settings.tz)
+                )
+            )
+            self._gigabrain_loop.start()
+            log.info(
+                "gigabrain suggestions checked daily at %02d:00 %s (every %d day(s))",
+                self.settings.gigabrain_hour,
+                self.settings.tz,
+                self.settings.gigabrain_interval_days,
             )
         # The watchdog only earns its keep when there's an ops channel to post alerts to.
         if self.settings.ops_channel_id is not None:
@@ -561,6 +586,25 @@ class RogerClient(discord.Client):
 
     @_digest_loop.before_loop
     async def _before_digest(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=9))
+    async def _gigabrain_loop(self) -> None:
+        result = await run_gigabrain_suggestion(
+            client=self, settings=self.settings, llm=self.llm, store=self.store
+        )
+        status = str(result.get("status", ""))
+        log.info("gigabrain periodic check: %s", status)
+        problem = _gigabrain_problem(status)
+        if problem:
+            await self._ops.alert(
+                f"gigabrain:{time.strftime('%Y-%m-%d')}",
+                f"⚠️ **gigabrain problem** — {problem}",
+                cooldown_s=_DAY_S,
+            )
+
+    @_gigabrain_loop.before_loop
+    async def _before_gigabrain(self) -> None:
         await self.wait_until_ready()
 
     async def _maybe_prune(self) -> None:

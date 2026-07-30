@@ -1,6 +1,6 @@
 """Ops-channel alerting — the dedupe notifier and the pure alert-decision helpers (backlog 1.2)."""
 
-from roger.bot import OpsNotifier, _budget_alert, _digest_problem
+from roger.bot import OpsNotifier, _budget_alert, _digest_problem, _gigabrain_problem
 
 
 class _FakeClock:
@@ -69,3 +69,15 @@ def test_digest_problem_flags_failures():
     assert _digest_problem("budget exceeded; skipped") == "budget exceeded; skipped"
     assert _digest_problem("digest channel 42 not found") is not None
     assert _digest_problem("digest brain not configured (no models)") is not None
+
+
+def test_gigabrain_problem_none_for_success_and_self_gated_statuses():
+    assert _gigabrain_problem("delivered") is None
+    assert _gigabrain_problem("not due yet") is None
+    assert _gigabrain_problem("periodic suggestions not configured") is None
+
+
+def test_gigabrain_problem_flags_failures():
+    assert _gigabrain_problem("DM failed; suggestion not delivered") is not None
+    assert _gigabrain_problem("guild 9 not visible") is not None
+    assert _gigabrain_problem("error running suggestion") is not None

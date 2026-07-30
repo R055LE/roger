@@ -14,7 +14,8 @@ Roger is a single-guild, owner-gated Discord assistant with four separate "brain
   authority.
 - **Digest** — a scheduled RSS/Atom summary posted to a channel.
 - **Giga Brain** — an owner-only, read-only strategic-analysis mode, reachable by `/gigabrain`. It
-  reviews live server state and reasons about it — never acts.
+  reviews live server state and reasons about it — never acts. Optionally also checks in on its
+  own on a configurable interval, DMing the owner unprompted suggestions.
 
 Design details — the routing table, the tool loop, the store schema, and the security invariants the
 source cites as `(§N)` — are in [`ARCHITECTURE.md`](ARCHITECTURE.md).

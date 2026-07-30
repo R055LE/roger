@@ -49,6 +49,13 @@ def test_gigabrain_model_chain_is_parsed_to_list(monkeypatch):
     assert Settings().gigabrain_models == ["a/b", "c/d"]
 
 
+def test_gigabrain_periodic_suggestion_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    settings = Settings()
+    assert settings.gigabrain_interval_days == 0
+    assert settings.gigabrain_hour == 9
+
+
 def test_empty_digest_channel_id_becomes_none(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("DIGEST_CHANNEL_ID", "")

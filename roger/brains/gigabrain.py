@@ -10,10 +10,13 @@ anywhere in this module: nothing it can reach ever needs one.
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo
 
+import discord
 from pydantic import ValidationError
 
 from roger.llm import LLM, BudgetExceeded, LLMConfigError
@@ -48,6 +51,13 @@ SYSTEM_PROMPT = (
     "suggestions, never as things you did or are doing — you took no action. If a suggestion is "
     "concrete enough to act on, say the owner can ask Roger's admin mode (/roger) to do it."
 )
+
+# Periodic, unprompted check-in (§12) — a fixed self-request through the same read-only loop.
+SUGGESTION_PROMPT = (
+    "Review the current server state and propose 2-4 concrete, prioritized improvements. Be "
+    "specific — reference actual channels, roles, or patterns you see, not generic advice."
+)
+LAST_RUN_META_KEY = "gigabrain_last_run_date"
 
 
 async def _remember(
@@ -158,6 +168,58 @@ async def handle_gigabrain_request(
         return "I've hit my daily token budget for gigabrain work. Try again tomorrow."
     except LLMConfigError as exc:
         return f"Gigabrain isn't configured yet ({exc})."
+
+
+async def run_gigabrain_suggestion(
+    *, client: Any, settings: Any, llm: LLM, store: Store
+) -> dict[str, Any]:
+    """Periodic, unprompted server-improvement suggestions — DMed to the owner.
+
+    Self-gated on ``gigabrain_interval_days`` via a last-run date persisted in ``meta`` (survives
+    restarts, unlike an in-memory guard), so a naive daily tick that just calls this unconditionally
+    is safe — mirrors how ``run_digest_job`` decides "no new items" itself rather than the caller
+    precomputing it. No conversation memory of its own (``channel_id=None``): this is a one-shot job
+    like the digest, not a user-initiated exchange.
+    """
+    if settings.gigabrain_interval_days <= 0:
+        return {"status": "periodic suggestions not configured"}
+
+    today = datetime.datetime.now(ZoneInfo(settings.tz)).date()
+    last_run = await store.get_meta(LAST_RUN_META_KEY)
+    if last_run:
+        elapsed = (today - datetime.date.fromisoformat(last_run)).days
+        if elapsed < settings.gigabrain_interval_days:
+            return {"status": "not due yet"}
+
+    guild = client.get_guild(settings.guild_id)
+    if guild is None:
+        return {"status": f"guild {settings.guild_id} not visible"}
+
+    ctx = ToolContext(llm=llm, store=store, settings=settings, client=client)
+    try:
+        answer = await handle_gigabrain_request(
+            request=SUGGESTION_PROMPT,
+            guild=guild,
+            actor_id=settings.owner_id,
+            llm=llm,
+            store=store,
+            ctx=ctx,
+            channel_id=None,
+        )
+    except Exception:
+        log.exception("periodic gigabrain suggestion failed")
+        return {"status": "error running suggestion"}
+
+    try:
+        owner = await client.fetch_user(settings.owner_id)
+        embed = discord.Embed(title="Giga Brain — periodic check-in", description=answer[:4096])
+        await owner.send(embed=embed)
+    except discord.DiscordException:
+        log.exception("failed to DM owner with gigabrain suggestion")
+        return {"status": "DM failed; suggestion not delivered"}
+
+    await store.set_meta(LAST_RUN_META_KEY, today.isoformat())
+    return {"status": "delivered"}
 
 
 async def _run_tool(

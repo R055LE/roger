@@ -1,14 +1,22 @@
 """Gigabrain tool loop — read-only by construction, driven with a scripted fake LLM."""
 
+import datetime
 from dataclasses import replace
 from types import SimpleNamespace
 
+import discord
 import pytest
 
 from roger.brains import gigabrain
 from roger.llm import BudgetExceeded
 from roger.store import Store
 from roger.tools import schemas
+
+
+def _http_error(kind, status):
+    """Build a real discord HTTP error without a live aiohttp response."""
+    response = SimpleNamespace(status=status, reason="test")
+    return kind(response, "boom")
 
 
 def _resp(content=None, tool_calls=None):
@@ -285,5 +293,110 @@ async def test_gigabrain_memory_is_scoped_per_channel(tmp_path):
         )
         contents = [m["content"] for m in sink["messages"] if m.get("content")]
         assert not any("channel A request" in c for c in contents)
+    finally:
+        await store.close()
+
+
+# --------------------------------------------------------------------------- periodic suggestions
+
+
+class FakeUser:
+    def __init__(self, raise_on_send=None):
+        self.sent = []
+        self._raise = raise_on_send
+
+    async def send(self, embed=None, content=None):
+        if self._raise is not None:
+            raise self._raise
+        self.sent.append(embed if embed is not None else content)
+
+
+class FakeSuggestionClient:
+    def __init__(self, guild, user):
+        self._guild = guild
+        self._user = user
+
+    def get_guild(self, guild_id):
+        return self._guild
+
+    async def fetch_user(self, user_id):
+        return self._user
+
+
+def _settings(**over):
+    base = dict(gigabrain_interval_days=7, gigabrain_hour=9, tz="UTC", guild_id=9, owner_id=1)
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+async def test_periodic_suggestion_not_configured_when_interval_is_zero(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        client = FakeSuggestionClient(guild=object(), user=FakeUser())
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client,
+            settings=_settings(gigabrain_interval_days=0),
+            llm=FakeLLM([]),
+            store=store,
+        )
+        assert out["status"] == "periodic suggestions not configured"
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_skips_when_not_due_yet(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        await store.set_meta(gigabrain.LAST_RUN_META_KEY, datetime.date.today().isoformat())
+        client = FakeSuggestionClient(guild=object(), user=FakeUser())
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client, settings=_settings(), llm=FakeLLM([]), store=store
+        )
+        assert out["status"] == "not due yet"
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_runs_and_dms_owner_on_first_call(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        user = FakeUser()
+        client = FakeSuggestionClient(guild=object(), user=user)
+        llm = FakeLLM([_resp(content="Add a rules channel.")])
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client, settings=_settings(), llm=llm, store=store
+        )
+        assert out["status"] == "delivered"
+        assert len(user.sent) == 1
+        assert isinstance(user.sent[0], discord.Embed)
+        assert "Add a rules channel." in user.sent[0].description
+        assert await store.get_meta(gigabrain.LAST_RUN_META_KEY) is not None
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_guild_not_visible(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        client = FakeSuggestionClient(guild=None, user=FakeUser())
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client, settings=_settings(), llm=FakeLLM([]), store=store
+        )
+        assert "not visible" in out["status"]
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_dm_failure_is_reported_and_meta_not_updated(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        user = FakeUser(raise_on_send=_http_error(discord.Forbidden, 403))
+        client = FakeSuggestionClient(guild=object(), user=user)
+        llm = FakeLLM([_resp(content="Add a rules channel.")])
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client, settings=_settings(), llm=llm, store=store
+        )
+        assert "DM failed" in out["status"]
+        assert await store.get_meta(gigabrain.LAST_RUN_META_KEY) is None
     finally:
         await store.close()
