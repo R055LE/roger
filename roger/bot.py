@@ -89,8 +89,27 @@ def configure_logging(level: str) -> None:
     logging.getLogger("discord").setLevel(logging.WARNING)
 
 
-def _truncate(text: str, limit: int = DISCORD_MAX) -> str:
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+def _chunk(text: str, limit: int = DISCORD_MAX) -> list[str]:
+    """Split ``text`` into <= ``limit``-char pieces, preferring a line break over a hard cut."""
+    if len(text) <= limit:
+        return [text]
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at <= 0:  # no newline to break on within the limit — hard cut
+            split_at = limit
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+async def _send_chunked(send: Callable[..., Awaitable[Any]], text: str) -> None:
+    """Send ``text`` as one message, or several in succession if it exceeds Discord's cap."""
+    for chunk in _chunk(text):
+        await send(chunk)
 
 
 _MENTION_RE = re.compile(r"<@!?\d+>")
@@ -503,7 +522,7 @@ class RogerClient(discord.Client):
             reply = await self._run_admin(
                 content, message.author.id, message.channel.id, message.channel.send
             )
-            await message.channel.send(_truncate(reply))
+            await _send_chunked(message.channel.send, reply)
         elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
             content = message.content
             if route is Route.AMBIENT_MENTION:
@@ -519,7 +538,7 @@ class RogerClient(discord.Client):
                 limiter=self.ambient_limiter,
             )
             if reply:
-                await message.channel.send(_truncate(reply))
+                await _send_chunked(message.channel.send, reply)
 
     async def _run_admin(
         self,
@@ -731,7 +750,7 @@ async def _handle_roger_request(
     reply = await client._run_admin(
         request, user_id, interaction.channel_id, interaction.followup.send
     )
-    await interaction.followup.send(_truncate(reply))
+    await _send_chunked(interaction.followup.send, reply)
 
 
 async def _handle_gigabrain_request(
@@ -756,7 +775,7 @@ async def _handle_gigabrain_request(
     # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
     await interaction.response.defer(thinking=True)
     reply = await client._run_gigabrain(request, user_id, interaction.channel_id)
-    await interaction.followup.send(_truncate(reply))
+    await _send_chunked(interaction.followup.send, reply)
 
 
 async def _handle_status(client: RogerClient, interaction: discord.Interaction) -> None:
@@ -782,7 +801,7 @@ async def _handle_chat(
         store=client.store,
         limiter=client.ambient_limiter,
     )
-    await interaction.followup.send(_truncate(reply or "…"))
+    await _send_chunked(interaction.followup.send, reply or "…")
 
 
 # --------------------------------------------------------------------------- entrypoint
