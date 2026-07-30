@@ -72,13 +72,14 @@ granting a wide-sounding permission for a single narrow read, the same tradeoff 
 Do **not** grant Administrator; nothing Roger does needs it. (`list_scheduled_events` needs none of
 these — scheduled events aren't privileged data.)
 
-**Role hierarchy — mostly a non-issue here.** Hierarchy governs *role and member* actions, not
-channel edits: a bot can only manage roles below its own top role. Roger sidesteps it — it only ever
-*creates* roles, which Discord places at the bottom of the list automatically, and it never assigns
-or edits existing ones. `edit_channel` is gated by Manage Channels, not by hierarchy. So the real
-failure modes are a missing gateway permission (above) or a channel Roger has no overwrite on (see
-§2.8 in [`../ARCHITECTURE.md`](../ARCHITECTURE.md)) — not role position. Still fine to keep Roger's
-role a little up the list if you later add role-management features.
+**Role hierarchy — matters now that Roger assigns roles.** Hierarchy governs *role and member*
+actions, not channel edits: a bot can only assign/remove roles positioned below its own top role.
+`edit_channel` is still gated by Manage Channels, not by hierarchy, and role *creation* still
+sidesteps this entirely (a newly created role lands at the bottom of the list automatically). But
+`add_member_role`/`remove_member_role` act on *existing* roles, which can sit anywhere — if the
+target role is above Roger's own role, Discord returns 403 and the tool fails with a clear message
+pointing back here rather than a raw error. Put Roger's role reasonably high in the list (above
+whatever roles the owner actually wants to hand out) if that failure mode gets in the way.
 
 ## First-time provision
 

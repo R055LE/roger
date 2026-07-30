@@ -78,6 +78,16 @@ class DeleteRoleArgs(ToolArgs):
     role: str  # existing role: name or id
 
 
+class AddMemberRoleArgs(ToolArgs):
+    member: str  # a member: numeric Discord user id only (no name lookup — see tool description)
+    role: str  # existing role: name or id
+
+
+class RemoveMemberRoleArgs(ToolArgs):
+    member: str  # a member: numeric Discord user id only
+    role: str  # existing role: name or id
+
+
 class Overwrite(ToolArgs):
     target: str  # role name/id or user id; "@everyone" allowed (channel-scoped)
     allow: list[PermName] = Field(default_factory=list)
@@ -299,6 +309,29 @@ REGISTRY: dict[str, ToolSpec] = {
             "role first, and deletion cannot be undone."
         ),
         args_model=DeleteRoleArgs,
+        requires_confirm=True,
+    ),
+    "add_member_role": ToolSpec(
+        name="add_member_role",
+        description=(
+            "Give a member a role. `member` must be their numeric Discord user id (right-click "
+            "→ Copy User ID) — Roger can't resolve a member by name without the Members intent. "
+            "Refuses @everyone and Discord-managed roles. The confirm dialog shows the role's "
+            "actual permissions, since an existing role (unlike one Roger creates) may not be "
+            "zero-permission — the owner decides with that in view. Fails clearly if the role "
+            "sits above Roger's own role in the hierarchy."
+        ),
+        args_model=AddMemberRoleArgs,
+        requires_confirm=True,
+    ),
+    "remove_member_role": ToolSpec(
+        name="remove_member_role",
+        description=(
+            "Remove a role from a member. `member` must be their numeric Discord user id. "
+            "Refuses @everyone and Discord-managed roles. Fails clearly if the role sits above "
+            "Roger's own role in the hierarchy."
+        ),
+        args_model=RemoveMemberRoleArgs,
         requires_confirm=True,
     ),
     "set_permissions": ToolSpec(

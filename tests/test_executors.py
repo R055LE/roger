@@ -12,6 +12,7 @@ from roger.tools.context import ToolContext
 from roger.tools.guard import GuardError
 from roger.tools.schemas import (
     AddFeedArgs,
+    AddMemberRoleArgs,
     ChannelGrant,
     CreateChannelArgs,
     CreateForumPostArgs,
@@ -30,6 +31,7 @@ from roger.tools.schemas import (
     Overwrite,
     PostMessageArgs,
     RemoveFeedArgs,
+    RemoveMemberRoleArgs,
     ReplyToForumPostArgs,
     SetPermissionsArgs,
     SuggestFeedsArgs,
@@ -46,7 +48,10 @@ class FakeRole:
     def __init__(self, role_id, name, permissions_value=0, *, managed=False):
         self.id = role_id
         self.name = name
-        self.permissions = SimpleNamespace(value=permissions_value)
+        # A real discord.Permissions, not a namespace wrapper — it's a lightweight int wrapper
+        # (unlike Role/Member) safe to construct directly, and _role_permission_names() needs its
+        # real __iter__ behavior (yields (name, bool) pairs).
+        self.permissions = discord.Permissions(permissions_value)
         self.managed = managed
         self.edited = None
         self.deleted = False
@@ -86,6 +91,29 @@ class FakeChannel:
 
     async def set_permissions(self, target, *, overwrite):
         self.perm_calls.append((target, overwrite))
+
+
+class FakeGuildMember:
+    """A member resolvable via FakeGuild.fetch_member() — not the delete_role-style member
+    payload dicts in members.py, which are a deliberately different (raw REST) shape."""
+
+    def __init__(self, member_id, display_name):
+        self.id = member_id
+        self.display_name = display_name
+        self.roles_added = []
+        self.roles_removed = []
+        self.add_roles_error = None
+        self.remove_roles_error = None
+
+    async def add_roles(self, *roles, reason=None):
+        if self.add_roles_error is not None:
+            raise self.add_roles_error
+        self.roles_added.extend(roles)
+
+    async def remove_roles(self, *roles, reason=None):
+        if self.remove_roles_error is not None:
+            raise self.remove_roles_error
+        self.roles_removed.extend(roles)
 
 
 class FakeForumTag:
@@ -226,6 +254,18 @@ class FakeGuild:
         self.webhook_list = []
         self.webhooks_error = None
         self.scheduled_event_list = []
+        self.fetchable_members = {}  # member_id -> FakeGuildMember, via add_fetchable_member()
+
+    async def fetch_member(self, member_id):
+        member = self.fetchable_members.get(member_id)
+        if member is None:
+            raise _http_error(discord.NotFound, 404)
+        return member
+
+    def add_fetchable_member(self, member_id, name):
+        member = FakeGuildMember(member_id, name)
+        self.fetchable_members[member_id] = member
+        return member
 
     async def audit_logs(self, *, limit=100):
         if self.audit_log_error is not None:
@@ -274,8 +314,8 @@ class FakeGuild:
                 return role
         return None
 
-    def add_role(self, name, *, managed=False):
-        role = FakeRole(self._id(), name, managed=managed)
+    def add_role(self, name, *, managed=False, permissions_value=0):
+        role = FakeRole(self._id(), name, permissions_value, managed=managed)
         self.roles.append(role)
         return role
 
@@ -344,6 +384,7 @@ async def test_confirm_gated_tools_have_a_real_preview():
     guild = FakeGuild()
     guild.add_role("DJs")
     guild.add_text("general")
+    guild.add_fetchable_member(5001, "Alice")
     forum = guild.add_forum("questions")
     forum.add_tag("solved")
     forum.add_post("existing post")
@@ -352,6 +393,8 @@ async def test_confirm_gated_tools_have_a_real_preview():
         "create_channel": CreateChannelArgs(name="new-room", kind="text", private=True),
         "edit_role": EditRoleArgs(role="DJs", name="Selectors"),
         "delete_role": DeleteRoleArgs(role="DJs"),
+        "add_member_role": AddMemberRoleArgs(member="5001", role="DJs"),
+        "remove_member_role": RemoveMemberRoleArgs(member="5001", role="DJs"),
         "set_permissions": SetPermissionsArgs(
             channel="general", overwrites=[Overwrite(target="@everyone", deny=["view_channel"])]
         ),
@@ -461,6 +504,90 @@ async def test_delete_role_rejects_managed():
     guild.add_role("Booster", managed=True)
     with pytest.raises(GuardError):
         await executors.delete_role(guild, DeleteRoleArgs(role="Booster"))
+
+
+# ------------------------------------------------------------------ member role assignment
+
+
+async def test_add_member_role_gives_the_role():
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    member = guild.add_fetchable_member(5001, "Alice")
+    result = await executors.add_member_role(
+        guild, AddMemberRoleArgs(member="5001", role="DJs")
+    )
+    assert result == {"added": True, "member": "Alice", "role": "DJs"}
+    assert member.roles_added == [role]
+
+
+async def test_remove_member_role_removes_the_role():
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    member = guild.add_fetchable_member(5001, "Alice")
+    result = await executors.remove_member_role(
+        guild, RemoveMemberRoleArgs(member="5001", role="DJs")
+    )
+    assert result == {"removed": True, "member": "Alice", "role": "DJs"}
+    assert member.roles_removed == [role]
+
+
+async def test_add_member_role_rejects_everyone():
+    guild = FakeGuild()
+    guild.add_fetchable_member(5001, "Alice")
+    with pytest.raises(GuardError, match="automatic"):
+        await executors.add_member_role(guild, AddMemberRoleArgs(member="5001", role="@everyone"))
+
+
+async def test_add_member_role_rejects_managed():
+    guild = FakeGuild()
+    guild.add_role("Booster", managed=True)
+    guild.add_fetchable_member(5001, "Alice")
+    with pytest.raises(GuardError, match="managed"):
+        await executors.add_member_role(guild, AddMemberRoleArgs(member="5001", role="Booster"))
+
+
+async def test_add_member_role_rejects_a_role_given_as_member():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    guild.add_role("MCs")
+    with pytest.raises(GuardError, match="not a member"):
+        await executors.add_member_role(guild, AddMemberRoleArgs(member="DJs", role="MCs"))
+
+
+async def test_add_member_role_unknown_member_id_errors():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    with pytest.raises(GuardError):
+        await executors.add_member_role(guild, AddMemberRoleArgs(member="9999", role="DJs"))
+
+
+async def test_add_member_role_hierarchy_failure_names_the_cause():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    member = guild.add_fetchable_member(5001, "Alice")
+    member.add_roles_error = _http_error(discord.Forbidden, 403)
+    with pytest.raises(GuardError, match="hierarchy"):
+        await executors.add_member_role(guild, AddMemberRoleArgs(member="5001", role="DJs"))
+
+
+async def test_preview_add_member_role_shows_granted_permissions():
+    guild = FakeGuild()
+    guild.add_role("Mods", permissions_value=discord.Permissions(kick_members=True).value)
+    guild.add_fetchable_member(5001, "Alice")
+    diff = await executors.preview(
+        "add_member_role", guild, AddMemberRoleArgs(member="5001", role="Mods")
+    )
+    assert "Alice" in diff and "Mods" in diff and "kick_members" in diff
+
+
+async def test_preview_add_member_role_flags_zero_permission_role():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    guild.add_fetchable_member(5001, "Alice")
+    diff = await executors.preview(
+        "add_member_role", guild, AddMemberRoleArgs(member="5001", role="DJs")
+    )
+    assert "zero-permission" in diff
 
 
 async def test_preview_edit_role_shows_changes():

@@ -173,6 +173,8 @@ Registry:
 | `create_role` | yes | no (always zero-perm, §2.6) |
 | `edit_role` | yes (rename/color/hoist/mentionable — never permissions) | **yes** (§2.8) |
 | `delete_role` | **yes, irreversibly** (refuses @everyone / managed roles) | **yes** (§2.8, ADR-0007) — diff optionally names current holders (§2.1, ADR-0008) |
+| `add_member_role` | yes (refuses @everyone / managed; member by numeric id only) | **yes** (§2.8) — diff shows the role's actual permissions |
+| `remove_member_role` | yes (refuses @everyone / managed; member by numeric id only) | **yes** (§2.8) — diff shows the role's actual permissions |
 | `set_permissions` | yes | **yes** (§2.8) |
 | `edit_channel` | yes (rename/topic/recategorize — never delete) | **yes** (§2.8) |
 | `post_message` | side effect (mass mentions suppressed) | **yes** (§2.8) |
@@ -213,6 +215,18 @@ message history — content-bearing, stays under the blanket no-delete rule per 
 zero-permission roles that rule was narrowed for) and anything that mutates or removes a *member*
 (timeout, kick, ban) — those reopen the no-destructive-tools invariant on a person rather than an
 inert object and need their own ADR-0007-style discussion before any code, not a silent add.
+
+`add_member_role`/`remove_member_role` touch a member too, but deliberately weren't put in that
+same bucket: neither removes anyone from the server or restricts their access — a member keeps
+everything they had, the action is trivially reversible, and it's the same risk shape as
+`set_permissions` (already shipped, confirm-gated changes to who-can-do-what). The one real
+difference from Roger's other role tools: a role Roger *creates* is always zero-permission (§2.6),
+but an *existing* role in the server might not be, so assigning one can be a genuine privilege
+grant. Handled the same way confirm-gating handles everything else — inform, don't block: the
+preview shows the role's actual permission list, not just its name, so the owner approves (or
+doesn't) with the real consequence in view. `member` takes a numeric Discord user id only; Roger
+can't resolve a member by name without the Members intent (§2.1), the same constraint
+`set_permissions`' member targeting already had.
 
 Executors needing more than the guild (store, settings, llm, client) receive a `ToolContext` — a
 dependency bag kept `Any`-typed so the tools package never imports the bot/llm/store modules

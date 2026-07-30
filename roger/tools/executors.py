@@ -27,6 +27,7 @@ from roger.tools.guard import (
 )
 from roger.tools.schemas import (
     AddFeedArgs,
+    AddMemberRoleArgs,
     AddReactionArgs,
     CreateChannelArgs,
     CreateForumPostArgs,
@@ -45,6 +46,7 @@ from roger.tools.schemas import (
     MoveChannelArgs,
     PostMessageArgs,
     RemoveFeedArgs,
+    RemoveMemberRoleArgs,
     RemoveReactionArgs,
     ReplyToForumPostArgs,
     RunDigestArgs,
@@ -226,6 +228,27 @@ def _check_role_editable(guild: discord.Guild, role: discord.Role) -> None:
         raise GuardError("can't edit or delete a Discord-managed role (bot/integration/booster)")
 
 
+def _check_role_assignable(guild: discord.Guild, role: discord.Role) -> None:
+    if role.id == guild.default_role.id:
+        raise GuardError("@everyone is automatic — every member already has it")
+    if getattr(role, "managed", False):
+        raise GuardError("can't assign or remove a Discord-managed role (bot/integration/booster)")
+
+
+async def _resolve_member_target(guild: discord.Guild, query: str) -> discord.Member:
+    # Snowflake ids are unique across object types, so "is this id one of the guild's roles" is a
+    # reliable, duck-typed role-vs-member check — cheaper than an isinstance check and doesn't
+    # require constructing a real discord.Member to tell them apart.
+    target = await _resolve_target(guild, query)
+    if target.id in {role.id for role in guild.roles}:
+        raise GuardError(f"{query!r} resolved to a role, not a member — give a member instead")
+    return target
+
+
+def _role_permission_names(role: discord.Role) -> list[str]:
+    return [name for name, value in role.permissions if value]
+
+
 # --------------------------------------------------------------------------- mutations
 
 
@@ -381,6 +404,38 @@ async def delete_role(
     name = role.name
     await role.delete()
     return {"deleted": "role", "name": name}
+
+
+async def add_member_role(
+    guild: discord.Guild, args: AddMemberRoleArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    member = await _resolve_member_target(guild, args.member)
+    role = _resolve_role(guild, args.role)
+    _check_role_assignable(guild, role)
+    try:
+        await member.add_roles(role, reason="requested via Roger")
+    except discord.Forbidden as exc:
+        raise GuardError(
+            "I can't assign that role — it may sit above my own role in the hierarchy "
+            "(see deploy/README.md)"
+        ) from exc
+    return {"added": True, "member": member.display_name, "role": role.name}
+
+
+async def remove_member_role(
+    guild: discord.Guild, args: RemoveMemberRoleArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    member = await _resolve_member_target(guild, args.member)
+    role = _resolve_role(guild, args.role)
+    _check_role_assignable(guild, role)
+    try:
+        await member.remove_roles(role, reason="requested via Roger")
+    except discord.Forbidden as exc:
+        raise GuardError(
+            "I can't remove that role — it may sit above my own role in the hierarchy "
+            "(see deploy/README.md)"
+        ) from exc
+    return {"removed": True, "member": member.display_name, "role": role.name}
 
 
 async def set_permissions(
@@ -993,6 +1048,18 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
             return f"{header} — currently held by no one."
         names = ", ".join(holders)
         return f"{header} — currently held by {len(holders)} member(s): {names}"
+    if name == "add_member_role":
+        member = await _resolve_member_target(guild, args.member)
+        role = _resolve_role(guild, args.role)
+        perms = _role_permission_names(role)
+        tail = f" — grants: {', '.join(perms)}" if perms else " — zero-permission role"
+        return f"give {member.display_name} the role @{role.name}{tail}"
+    if name == "remove_member_role":
+        member = await _resolve_member_target(guild, args.member)
+        role = _resolve_role(guild, args.role)
+        perms = _role_permission_names(role)
+        tail = f" — grants: {', '.join(perms)}" if perms else " — zero-permission role"
+        return f"remove the role @{role.name} from {member.display_name}{tail}"
     if name == "post_message":
         channel, _ = _resolve_editable_channel(guild, args.channel)
         body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
@@ -1044,6 +1111,8 @@ EXECUTORS = {
     "create_role": create_role,
     "edit_role": edit_role,
     "delete_role": delete_role,
+    "add_member_role": add_member_role,
+    "remove_member_role": remove_member_role,
     "set_permissions": set_permissions,
     "edit_channel": edit_channel,
     "post_message": post_message,
