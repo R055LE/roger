@@ -74,6 +74,58 @@ async def test_records_tokens_and_openrouter_cost(monkeypatch, tmp_path):
         await store.close()
 
 
+async def test_gigabrain_budget_exceeded_before_network(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_GIGABRAIN="a/b", DAILY_TOKENS_GIGABRAIN="10")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        await store.add_usage("gigabrain", 8, 5)  # 13 >= 10
+        llm = LLM(Settings(), store)
+        with pytest.raises(BudgetExceeded):
+            await llm.complete("gigabrain", [{"role": "user", "content": "hi"}])
+    finally:
+        await store.close()
+
+
+async def test_gigabrain_reasoning_effort_is_passed_through_when_set(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_GIGABRAIN="a/b", GIGABRAIN_REASONING_EFFORT="high")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        captured = {}
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, cost=0.0)
+            )
+
+        monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+        await llm.complete("gigabrain", [{"role": "user", "content": "hi"}])
+        assert captured["extra_body"]["reasoning"] == {"effort": "high"}
+    finally:
+        await store.close()
+
+
+async def test_admin_has_no_reasoning_effort_by_default(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_ADMIN="a/b")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        captured = {}
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, cost=0.0)
+            )
+
+        monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+        await llm.complete("admin", [{"role": "user", "content": "hi"}])
+        assert "reasoning" not in captured["extra_body"]
+    finally:
+        await store.close()
+
+
 def test_retry_after_parses_integer_seconds():
     exc = SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "2"}))
     assert _retry_after_seconds(exc) == 2.0

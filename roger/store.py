@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS admin_log (
     content    TEXT    NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS gigabrain_log (
+    id         INTEGER PRIMARY KEY,
+    ts         REAL    NOT NULL,
+    user_id    INTEGER NOT NULL,
+    channel_id INTEGER,
+    role       TEXT    NOT NULL,
+    content    TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS feeds (
     url      TEXT PRIMARY KEY,
     title    TEXT,
@@ -95,6 +104,7 @@ _DAY_SECONDS = 86_400
 RETENTION_DAYS: dict[str, int] = {
     "ambient_log": 30,
     "admin_log": 30,
+    "gigabrain_log": 30,
     "seen": 90,
     "audit": 365,
 }
@@ -277,6 +287,28 @@ class Store:
     async def add_admin(self, user_id: int, channel_id: int, role: str, content: str) -> None:
         await self._conn.execute(
             "INSERT INTO admin_log (ts, user_id, channel_id, role, content) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (time.time(), user_id, channel_id, role, content),
+        )
+        await self._conn.commit()
+
+    # --- gigabrain conversation memory (owner multi-turn continuity) ---
+
+    async def recent_gigabrain(
+        self, user_id: int, channel_id: int, limit: int = 8
+    ) -> list[dict[str, Any]]:
+        """The most recent gigabrain request/answer turns for this owner+channel, oldest first."""
+        cursor = await self._conn.execute(
+            "SELECT role, content FROM gigabrain_log WHERE user_id = ? AND channel_id = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (user_id, channel_id, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in reversed(rows)]
+
+    async def add_gigabrain(self, user_id: int, channel_id: int, role: str, content: str) -> None:
+        await self._conn.execute(
+            "INSERT INTO gigabrain_log (ts, user_id, channel_id, role, content) "
             "VALUES (?, ?, ?, ?, ?)",
             (time.time(), user_id, channel_id, role, content),
         )

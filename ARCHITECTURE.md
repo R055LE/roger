@@ -11,7 +11,7 @@ turns.
 ## §1 Overview
 
 Roger is a **single-guild, owner-gated Discord assistant** built on hosted models via OpenRouter.
-It runs as one process with three independent **brains**, chosen entirely by *who* is talking and
+It runs as one process with four independent **brains**, chosen entirely by *who* is talking and
 *where*:
 
 | Brain | Purpose | Tools | Who |
@@ -19,6 +19,7 @@ It runs as one process with three independent **brains**, chosen entirely by *wh
 | **Admin** (§6) | Server concierge — creates channels/roles, sets permissions, curates feeds | Yes | Owner only |
 | **Ambient** (§8) | Deadpan chat persona | None | Anyone |
 | **Digest** (§9) | Scheduled RSS/Atom summary | n/a (scheduled) | — |
+| **Giga Brain** (§12) | Deep, occasional strategic analysis — reviews server state, proposes ideas, never acts | Read-only subset | Owner only |
 
 No agent framework. The admin brain is a hand-rolled tool loop (§6) so every step is inspectable
 and bounded. The design goal is that **safety is structural** — enforced by which intents are off,
@@ -269,6 +270,7 @@ behaviour adds rows, not migrations.
 | `seen` | `(feed_url, entry_id)` dedupe keys for the digest (§9) |
 | `ambient_log` | Ambient own-thread memory, per user+channel (§8) |
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
+| `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |
 | `feeds` | The curated digest feed list (§9) |
 | `meta` | Small key/value bot state (e.g. the persisted presence outfit) — never pruned |
 
@@ -284,7 +286,37 @@ Limits at a glance (defaults; all env-overridable):
 
 | Control | Default |
 |---|---|
-| Daily tokens — admin / ambient / digest | 150k / 40k / 30k |
+| Daily tokens — admin / ambient / digest / gigabrain | 150k / 40k / 30k / 100k |
 | Tool calls per admin request | 10 |
 | Model round-trips per admin request | 14 |
+| Tool calls / round-trips per gigabrain request | 10 / 14 |
 | Ambient — per user / window / global hourly | 5 / 600s / 30 |
+
+## §12 Giga Brain — read-only strategic analysis
+
+`roger/brains/gigabrain.py`. Same tool-loop shape as admin (§6) — snapshot, call the model with
+tool schemas, validate/guard/execute, feed results back, loop — but with no mutation possible and
+no confirm flow anywhere in the module, because neither is ever needed:
+
+- **No mutation, enforced twice.** Its tool schema is built from `GIGABRAIN_TOOLS`, a fixed
+  allowlist of the *existing* read-only tools (`list_structure`, `server_stats`,
+  `list_role_members`, `list_audit_log`, `list_invites`, `list_webhooks`,
+  `list_scheduled_events`, `list_forum_posts`) — the same "expressible actions are bounded, not
+  prompted" philosophy as §2.6/§2.7, applied to a whole brain instead of one field. `_run_tool`
+  additionally refuses at execution time if a model ever calls a tool name outside that allowlist,
+  or one that (contrary to how the allowlist was chosen) turns out to need confirmation — belt and
+  suspenders, not just "the schema doesn't offer it." `list_feeds`/`suggest_feeds` are deliberately
+  excluded: that's digest's content-curation domain, not server-structure strategy.
+- **Owner-only, single-guild** (§2.2/§2.3) — the `/gigabrain` command gate mirrors `/roger`'s
+  exactly (`CANNED_DENY`, `AuditStatus.GATE_REJECTED`, zero tokens spent on a non-owner).
+- **Its own model chain and budget** (`MODEL_GIGABRAIN`, `DAILY_TOKENS_GIGABRAIN`), tuned for depth
+  rather than speed: lower temperature and a higher `max_tokens` ceiling than admin (§11), plus an
+  opt-in `GIGABRAIN_REASONING_EFFORT` passthrough to OpenRouter's unified `reasoning.effort` param
+  — sent only if set, so it's a no-op unless the configured model supports it.
+- **Its own conversation memory** (`gigabrain_log`, §10) so a follow-up in the same channel has
+  context, kept separate from admin's memory the same way ambient's is.
+- System prompt instructs the model to phrase output as analysis/suggestions, never as actions
+  taken, and to point the owner at `/roger` (admin) for anything concrete enough to execute.
+
+Triggered on demand only, via `/gigabrain <question>` — there is no periodic self-triggered
+suggestion loop (yet); that's tracked as a possible follow-up, not built.

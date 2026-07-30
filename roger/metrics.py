@@ -21,7 +21,7 @@ from prometheus_client import Counter, Gauge, start_http_server
 
 log = logging.getLogger("roger.metrics")
 
-_BRAINS = ("admin", "ambient", "digest")
+_BRAINS = ("admin", "ambient", "digest", "gigabrain")
 
 # --- event counters (in-process; incremented at the call site) ---
 LLM_REQUESTS = Counter("roger_llm_requests_total", "LLM completion calls dispatched", ["brain"])
@@ -47,6 +47,7 @@ async def refresh(store: Any, settings: Any, version: str) -> None:
         "admin": settings.daily_tokens_admin,
         "ambient": settings.daily_tokens_ambient,
         "digest": settings.daily_tokens_digest,
+        "gigabrain": settings.daily_tokens_gigabrain,
     }
     for brain in _BRAINS:
         TOKENS_TODAY.labels(brain).set(await store.usage_today(brain))

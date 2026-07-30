@@ -29,6 +29,7 @@ from roger import metrics
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
 from roger.brains.digest import run_digest_job, seed_feeds_if_empty
+from roger.brains.gigabrain import handle_gigabrain_request
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
@@ -189,7 +190,7 @@ def _missing_permissions(perms: discord.Permissions) -> list[str]:
 
 # --------------------------------------------------------------------------- status & ops
 
-_BRAINS = ("admin", "ambient", "digest")
+_BRAINS = ("admin", "ambient", "digest", "gigabrain")
 
 
 def _daily_caps(settings: Settings) -> dict[str, int]:
@@ -198,6 +199,7 @@ def _daily_caps(settings: Settings) -> dict[str, int]:
         "admin": settings.daily_tokens_admin,
         "ambient": settings.daily_tokens_ambient,
         "digest": settings.daily_tokens_digest,
+        "gigabrain": settings.daily_tokens_gigabrain,
     }
 
 
@@ -247,9 +249,9 @@ def _format_status(
         spent = cost.get(brain, 0.0)
         total_cost += spent
         lines.append(
-            f"  {brain:<8}{usage.get(brain, 0):>8,} / {caps.get(brain, 0):<8,}  ${spent:.4f}"
+            f"  {brain:<10}{usage.get(brain, 0):>8,} / {caps.get(brain, 0):<8,}  ${spent:.4f}"
         )
-    lines.append(f"  {'total':<27}  ${total_cost:.4f}")
+    lines.append(f"  {'total':<29}  ${total_cost:.4f}")
     digest = f"{digest_hour:02d}:00 {tz}" if digest_configured else "unconfigured"
     lines.append(f"feeds: {feeds_count}   digest: {digest}")
     if recent_audit:
@@ -523,6 +525,25 @@ class RogerClient(discord.Client):
             log.exception("admin request failed for actor %s", actor_id)
             return "Something went wrong handling that — check the logs."
 
+    async def _run_gigabrain(self, request: str, actor_id: int, channel_id: int) -> str:
+        guild = self.get_guild(self.settings.guild_id)
+        if guild is None:
+            return "I can't see the configured guild right now."
+        ctx = ToolContext(llm=self.llm, store=self.store, settings=self.settings, client=self)
+        try:
+            return await handle_gigabrain_request(
+                request=request,
+                guild=guild,
+                actor_id=actor_id,
+                llm=self.llm,
+                store=self.store,
+                ctx=ctx,
+                channel_id=channel_id,
+            )
+        except Exception:
+            log.exception("gigabrain request failed for actor %s", actor_id)
+            return "Something went wrong handling that — check the logs."
+
     @tasks.loop(time=datetime.time(hour=8))
     async def _digest_loop(self) -> None:
         result = await run_digest_job(
@@ -632,6 +653,15 @@ def _register_commands(client: RogerClient) -> None:
     async def status_cmd(interaction: discord.Interaction) -> None:
         await _handle_status(client, interaction)
 
+    @client.tree.command(
+        name="gigabrain",
+        description="Ask Roger to think hard about the server — read-only, owner only.",
+        guild=client._guild,
+    )
+    @app_commands.describe(request="What you want Roger to think about or analyze.")
+    async def gigabrain_cmd(interaction: discord.Interaction, request: str) -> None:
+        await _handle_gigabrain_request(client, interaction, request)
+
 
 async def _handle_roger_request(
     client: RogerClient, interaction: discord.Interaction, request: str
@@ -657,6 +687,31 @@ async def _handle_roger_request(
     reply = await client._run_admin(
         request, user_id, interaction.channel_id, interaction.followup.send
     )
+    await interaction.followup.send(_truncate(reply))
+
+
+async def _handle_gigabrain_request(
+    client: RogerClient, interaction: discord.Interaction, request: str
+) -> None:
+    user_id = interaction.user.id
+
+    # Owner gate (§2.3): runs before any LLM dispatch — zero tokens spent on a non-owner.
+    if user_id != client.settings.owner_id:
+        await client.store.record_audit(
+            actor_id=user_id,
+            brain="gigabrain",
+            tool=None,
+            args={"request": request},
+            status=AuditStatus.GATE_REJECTED,
+            detail="non-owner /gigabrain",
+        )
+        await interaction.response.send_message(CANNED_DENY, ephemeral=True)
+        log.info("gate rejected /gigabrain from non-owner %s", user_id)
+        return
+
+    # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
+    await interaction.response.defer(thinking=True)
+    reply = await client._run_gigabrain(request, user_id, interaction.channel_id)
     await interaction.followup.send(_truncate(reply))
 
 

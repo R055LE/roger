@@ -84,6 +84,7 @@ def _settings(**over):
         daily_tokens_admin=150000,
         daily_tokens_ambient=40000,
         daily_tokens_digest=30000,
+        daily_tokens_gigabrain=100000,
         digest_hour=8,
         digest_channel_id=42,
         tz="UTC",

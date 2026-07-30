@@ -33,6 +33,22 @@ def test_model_chain_is_parsed_to_list(monkeypatch):
     assert Settings().admin_models == ["a/b", "c/d", "e/f"]
 
 
+def test_gigabrain_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    settings = Settings()
+    assert settings.gigabrain_models == []
+    assert settings.daily_tokens_gigabrain == 100_000
+    assert settings.gigabrain_max_tool_calls == 10
+    assert settings.gigabrain_max_turns == 14
+    assert settings.gigabrain_reasoning_effort == ""
+
+
+def test_gigabrain_model_chain_is_parsed_to_list(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MODEL_GIGABRAIN", "a/b, c/d")
+    assert Settings().gigabrain_models == ["a/b", "c/d"]
+
+
 def test_empty_digest_channel_id_becomes_none(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("DIGEST_CHANNEL_ID", "")

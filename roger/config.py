@@ -34,15 +34,23 @@ class Settings(BaseSettings):
     model_admin: str = ""
     model_ambient: str = ""
     model_digest: str = ""
+    model_gigabrain: str = ""
 
     # --- budgets (daily in+out tokens per brain) ---
     daily_tokens_admin: int = 150_000
     daily_tokens_ambient: int = 40_000
     daily_tokens_digest: int = 30_000
+    daily_tokens_gigabrain: int = 100_000
 
     # --- admin tool loop bounds (§2.9) ---
     admin_max_tool_calls: int = 10
     admin_max_turns: int = 14
+
+    # --- gigabrain tool loop bounds (read-only, own budget) ---
+    gigabrain_max_tool_calls: int = 10
+    gigabrain_max_turns: int = 14
+    # OpenRouter unified `reasoning.effort` (e.g. "high") — sent only if set; opt-in per model.
+    gigabrain_reasoning_effort: str = ""
 
     # --- ambient rate limiting ---
     ambient_rate_per_user: int = 5
@@ -86,6 +94,10 @@ class Settings(BaseSettings):
     @property
     def digest_models(self) -> list[str]:
         return _split_csv(self.model_digest)
+
+    @property
+    def gigabrain_models(self) -> list[str]:
+        return _split_csv(self.model_gigabrain)
 
     @property
     def feeds(self) -> list[str]:

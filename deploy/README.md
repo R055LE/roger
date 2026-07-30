@@ -72,6 +72,10 @@ granting a wide-sounding permission for a single narrow read, the same tradeoff 
 Do **not** grant Administrator; nothing Roger does needs it. (`list_scheduled_events` needs none of
 these — scheduled events aren't privileged data.)
 
+**`/gigabrain` needs no additional scopes.** It only ever calls the read-only tools above — View
+Audit Log, Manage Guild, and Manage Webhooks are the only entries in that set that need anything
+beyond View Channels, and they're already in this checklist.
+
 **Role hierarchy — matters now that Roger assigns roles.** Hierarchy governs *role and member*
 actions, not channel edits: a bot can only assign/remove roles positioned below its own top role.
 `edit_channel` is still gated by Manage Channels, not by hierarchy, and role *creation* still
