@@ -158,9 +158,11 @@ Three layers, one per file under `roger/tools/`:
   state fed to the model and as the `list_structure` result; it's **lean by default** (ids, names,
   kinds) and only includes the costly permission-overwrite matrix and channel topics when
   `detailed=True`, which `list_structure` requests. Forum and stage channels are listed too (kind
-  `forum`/`stage`) so the model's view agrees with `server_stats`, but no tool can create, edit, or
-  otherwise target one — a name that resolves to one gets a named refusal instead of a misleading
-  "no match".
+  `forum`/`stage`) so the model's view agrees with `server_stats`. Forums have their own dedicated
+  tools (`list_forum_posts`/`create_forum_post`/`reply_to_forum_post`) rather than being folded into
+  the generic channel tools — a forum's content is posts (threads), not messages, so `post_message`/
+  `edit_channel`/etc. still refuse one by name with a named refusal, not a misleading "no match".
+  Stage channels have no tools at all yet — nothing in Roger's surface needs them.
 
 Registry:
 
@@ -174,6 +176,9 @@ Registry:
 | `set_permissions` | yes | **yes** (§2.8) |
 | `edit_channel` | yes (rename/topic/recategorize — never delete) | **yes** (§2.8) |
 | `post_message` | side effect (mass mentions suppressed) | **yes** (§2.8) |
+| `list_forum_posts` | no | — |
+| `create_forum_post` | side effect (mass mentions suppressed) | **yes** (§2.8) |
+| `reply_to_forum_post` | side effect (mass mentions suppressed) | **yes** (§2.8) |
 | `move_channel` | yes (reorder a channel/category — position only) | **yes** (§2.8) |
 | `run_digest` | side effect | no |
 | `list_feeds` | no | — |

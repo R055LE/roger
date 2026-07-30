@@ -29,12 +29,14 @@ from roger.tools.schemas import (
     AddFeedArgs,
     AddReactionArgs,
     CreateChannelArgs,
+    CreateForumPostArgs,
     CreateRoleArgs,
     DeleteRoleArgs,
     EditChannelArgs,
     EditRoleArgs,
     ListAuditLogArgs,
     ListFeedsArgs,
+    ListForumPostsArgs,
     ListInvitesArgs,
     ListRoleMembersArgs,
     ListScheduledEventsArgs,
@@ -44,6 +46,7 @@ from roger.tools.schemas import (
     PostMessageArgs,
     RemoveFeedArgs,
     RemoveReactionArgs,
+    ReplyToForumPostArgs,
     RunDigestArgs,
     ServerStatsArgs,
     SetNicknameArgs,
@@ -154,6 +157,37 @@ def _resolve_editable_channel(guild: discord.Guild, query: str) -> tuple[Any, st
                     raise GuardError(f"{channel.name!r} is a {kind} channel — no tool supports one")
                 return channel, kind
     raise GuardError(f"channel {query!r} vanished")
+
+
+def _resolve_forum(guild: discord.Guild, query: str) -> discord.ForumChannel:
+    forum_id, _ = resolve_one(query, [(f.id, f.name) for f in guild.forums])
+    forum = discord.utils.get(guild.forums, id=forum_id)
+    if forum is None:
+        raise GuardError(f"forum {query!r} vanished")
+    return forum
+
+
+def _resolve_forum_post(forum: discord.ForumChannel, query: str) -> discord.Thread:
+    # Active posts only — an archived post's name isn't resolvable without an extra fetch, and
+    # replying to a long-dead post is an edge case not worth that cost (§ simplicity).
+    post_id, _ = resolve_one(query, [(t.id, t.name) for t in forum.threads])
+    post = discord.utils.get(forum.threads, id=post_id)
+    if post is None:
+        raise GuardError(f"post {query!r} vanished")
+    return post
+
+
+def _resolve_forum_tags(forum: discord.ForumChannel, names: list[str]) -> list[discord.ForumTag]:
+    tags = []
+    for name in names:
+        tag = discord.utils.find(
+            lambda t, name=name: t.name.casefold() == name.casefold(), forum.available_tags
+        )
+        if tag is None:
+            available = ", ".join(t.name for t in forum.available_tags) or "none"
+            raise GuardError(f"no tag named {name!r} on this forum — available: {available}")
+        tags.append(tag)
+    return tags
 
 
 async def _resolve_target(guild: discord.Guild, query: str) -> discord.Role | discord.Member:
@@ -426,6 +460,62 @@ async def post_message(
     # Suppress @everyone/@here and role/user pings — Roger never mass-mentions for the owner.
     await channel.send(args.content, allowed_mentions=discord.AllowedMentions.none())
     return {"posted": True, "channel": channel.name, "chars": len(args.content)}
+
+
+def _forum_post_summary(post: discord.Thread) -> dict[str, Any]:
+    return {
+        "title": post.name,
+        "id": post.id,
+        "tags": [tag.name for tag in post.applied_tags],
+        "message_count": post.message_count,
+        "archived": post.archived,
+        "created": post.created_at.isoformat() if post.created_at else None,
+    }
+
+
+async def list_forum_posts(
+    guild: discord.Guild, args: ListForumPostsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    forum = _resolve_forum(guild, args.forum)
+    posts = list(forum.threads)
+    if args.include_archived:
+        posts += [post async for post in forum.archived_threads(limit=args.limit)]
+    posts = posts[: args.limit]
+    return {
+        "forum": forum.name,
+        "count": len(posts),
+        "posts": [_forum_post_summary(post) for post in posts],
+    }
+
+
+async def create_forum_post(
+    guild: discord.Guild, args: CreateForumPostArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    forum = _resolve_forum(guild, args.forum)
+    tags = _resolve_forum_tags(forum, args.tags)
+    # Suppress @everyone/@here and role/user pings — same rule as post_message.
+    created = await forum.create_thread(
+        name=args.title,
+        content=args.content,
+        applied_tags=tags,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+    return {
+        "posted": True,
+        "forum": forum.name,
+        "title": created.thread.name,
+        "id": created.thread.id,
+        "tags": [tag.name for tag in tags],
+    }
+
+
+async def reply_to_forum_post(
+    guild: discord.Guild, args: ReplyToForumPostArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    forum = _resolve_forum(guild, args.forum)
+    post = _resolve_forum_post(forum, args.post)
+    await post.send(args.content, allowed_mentions=discord.AllowedMentions.none())
+    return {"posted": True, "forum": forum.name, "post": post.name, "chars": len(args.content)}
 
 
 def _same_category(a: Any, b: Any) -> bool:
@@ -907,6 +997,17 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
         channel, _ = _resolve_editable_channel(guild, args.channel)
         body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
         return f"post to #{channel.name}:\n{body}"
+    if name == "create_forum_post":
+        forum = _resolve_forum(guild, args.forum)
+        tags = _resolve_forum_tags(forum, args.tags)
+        tag_str = f" [tags: {', '.join(t.name for t in tags)}]" if tags else ""
+        body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
+        return f'new post in #{forum.name}: "{args.title}"{tag_str}\n{body}'
+    if name == "reply_to_forum_post":
+        forum = _resolve_forum(guild, args.forum)
+        post = _resolve_forum_post(forum, args.post)
+        body = args.content if len(args.content) <= 300 else args.content[:300] + "…"
+        return f'reply in #{forum.name} → "{post.name}":\n{body}'
     if name == "move_channel":
         channel, kind = _resolve_editable_channel(guild, args.channel)
         label = "category" if kind == "category" else f"{kind} channel"
@@ -946,6 +1047,9 @@ EXECUTORS = {
     "set_permissions": set_permissions,
     "edit_channel": edit_channel,
     "post_message": post_message,
+    "list_forum_posts": list_forum_posts,
+    "create_forum_post": create_forum_post,
+    "reply_to_forum_post": reply_to_forum_post,
     "move_channel": move_channel,
     "run_digest": run_digest,
     "suggest_feeds": suggest_feeds,

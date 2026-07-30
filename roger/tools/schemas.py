@@ -114,6 +114,25 @@ class PostMessageArgs(ToolArgs):
     content: str = Field(min_length=1, max_length=2000)  # body; mass mentions always suppressed
 
 
+class ListForumPostsArgs(ToolArgs):
+    forum: str  # existing forum channel: name or id
+    include_archived: bool = False
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class CreateForumPostArgs(ToolArgs):
+    forum: str  # existing forum channel: name or id
+    title: str = Field(min_length=1, max_length=100)  # thread name; Discord's own cap
+    content: str = Field(min_length=1, max_length=2000)  # starter message; forums require one
+    tags: list[str] = Field(default_factory=list, max_length=5)  # names from the forum's tag set
+
+
+class ReplyToForumPostArgs(ToolArgs):
+    forum: str  # the post's parent forum: name or id
+    post: str  # existing post (thread) in that forum: title or id
+    content: str = Field(min_length=1, max_length=2000)
+
+
 class MoveChannelArgs(ToolArgs):
     channel: str  # channel or category to reorder: name or id
     position: Literal["top", "bottom"] | None = None  # move to the top/bottom of its group
@@ -311,6 +330,33 @@ REGISTRY: dict[str, ToolSpec] = {
             "text before it is sent."
         ),
         args_model=PostMessageArgs,
+        requires_confirm=True,
+    ),
+    "list_forum_posts": ToolSpec(
+        name="list_forum_posts",
+        description=(
+            "List posts (threads) in a forum channel: title, applied tags, reply count, and "
+            "archived state. Active posts only unless include_archived is set. Read-only."
+        ),
+        args_model=ListForumPostsArgs,
+    ),
+    "create_forum_post": ToolSpec(
+        name="create_forum_post",
+        description=(
+            "Start a new post in a forum channel: a title, a starter message, and optionally "
+            "tags from the forum's own tag set. Mass mentions are always suppressed. The owner "
+            "must confirm the exact forum, title, and text before it is sent."
+        ),
+        args_model=CreateForumPostArgs,
+        requires_confirm=True,
+    ),
+    "reply_to_forum_post": ToolSpec(
+        name="reply_to_forum_post",
+        description=(
+            "Post a reply as Roger into an existing forum post (thread). Mass mentions are "
+            "always suppressed. The owner must confirm the exact post and text before it is sent."
+        ),
+        args_model=ReplyToForumPostArgs,
         requires_confirm=True,
     ),
     "move_channel": ToolSpec(

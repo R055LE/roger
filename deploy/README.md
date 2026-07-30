@@ -52,7 +52,7 @@ with scopes `bot` and `applications.commands`, and tick exactly:
 | View Channels | read the structure it manages |
 | Manage Channels | create and edit channels |
 | Manage Roles | create (zero-perm) roles and set channel overwrites |
-| Send Messages | post the digest, and `post_message` |
+| Send Messages | post the digest, `post_message`, and the forum-post tools |
 | Embed Links | the digest is posted as an embed |
 | Add Reactions | the `add_reaction` tool |
 | Read Message History | Discord requires it to react to a message, and to remove its own reaction |

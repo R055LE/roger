@@ -14,12 +14,14 @@ from roger.tools.schemas import (
     AddFeedArgs,
     ChannelGrant,
     CreateChannelArgs,
+    CreateForumPostArgs,
     CreateRoleArgs,
     DeleteRoleArgs,
     EditChannelArgs,
     EditRoleArgs,
     ListAuditLogArgs,
     ListFeedsArgs,
+    ListForumPostsArgs,
     ListInvitesArgs,
     ListRoleMembersArgs,
     ListScheduledEventsArgs,
@@ -28,6 +30,7 @@ from roger.tools.schemas import (
     Overwrite,
     PostMessageArgs,
     RemoveFeedArgs,
+    ReplyToForumPostArgs,
     SetPermissionsArgs,
     SuggestFeedsArgs,
 )
@@ -83,6 +86,67 @@ class FakeChannel:
 
     async def set_permissions(self, target, *, overwrite):
         self.perm_calls.append((target, overwrite))
+
+
+class FakeForumTag:
+    def __init__(self, tag_id, name):
+        self.id = tag_id
+        self.name = name
+
+
+class FakeForumPost:
+    def __init__(self, post_id, name, *, tags=(), archived=False, message_count=1, created_at=None):
+        self.id = post_id
+        self.name = name
+        self.applied_tags = list(tags)
+        self.archived = archived
+        self.message_count = message_count
+        self.created_at = created_at
+        self.sent = []
+
+    async def send(self, content, allowed_mentions=None):
+        self.sent.append(SimpleNamespace(content=content, allowed_mentions=allowed_mentions))
+
+
+class FakeForum:
+    """A forum channel: active `threads`, an `available_tags` set, and archived posts served
+    through `archived_threads()` — mirrors just enough of discord.py's ForumChannel."""
+
+    def __init__(self, cid, name, *, category=None, topic=None):
+        self.id = cid
+        self.name = name
+        self.category = category
+        self.topic = topic
+        self.threads = []
+        self.available_tags = []
+        self._archived = []
+        self._next_id = cid * 1000
+
+    def add_tag(self, name):
+        tag = FakeForumTag(self._id(), name)
+        self.available_tags.append(tag)
+        return tag
+
+    def add_post(self, name, *, tags=(), archived=False, message_count=1, created_at=None):
+        post = FakeForumPost(
+            self._id(), name, tags=tags, archived=archived,
+            message_count=message_count, created_at=created_at,
+        )
+        (self._archived if archived else self.threads).append(post)
+        return post
+
+    def _id(self):
+        self._next_id += 1
+        return self._next_id
+
+    async def archived_threads(self, *, limit=100, before=None):
+        for post in self._archived[:limit]:
+            yield post
+
+    async def create_thread(self, *, name, content, applied_tags=(), allowed_mentions=None):
+        post = FakeForumPost(self._id(), name, tags=applied_tags)
+        self.threads.append(post)
+        return SimpleNamespace(thread=post, message=SimpleNamespace(content=content))
 
 
 class FakeAuditEntry:
@@ -232,9 +296,9 @@ class FakeGuild:
         return category
 
     def add_forum(self, name, *, category=None, topic=None):
-        channel = FakeChannel(self._id(), name, category=category, topic=topic)
-        self.forums.append(channel)
-        return channel
+        forum = FakeForum(self._id(), name, category=category, topic=topic)
+        self.forums.append(forum)
+        return forum
 
     def add_stage(self, name, *, category=None):
         channel = FakeChannel(self._id(), name, category=category)
@@ -280,6 +344,9 @@ async def test_confirm_gated_tools_have_a_real_preview():
     guild = FakeGuild()
     guild.add_role("DJs")
     guild.add_text("general")
+    forum = guild.add_forum("questions")
+    forum.add_tag("solved")
+    forum.add_post("existing post")
 
     args_by_tool = {
         "create_channel": CreateChannelArgs(name="new-room", kind="text", private=True),
@@ -290,6 +357,12 @@ async def test_confirm_gated_tools_have_a_real_preview():
         ),
         "edit_channel": EditChannelArgs(channel="general", name="renamed"),
         "post_message": PostMessageArgs(channel="general", content="hi"),
+        "create_forum_post": CreateForumPostArgs(
+            forum="questions", title="new post", content="hi", tags=["solved"]
+        ),
+        "reply_to_forum_post": ReplyToForumPostArgs(
+            forum="questions", post="existing post", content="hi"
+        ),
         "move_channel": MoveChannelArgs(channel="general", position="top"),
     }
     confirm_gated = [
@@ -724,6 +797,108 @@ async def test_post_message_rejects_non_text_channel():
     guild.voice_channels.append(FakeChannel(guild._id(), "Lounge"))
     with pytest.raises(GuardError):
         await executors.post_message(guild, PostMessageArgs(channel="Lounge", content="hi"))
+
+
+# ------------------------------------------------------------------ forum posts
+
+
+async def test_list_forum_posts_active_only_by_default():
+    guild = FakeGuild()
+    forum = guild.add_forum("questions")
+    forum.add_post("how do I", tags=[forum.add_tag("help")], message_count=3)
+    forum.add_post("archived one", archived=True)
+    out = await executors.list_forum_posts(guild, ListForumPostsArgs(forum="questions"))
+    assert out["count"] == 1
+    assert out["posts"][0]["title"] == "how do I"
+    assert out["posts"][0]["tags"] == ["help"]
+    assert out["posts"][0]["message_count"] == 3
+    assert out["posts"][0]["archived"] is False
+
+
+async def test_list_forum_posts_includes_archived_when_asked():
+    guild = FakeGuild()
+    forum = guild.add_forum("questions")
+    forum.add_post("active one")
+    forum.add_post("archived one", archived=True)
+    out = await executors.list_forum_posts(
+        guild, ListForumPostsArgs(forum="questions", include_archived=True)
+    )
+    assert out["count"] == 2
+    assert {p["title"] for p in out["posts"]} == {"active one", "archived one"}
+
+
+async def test_list_forum_posts_unknown_forum_errors():
+    guild = FakeGuild()
+    with pytest.raises(GuardError):
+        await executors.list_forum_posts(guild, ListForumPostsArgs(forum="ghost"))
+
+
+async def test_create_forum_post_sends_starter_message_with_tags():
+    guild = FakeGuild()
+    forum = guild.add_forum("questions")
+    forum.add_tag("help")
+    result = await executors.create_forum_post(
+        guild, CreateForumPostArgs(forum="questions", title="new one", content="hi", tags=["help"])
+    )
+    assert result["posted"] is True
+    assert result["title"] == "new one"
+    assert result["tags"] == ["help"]
+    assert forum.threads[-1].name == "new one"
+
+
+async def test_create_forum_post_unknown_tag_errors():
+    guild = FakeGuild()
+    guild.add_forum("questions")
+    with pytest.raises(GuardError, match="no tag named"):
+        await executors.create_forum_post(
+            guild,
+            CreateForumPostArgs(forum="questions", title="x", content="hi", tags=["missing"]),
+        )
+
+
+async def test_reply_to_forum_post_sends_with_mentions_suppressed():
+    guild = FakeGuild()
+    forum = guild.add_forum("questions")
+    post = forum.add_post("how do I")
+    result = await executors.reply_to_forum_post(
+        guild, ReplyToForumPostArgs(forum="questions", post="how do I", content="@everyone hi")
+    )
+    assert result == {"posted": True, "forum": "questions", "post": "how do I", "chars": 12}
+    sent = post.sent[0]
+    assert sent.allowed_mentions.everyone is False
+
+
+async def test_reply_to_forum_post_unknown_post_errors():
+    guild = FakeGuild()
+    guild.add_forum("questions")
+    with pytest.raises(GuardError):
+        await executors.reply_to_forum_post(
+            guild, ReplyToForumPostArgs(forum="questions", post="ghost", content="hi")
+        )
+
+
+async def test_preview_create_forum_post_shows_title_tags_and_body():
+    guild = FakeGuild()
+    forum = guild.add_forum("questions")
+    forum.add_tag("help")
+    diff = await executors.preview(
+        "create_forum_post",
+        guild,
+        CreateForumPostArgs(forum="questions", title="new one", content="hi", tags=["help"]),
+    )
+    assert "questions" in diff and "new one" in diff and "help" in diff and "hi" in diff
+
+
+async def test_preview_reply_to_forum_post_shows_target_and_body():
+    guild = FakeGuild()
+    forum = guild.add_forum("questions")
+    forum.add_post("how do I")
+    diff = await executors.preview(
+        "reply_to_forum_post",
+        guild,
+        ReplyToForumPostArgs(forum="questions", post="how do I", content="hi"),
+    )
+    assert "questions" in diff and "how do I" in diff and "hi" in diff
 
 
 async def test_preview_renders_edit_and_post():
