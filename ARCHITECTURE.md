@@ -184,12 +184,30 @@ Registry:
 | `set_nickname` | self only (own guild nickname) | no |
 | `server_stats` | no | — |
 | `add_reaction` | side effect (adds one reaction) | no |
+| `remove_reaction` | side effect (removes Roger's own reaction, never another user's) | no |
+| `list_role_members` | no | — |
+| `list_audit_log` | no | — |
+| `list_invites` | no | — |
+| `list_webhooks` | no | — |
+| `list_scheduled_events` | no | — |
 
-The last four are cosmetic "toys" — self-directed (presence, nickname), read-only (server stats),
-or a single reversible reaction. `set_presence` persists its outfit to the `meta` table and is
-reapplied on every reconnect (Discord clears presence on reconnect). `add_reaction` / `set_nickname`
-need the extra gateway scopes noted in `deploy/README.md`; without them they fail with a clear
-message instead of breaking anything.
+The "toys" are cosmetic and self-directed (presence, nickname) or single-reversible (reactions).
+`set_presence` persists its outfit to the `meta` table and is reapplied on every reconnect (Discord
+clears presence on reconnect). `add_reaction` / `set_nickname` need the extra gateway scopes noted in
+`deploy/README.md`; without them they fail with a clear message instead of breaking anything.
+
+The last five are read-only lookups against Discord's own data, added to close CRUD gaps in the
+existing tools rather than copying a general-purpose bot's feature list wholesale (most of that —
+leveling, economy, music — is off-shape for a single-guild admin assistant). `list_role_members`
+reuses the same on-demand, uncached lookup `delete_role`'s confirm preview already used
+(`roger/tools/members.py`, §2.1, ADR-0008) — no new intent. `list_audit_log`, `list_invites`, and
+`list_webhooks` need new permissions on Roger's role (View Audit Log, Manage Guild, Manage Webhooks
+respectively — see `deploy/README.md`); `list_scheduled_events` needs none, since scheduled events
+aren't privileged data. Deliberately **not** built alongside these: `delete_channel` (channels carry
+message history — content-bearing, stays under the blanket no-delete rule per ADR-0007, unlike the
+zero-permission roles that rule was narrowed for) and anything that mutates or removes a *member*
+(timeout, kick, ban) — those reopen the no-destructive-tools invariant on a person rather than an
+inert object and need their own ADR-0007-style discussion before any code, not a silent add.
 
 Executors needing more than the guild (store, settings, llm, client) receive a `ToolContext` — a
 dependency bag kept `Any`-typed so the tools package never imports the bot/llm/store modules

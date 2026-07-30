@@ -33,11 +33,17 @@ from roger.tools.schemas import (
     DeleteRoleArgs,
     EditChannelArgs,
     EditRoleArgs,
+    ListAuditLogArgs,
     ListFeedsArgs,
+    ListInvitesArgs,
+    ListRoleMembersArgs,
+    ListScheduledEventsArgs,
     ListStructureArgs,
+    ListWebhooksArgs,
     MoveChannelArgs,
     PostMessageArgs,
     RemoveFeedArgs,
+    RemoveReactionArgs,
     RunDigestArgs,
     ServerStatsArgs,
     SetNicknameArgs,
@@ -707,6 +713,135 @@ async def add_reaction(
     }
 
 
+async def remove_reaction(
+    guild: discord.Guild, args: RemoveReactionArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    channel_query, message_id = _resolve_message(guild, args.message, args.channel)
+    channel, kind = _resolve_editable_channel(guild, channel_query)
+    if kind != "text":
+        raise GuardError("can only remove reactions in a text channel")
+    emoji = _resolve_emoji(guild, args.emoji)
+    try:
+        # guild.me: Roger only ever removes its own reaction, never another user's (no Manage
+        # Messages needed for that — Discord scopes the "remove your own reaction" endpoint below
+        # the permission that gates removing someone else's).
+        await channel.get_partial_message(message_id).remove_reaction(emoji, guild.me)
+    except discord.NotFound as exc:
+        raise GuardError("no message with that id in that channel, or I hadn't reacted") from exc
+    except discord.Forbidden as exc:
+        raise GuardError("I need 'Read Message History' there (see deploy/README.md)") from exc
+    except discord.HTTPException as exc:
+        raise GuardError(f"Discord rejected removing that reaction: {exc.text or exc}") from exc
+    return {
+        "removed": True,
+        "channel": channel.name,
+        "message_id": message_id,
+        "emoji": str(emoji),
+    }
+
+
+# --------------------------------------------------------------------------- read-only server info
+
+
+async def list_role_members(
+    guild: discord.Guild, args: ListRoleMembersArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    role = _resolve_role(guild, args.role)
+    try:
+        holders = await members.role_holders(guild, role)
+    except discord.HTTPException:
+        return {
+            "role": role.name,
+            "available": False,
+            "reason": "Members intent not enabled — see deploy/README.md",
+        }
+    return {
+        "role": role.name,
+        "available": True,
+        "count": len(holders),
+        "members": [m.display_name for m in holders],
+    }
+
+
+async def list_audit_log(
+    guild: discord.Guild, args: ListAuditLogArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    try:
+        async for entry in guild.audit_logs(limit=args.limit):
+            target = entry.target
+            entries.append(
+                {
+                    "action": entry.action.name,
+                    "user": getattr(entry.user, "display_name", None) or str(entry.user),
+                    "target": getattr(target, "name", None) or getattr(target, "id", None)
+                    if target is not None
+                    else None,
+                    "reason": entry.reason,
+                    "at": entry.created_at.isoformat(),
+                }
+            )
+    except discord.Forbidden as exc:
+        raise GuardError("I need 'View Audit Log' (see deploy/README.md)") from exc
+    return {"entries": entries, "count": len(entries)}
+
+
+async def list_invites(
+    guild: discord.Guild, args: ListInvitesArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    try:
+        invites = await guild.invites()
+    except discord.Forbidden as exc:
+        raise GuardError("I need 'Manage Guild' (see deploy/README.md)") from exc
+    return {
+        "invites": [
+            {
+                "code": inv.code,
+                "channel": getattr(inv.channel, "name", None),
+                "inviter": getattr(inv.inviter, "display_name", None) if inv.inviter else None,
+                "uses": inv.uses,
+                "max_uses": inv.max_uses or None,
+                "expires_at": inv.expires_at.isoformat() if inv.expires_at else None,
+            }
+            for inv in invites
+        ],
+        "count": len(invites),
+    }
+
+
+async def list_webhooks(
+    guild: discord.Guild, args: ListWebhooksArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    try:
+        hooks = await guild.webhooks()
+    except discord.Forbidden as exc:
+        raise GuardError("I need 'Manage Webhooks' (see deploy/README.md)") from exc
+    return {
+        "webhooks": [{"name": h.name, "channel": getattr(h.channel, "name", None)} for h in hooks],
+        "count": len(hooks),
+    }
+
+
+async def list_scheduled_events(
+    guild: discord.Guild, args: ListScheduledEventsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    # REST fetch, not the gateway cache — scheduled events aren't privileged, and a fresh read
+    # costs nothing extra here (unlike members, there's no caching concern to design around).
+    events = await guild.fetch_scheduled_events()
+    return {
+        "events": [
+            {
+                "name": e.name,
+                "start": e.start_time.isoformat() if e.start_time else None,
+                "location": getattr(e.channel, "name", None) or e.location,
+                "status": e.status.name,
+            }
+            for e in events
+        ],
+        "count": len(events),
+    }
+
+
 # --------------------------------------------------------------------------- confirm preview
 
 
@@ -821,4 +956,10 @@ EXECUTORS = {
     "set_nickname": set_nickname,
     "server_stats": server_stats,
     "add_reaction": add_reaction,
+    "remove_reaction": remove_reaction,
+    "list_role_members": list_role_members,
+    "list_audit_log": list_audit_log,
+    "list_invites": list_invites,
+    "list_webhooks": list_webhooks,
+    "list_scheduled_events": list_scheduled_events,
 }

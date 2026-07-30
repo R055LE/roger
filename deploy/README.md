@@ -56,15 +56,22 @@ with scopes `bot` and `applications.commands`, and tick exactly:
 | Send Messages | post the digest, and `post_message` |
 | Embed Links | the digest is posted as an embed |
 | Add Reactions | the `add_reaction` tool |
-| Read Message History | Discord requires it to react to a message |
+| Read Message History | Discord requires it to react to a message, and to remove its own reaction |
 | Change Nickname | the `set_nickname` tool (its own nick only) |
+| View Audit Log | the `list_audit_log` tool |
+| Manage Guild | the `list_invites` tool |
+| Manage Webhooks | the `list_webhooks` tool |
 
-That checklist is permission integer **`335629392`**. The last three are for the cosmetic "toy"
-tools (`add_reaction`, `set_nickname`); drop them and only those tools go dark — grant them to
-Roger's role later without a re-invite if you'd rather. `Manage Roles` is the broad one — but Roger
-only ever creates zero-permission roles and applies overwrites from a fixed allowlist, so the tool
-surface is far narrower than the gateway grant (ARCHITECTURE §2.6, §2.7). Do **not** grant
-Administrator; nothing Roger does needs it.
+That full checklist is permission integer **`872500464`**. The last six are for tools that fail with
+a clear message rather than break anything if their permission is missing — drop any of them and
+only that one tool goes dark; grant it to Roger's role later without a re-invite if you'd rather.
+`Manage Roles` is the broad one — but Roger only ever creates
+zero-permission roles and applies overwrites from a fixed allowlist, so the tool surface is far
+narrower than the gateway grant (ARCHITECTURE §2.6, §2.7). `Manage Guild` is broader still for what
+it's used for — Discord has no narrower bit for "list a server's invites," so this is a case of
+granting a wide-sounding permission for a single narrow read, the same tradeoff as `Manage Roles`.
+Do **not** grant Administrator; nothing Roger does needs it. (`list_scheduled_events` needs none of
+these — scheduled events aren't privileged data.)
 
 **Role hierarchy — mostly a non-issue here.** Hierarchy governs *role and member* actions, not
 channel edits: a bot can only manage roles below its own top role. Roger sidesteps it — it only ever

@@ -17,6 +17,7 @@ from roger.tools.context import ToolContext
 from roger.tools.guard import GuardError
 from roger.tools.schemas import (
     AddReactionArgs,
+    RemoveReactionArgs,
     ServerStatsArgs,
     SetNicknameArgs,
     SetPresenceArgs,
@@ -202,6 +203,11 @@ class FakePartial:
             raise self._channel.react_error
         self._channel.reactions.append((self._id, str(emoji)))
 
+    async def remove_reaction(self, emoji, member):
+        if self._channel.react_error is not None:
+            raise self._channel.react_error
+        self._channel.removed.append((self._id, str(emoji), member))
+
 
 class ReactChannel:
     def __init__(self, cid, name):
@@ -209,6 +215,7 @@ class ReactChannel:
         self.name = name
         self.category = None
         self.reactions = []
+        self.removed = []
         self.react_error = None
 
     def get_partial_message(self, message_id):
@@ -226,6 +233,7 @@ class ReactGuild:
         self.forums = []
         self.stage_channels = []
         self.emojis = [FakeEmoji("party", 42)]
+        self.me = SimpleNamespace(id=1, name="Roger")
 
     def get_emoji(self, eid):
         return next((e for e in self.emojis if e.id == eid), None)
@@ -303,4 +311,30 @@ async def test_add_reaction_missing_message_is_a_clean_error():
     with pytest.raises(GuardError, match="no message"):
         await executors.add_reaction(
             guild, AddReactionArgs(message="1234", emoji="👍", channel="general")
+        )
+
+
+async def test_remove_reaction_removes_rogers_own():
+    guild = ReactGuild()
+    out = await executors.remove_reaction(
+        guild, RemoveReactionArgs(message="1234", emoji="👍", channel="general")
+    )
+    assert out == {"removed": True, "channel": "general", "message_id": 1234, "emoji": "👍"}
+    assert guild.chan.removed == [(1234, "👍", guild.me)]
+
+
+async def test_remove_reaction_rejects_non_text_channel():
+    guild = ReactGuild()
+    with pytest.raises(GuardError, match="text channel"):
+        await executors.remove_reaction(
+            guild, RemoveReactionArgs(message="1234", emoji="👍", channel="Lounge")
+        )
+
+
+async def test_remove_reaction_forbidden_names_the_permission():
+    guild = ReactGuild()
+    guild.chan.react_error = _http_error(discord.Forbidden, 403)
+    with pytest.raises(GuardError, match="Read Message History"):
+        await executors.remove_reaction(
+            guild, RemoveReactionArgs(message="1234", emoji="👍", channel="general")
         )

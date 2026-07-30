@@ -192,6 +192,32 @@ class AddReactionArgs(ToolArgs):
     channel: str | None = None  # channel name/id — required only when `message` is a bare id
 
 
+class RemoveReactionArgs(ToolArgs):
+    message: str  # message link or a bare message id
+    emoji: str  # the exact emoji Roger reacted with
+    channel: str | None = None  # channel name/id — required only when `message` is a bare id
+
+
+class ListRoleMembersArgs(ToolArgs):
+    role: str  # existing role: name or id
+
+
+class ListAuditLogArgs(ToolArgs):
+    limit: int = Field(default=20, ge=1, le=50)  # most recent N entries
+
+
+class ListInvitesArgs(ToolArgs):
+    """No arguments — returns all active invite links."""
+
+
+class ListWebhooksArgs(ToolArgs):
+    """No arguments — returns all webhooks in the server."""
+
+
+class ListScheduledEventsArgs(ToolArgs):
+    """No arguments — returns all scheduled events."""
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -372,6 +398,56 @@ REGISTRY: dict[str, ToolSpec] = {
             "confirmation needed."
         ),
         args_model=AddReactionArgs,
+    ),
+    "remove_reaction": ToolSpec(
+        name="remove_reaction",
+        description=(
+            "Remove Roger's own reaction from a message (never another user's). Same message "
+            "identification as add_reaction. Reversible — no confirmation needed."
+        ),
+        args_model=RemoveReactionArgs,
+    ),
+    "list_role_members": ToolSpec(
+        name="list_role_members",
+        description=(
+            "List the members currently holding a role. Read-only. Falls back to 'unavailable' "
+            "if the Members intent isn't enabled for the application (§2.1, ADR-0008) — same "
+            "on-demand lookup delete_role's confirm preview uses, no standing member cache."
+        ),
+        args_model=ListRoleMembersArgs,
+    ),
+    "list_audit_log": ToolSpec(
+        name="list_audit_log",
+        description=(
+            "Return Discord's own audit log: the most recent N entries (default 20, max 50), "
+            "each with the action, who did it, the target, the reason (if given), and when. "
+            "Read-only. Requires the 'View Audit Log' permission on Roger's role."
+        ),
+        args_model=ListAuditLogArgs,
+    ),
+    "list_invites": ToolSpec(
+        name="list_invites",
+        description=(
+            "List all active invite links: code, target channel, inviter, use count, and "
+            "expiry. Read-only. Requires the 'Manage Guild' permission on Roger's role."
+        ),
+        args_model=ListInvitesArgs,
+    ),
+    "list_webhooks": ToolSpec(
+        name="list_webhooks",
+        description=(
+            "List webhooks configured in the server and which channel each posts to. "
+            "Read-only. Requires the 'Manage Webhooks' permission on Roger's role."
+        ),
+        args_model=ListWebhooksArgs,
+    ),
+    "list_scheduled_events": ToolSpec(
+        name="list_scheduled_events",
+        description=(
+            "List the server's scheduled events: name, start time, location, and status. "
+            "Read-only, no extra permission needed."
+        ),
+        args_model=ListScheduledEventsArgs,
     ),
 }
 

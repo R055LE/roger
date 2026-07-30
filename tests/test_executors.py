@@ -1,5 +1,6 @@
 """Executor mutations against a fake guild — verifies the security invariants structurally."""
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import discord
@@ -17,7 +18,12 @@ from roger.tools.schemas import (
     DeleteRoleArgs,
     EditChannelArgs,
     EditRoleArgs,
+    ListAuditLogArgs,
     ListFeedsArgs,
+    ListInvitesArgs,
+    ListRoleMembersArgs,
+    ListScheduledEventsArgs,
+    ListWebhooksArgs,
     MoveChannelArgs,
     Overwrite,
     PostMessageArgs,
@@ -86,6 +92,40 @@ class FakeMember:
         self.roles = list(roles)
 
 
+class FakeAuditEntry:
+    def __init__(self, action, user, target, reason, created_at):
+        self.action = SimpleNamespace(name=action)
+        self.user = user
+        self.target = target
+        self.reason = reason
+        self.created_at = created_at
+
+
+class FakeInvite:
+    def __init__(self, code, channel, inviter, uses, max_uses, expires_at):
+        self.code = code
+        self.channel = channel
+        self.inviter = inviter
+        self.uses = uses
+        self.max_uses = max_uses
+        self.expires_at = expires_at
+
+
+class FakeWebhook:
+    def __init__(self, name, channel):
+        self.name = name
+        self.channel = channel
+
+
+class FakeScheduledEvent:
+    def __init__(self, name, start_time, channel, location, status):
+        self.name = name
+        self.start_time = start_time
+        self.channel = channel
+        self.location = location
+        self.status = SimpleNamespace(name=status)
+
+
 class FakeGuild:
     def __init__(self):
         self.roles = [FakeRole(0, "@everyone")]
@@ -99,12 +139,38 @@ class FakeGuild:
         self.me = FakeRole(1, "Roger")  # the bot's own member (guild.me); hashable overwrite key
         self.members = []  # populated via add_member(); fetch_members() yields these
         self.member_fetch_error = None  # set to an exception to simulate no Members intent
+        self.audit_log_entries = []
+        self.audit_log_error = None
+        self.invite_list = []
+        self.invites_error = None
+        self.webhook_list = []
+        self.webhooks_error = None
+        self.scheduled_event_list = []
 
     async def fetch_members(self, *, limit=None):
         if self.member_fetch_error is not None:
             raise self.member_fetch_error
         for member in self.members:
             yield member
+
+    async def audit_logs(self, *, limit=100):
+        if self.audit_log_error is not None:
+            raise self.audit_log_error
+        for entry in self.audit_log_entries[:limit]:
+            yield entry
+
+    async def invites(self):
+        if self.invites_error is not None:
+            raise self.invites_error
+        return self.invite_list
+
+    async def webhooks(self):
+        if self.webhooks_error is not None:
+            raise self.webhooks_error
+        return self.webhook_list
+
+    async def fetch_scheduled_events(self):
+        return self.scheduled_event_list
 
     def add_member(self, name, *, roles=()):
         member = FakeMember(self._id(), name, roles=roles)
@@ -848,3 +914,95 @@ async def test_suggest_feeds_validates_without_persisting(feeds):
 async def test_feed_tool_without_store_raises_guard_error():
     with pytest.raises(GuardError):
         await executors.list_feeds(None, ListFeedsArgs(), None)
+
+
+# ------------------------------------------------------------------ read-only server info
+
+
+async def test_list_role_members_returns_current_holders():
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    guild.add_member("Alice", roles=[role])
+    guild.add_member("Bob", roles=[])
+    out = await executors.list_role_members(guild, ListRoleMembersArgs(role="DJs"))
+    assert out == {"role": "DJs", "available": True, "count": 1, "members": ["Alice"]}
+
+
+async def test_list_role_members_falls_back_without_members_intent():
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    guild.member_fetch_error = _http_error(discord.Forbidden, 403)
+    out = await executors.list_role_members(guild, ListRoleMembersArgs(role="DJs"))
+    assert out["available"] is False
+
+
+async def test_list_audit_log_reports_entries():
+    guild = FakeGuild()
+    when = datetime(2026, 1, 1, tzinfo=UTC)
+    guild.audit_log_entries = [
+        FakeAuditEntry(
+            "channel_delete", SimpleNamespace(display_name="Ross"), None, "cleanup", when
+        )
+    ]
+    out = await executors.list_audit_log(guild, ListAuditLogArgs(limit=20))
+    assert out["count"] == 1
+    assert out["entries"][0]["action"] == "channel_delete"
+    assert out["entries"][0]["user"] == "Ross"
+    assert out["entries"][0]["reason"] == "cleanup"
+
+
+async def test_list_audit_log_forbidden_names_the_permission():
+    guild = FakeGuild()
+    guild.audit_log_error = _http_error(discord.Forbidden, 403)
+    with pytest.raises(GuardError, match="View Audit Log"):
+        await executors.list_audit_log(guild, ListAuditLogArgs(limit=20))
+
+
+async def test_list_invites_reports_current_invites():
+    guild = FakeGuild()
+    channel = guild.add_text("general")
+    when = datetime(2026, 6, 1, tzinfo=UTC)
+    guild.invite_list = [
+        FakeInvite("abc123", channel, SimpleNamespace(display_name="Ross"), 3, 10, when)
+    ]
+    out = await executors.list_invites(guild, ListInvitesArgs())
+    assert out["count"] == 1
+    assert out["invites"][0]["code"] == "abc123"
+    assert out["invites"][0]["channel"] == "general"
+    assert out["invites"][0]["uses"] == 3
+
+
+async def test_list_invites_forbidden_names_the_permission():
+    guild = FakeGuild()
+    guild.invites_error = _http_error(discord.Forbidden, 403)
+    with pytest.raises(GuardError, match="Manage Guild"):
+        await executors.list_invites(guild, ListInvitesArgs())
+
+
+async def test_list_webhooks_reports_current_webhooks():
+    guild = FakeGuild()
+    channel = guild.add_text("alerts")
+    guild.webhook_list = [FakeWebhook("Feed Poster", channel)]
+    out = await executors.list_webhooks(guild, ListWebhooksArgs())
+    assert out == {"count": 1, "webhooks": [{"name": "Feed Poster", "channel": "alerts"}]}
+
+
+async def test_list_webhooks_forbidden_names_the_permission():
+    guild = FakeGuild()
+    guild.webhooks_error = _http_error(discord.Forbidden, 403)
+    with pytest.raises(GuardError, match="Manage Webhooks"):
+        await executors.list_webhooks(guild, ListWebhooksArgs())
+
+
+async def test_list_scheduled_events_reports_current_events():
+    guild = FakeGuild()
+    channel = guild.add_text("stage")
+    when = datetime(2026, 8, 1, tzinfo=UTC)
+    guild.scheduled_event_list = [
+        FakeScheduledEvent("Movie Night", when, channel, None, "scheduled")
+    ]
+    out = await executors.list_scheduled_events(guild, ListScheduledEventsArgs())
+    assert out["count"] == 1
+    assert out["events"][0]["name"] == "Movie Night"
+    assert out["events"][0]["location"] == "stage"
+    assert out["events"][0]["status"] == "scheduled"

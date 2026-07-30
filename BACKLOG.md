@@ -230,6 +230,39 @@ only — no app change.
 
 ---
 
+## Tier 5 — Admin tool-surface expansion
+
+Surveyed established Discord admin/moderation bots (2026-07-30) against Roger's existing registry to
+find CRUD gaps — most of that survey's feature space (leveling, economy, music) is off-shape for a
+single-guild admin assistant and isn't listed here. `list_role_members`, `remove_reaction`,
+`list_audit_log`, `list_invites`, `list_webhooks`, and `list_scheduled_events` came out of that same
+pass and are already shipped (read-only, no new intents, no confirm-gating debate). What's left needs
+either new confirm-gated mutation code or its own invariant discussion first:
+
+### 5.1 Discord-native config mutations — **S/M each** — *idea only*
+Confirm-gated, no new gateway intents, same shape as `edit_role`/`create_channel`:
+- [ ] `create_scheduled_event` / cancel one — needs `manage_events`.
+- [ ] `create_webhook` / `delete_webhook` — needs `manage_webhooks` (already granted for
+      `list_webhooks`).
+- [ ] `create_invite` / `revoke_invite` — needs `create_instant_invite`.
+- [ ] AutoMod keyword rules (create/delete) — Discord's own server-side filter; Roger only
+      configures the rule, never sees message content. Needs `manage_guild` (already granted for
+      `list_invites`). Meatier schema (trigger type, keyword list, exempt roles/channels) — probably
+      its own pass rather than bundled with the others.
+
+### 5.2 Timeout (temporary member mute) — needs a decision, not just code
+Closest in risk shape to `delete_role`: reversible (self-expiring), scoped, could reuse the on-demand
+`fetch_member` pattern from `members.py` instead of any new intent. Still touches a *member* directly,
+which `delete_role`'s reasoning explicitly didn't have to — a person isn't inert the way a
+zero-permission role is. Needs its own ADR-0007-style case before any code, not a silent add.
+
+### 5.3 Edit/delete Roger's own posted messages — **S** — idea only
+Roger already fully controls what it posts; editing or deleting its own message doesn't touch anyone
+else's content. Still borders the "message history is content-bearing, stays protected" reasoning in
+ADR-0007, so worth a quick gut-check rather than assuming it's obviously fine.
+
+---
+
 ## Deliberately not doing (for now)
 
 Restraint is a design decision; these are logged as considered-and-declined so they don't get
@@ -245,3 +278,9 @@ re-proposed:
   cap already bounds cost/abuse.
 - **Multi-guild support.** Directly contradicts the single-guild invariant (§2.2) the whole security
   model rests on. A non-goal, not a backlog item.
+- **`delete_channel`.** Channels carry message history — content-bearing, unlike the zero-permission
+  roles `delete_role` was narrowly scoped for (ADR-0007). Stays under the blanket no-delete rule.
+- **`kick`/`ban`/bulk-ban/prune-execute.** The literal named examples in §2.5's original invariant. A
+  member isn't inert the way a role is, so the case is weaker than `delete_role`'s — not ruling it out
+  forever, but it needs its own explicit discussion (see 5.2 for the one already-floated candidate,
+  `timeout`, which is a materially smaller ask than these).
