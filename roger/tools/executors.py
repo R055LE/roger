@@ -80,6 +80,16 @@ async def snapshot(guild: discord.Guild, *, detailed: bool = False) -> dict[str,
             kind = "voice"
             category = channel.category.name if channel.category else None
             topic = None
+        elif isinstance(channel, discord.ForumChannel):
+            # No tool can create, edit, or target a forum (§7) — still listed so the model's view
+            # matches server_stats' forum count instead of silently disagreeing with it.
+            kind = "forum"
+            category = channel.category.name if channel.category else None
+            topic = channel.topic
+        elif isinstance(channel, discord.StageChannel):
+            kind = "stage"  # same rationale as forums, above
+            category = channel.category.name if channel.category else None
+            topic = None
         else:
             continue
         entry: dict[str, Any] = {
@@ -113,18 +123,29 @@ async def list_structure(
 # --------------------------------------------------------------------------- resolution
 
 
+_UNSUPPORTED_CHANNEL_KINDS = (("forum", "forums"), ("stage", "stage_channels"))
+
+
 def _resolve_editable_channel(guild: discord.Guild, query: str) -> tuple[Any, str]:
-    """Resolve a text/voice/category channel and report its kind — no ``isinstance`` needed."""
+    """Resolve a text/voice/category channel and report its kind — no ``isinstance`` needed.
+
+    Forum and stage channels are folded into the same name pool so a query that matches one of
+    them fails with a clear "no tool supports that" instead of a misleading "no match" — the
+    channel is real, Roger just can't act on it (§7).
+    """
     buckets = (
         ("text", guild.text_channels),
         ("voice", guild.voice_channels),
         ("category", guild.categories),
+        *((kind, getattr(guild, attr)) for kind, attr in _UNSUPPORTED_CHANNEL_KINDS),
     )
     items = [(c.id, c.name) for _, collection in buckets for c in collection]
     channel_id, _ = resolve_one(query, items)
     for kind, collection in buckets:
         for channel in collection:
             if channel.id == channel_id:
+                if kind in ("forum", "stage"):
+                    raise GuardError(f"{channel.name!r} is a {kind} channel — no tool supports one")
                 return channel, kind
     raise GuardError(f"channel {query!r} vanished")
 

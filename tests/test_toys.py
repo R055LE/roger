@@ -223,6 +223,8 @@ class ReactGuild:
         self.text_channels = [self.chan]
         self.voice_channels = [self.voice]
         self.categories = []
+        self.forums = []
+        self.stage_channels = []
         self.emojis = [FakeEmoji("party", 42)]
 
     def get_emoji(self, eid):

@@ -92,6 +92,8 @@ class FakeGuild:
         self.categories = []
         self.text_channels = []
         self.voice_channels = []
+        self.forums = []
+        self.stage_channels = []
         self._next_id = 1000
         self.last_overwrites = None
         self.me = FakeRole(1, "Roger")  # the bot's own member (guild.me); hashable overwrite key
@@ -146,6 +148,16 @@ class FakeGuild:
         self.categories.append(category)
         return category
 
+    def add_forum(self, name, *, category=None, topic=None):
+        channel = FakeChannel(self._id(), name, category=category, topic=topic)
+        self.forums.append(channel)
+        return channel
+
+    def add_stage(self, name, *, category=None):
+        channel = FakeChannel(self._id(), name, category=category)
+        self.stage_channels.append(channel)
+        return channel
+
     def _id(self):
         self._next_id += 1
         return self._next_id
@@ -166,6 +178,47 @@ class FakeGuild:
         category = FakeChannel(self._id(), name)
         self.categories.append(category)
         return category
+
+
+# ------------------------------------------------------------------ registry ↔ executors parity
+
+
+def test_registry_and_executors_have_matching_tools():
+    """Every schema has an executor and vice versa — a mismatch degrades a tool call to a runtime
+    error (or leaves dead code) instead of failing loudly at review time."""
+    assert set(schemas.REGISTRY) == set(executors.EXECUTORS)
+
+
+async def test_confirm_gated_tools_have_a_real_preview():
+    """Confirm-gating is the actual safety mechanism (ADR-0007) — every tool the owner must approve
+    needs a genuine diff in executors.preview(), not the bare tool-name fallback for unhandled
+    names. A future confirm-gated tool added without a preview branch would show the owner just its
+    name as the "diff" to approve."""
+    guild = FakeGuild()
+    guild.add_role("DJs")
+    guild.add_text("general")
+
+    args_by_tool = {
+        "create_channel": CreateChannelArgs(name="new-room", kind="text", private=True),
+        "edit_role": EditRoleArgs(role="DJs", name="Selectors"),
+        "delete_role": DeleteRoleArgs(role="DJs"),
+        "set_permissions": SetPermissionsArgs(
+            channel="general", overwrites=[Overwrite(target="@everyone", deny=["view_channel"])]
+        ),
+        "edit_channel": EditChannelArgs(channel="general", name="renamed"),
+        "post_message": PostMessageArgs(channel="general", content="hi"),
+        "move_channel": MoveChannelArgs(channel="general", position="top"),
+    }
+    confirm_gated = [
+        name
+        for name, spec in schemas.REGISTRY.items()
+        if spec.requires_confirm or spec.confirm_when is not None
+    ]
+    assert set(confirm_gated) == set(args_by_tool)  # this test covers every confirm-gated tool
+
+    for name in confirm_gated:
+        diff = await executors.preview(name, guild, args_by_tool[name])
+        assert diff != name  # not the bare fallback
 
 
 async def test_create_role_always_zero_permissions():
@@ -410,6 +463,11 @@ async def test_create_category_rejects_read_only():
         )
 
 
+def test_overwrite_rejects_allow_deny_overlap():
+    with pytest.raises(ValueError):  # pydantic model validator
+        Overwrite(target="@everyone", allow=["view_channel"], deny=["view_channel"])
+
+
 async def test_set_permissions_can_target_a_category():
     guild = FakeGuild()
     category = guild.add_category("Admin")
@@ -535,6 +593,22 @@ async def test_edit_channel_unknown_channel_errors():
     guild = FakeGuild()
     with pytest.raises(GuardError):
         await executors.edit_channel(guild, EditChannelArgs(channel="ghost", name="x"))
+
+
+async def test_edit_channel_names_the_kind_for_a_forum():
+    """A forum channel is real (and visible in list_structure) but no tool supports one — the
+    error should say so instead of the misleading "no match" a truly unknown name would get."""
+    guild = FakeGuild()
+    guild.add_forum("questions")
+    with pytest.raises(GuardError, match="forum"):
+        await executors.edit_channel(guild, EditChannelArgs(channel="questions", name="x"))
+
+
+async def test_edit_channel_names_the_kind_for_a_stage():
+    guild = FakeGuild()
+    guild.add_stage("town-hall")
+    with pytest.raises(GuardError, match="stage"):
+        await executors.edit_channel(guild, EditChannelArgs(channel="town-hall", name="x"))
 
 
 async def test_post_message_sends_with_mentions_suppressed():

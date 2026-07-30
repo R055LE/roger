@@ -157,7 +157,10 @@ Three layers, one per file under `roger/tools/`:
 - **`executors.py`** — the actual Discord API calls. `snapshot()` doubles as the pre-request server
   state fed to the model and as the `list_structure` result; it's **lean by default** (ids, names,
   kinds) and only includes the costly permission-overwrite matrix and channel topics when
-  `detailed=True`, which `list_structure` requests.
+  `detailed=True`, which `list_structure` requests. Forum and stage channels are listed too (kind
+  `forum`/`stage`) so the model's view agrees with `server_stats`, but no tool can create, edit, or
+  otherwise target one — a name that resolves to one gets a named refusal instead of a misleading
+  "no match".
 
 Registry:
 
