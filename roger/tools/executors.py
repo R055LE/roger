@@ -759,7 +759,7 @@ async def list_role_members(
         "role": role.name,
         "available": True,
         "count": len(holders),
-        "members": [m.display_name for m in holders],
+        "members": holders,
     }
 
 
@@ -901,7 +901,7 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
             )
         if not holders:
             return f"{header} — currently held by no one."
-        names = ", ".join(m.display_name for m in holders)
+        names = ", ".join(holders)
         return f"{header} — currently held by {len(holders)} member(s): {names}"
     if name == "post_message":
         channel, _ = _resolve_editable_channel(guild, args.channel)

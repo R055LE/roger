@@ -38,12 +38,11 @@ correctly, both in service of least privilege (ARCHITECTURE §2.4):
 (against what its own gateway connection requests) and refuses to run if either is on.
 
 **Server Members — off by default, optional.** Leave it disabled unless you want `delete_role`'s
-confirm dialog to show who currently holds a role before you delete it (ADR-0008). Flipping this
-portal toggle does **not** give Roger a live member cache or member-change events — those stay off
-regardless, since Roger's gateway connection never requests the Members intent (`Intents.default()`,
-§2.1). It only unlocks the on-demand REST lookup used in exactly that one confirm preview
-(`roger/tools/members.py`); leave it off and `delete_role` just falls back to "Roger cannot see who
-currently holds it."
+confirm dialog and the `list_role_members` tool to show who currently holds a role (ADR-0008).
+Flipping this portal toggle does **not** give Roger a live member cache or member-change events —
+those stay off regardless, since Roger's gateway connection never requests the Members intent
+(`Intents.default()`, §2.1). It only unlocks the on-demand REST lookup in `roger/tools/members.py`;
+leave it off and both tools fall back to "Roger cannot see who currently holds it" / "unavailable."
 
 **Invite with only the permissions the tools use — never Administrator.** Use OAuth2 → URL Generator
 with scopes `bot` and `applications.commands`, and tick exactly:

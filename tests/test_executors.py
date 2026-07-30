@@ -85,13 +85,6 @@ class FakeChannel:
         self.perm_calls.append((target, overwrite))
 
 
-class FakeMember:
-    def __init__(self, member_id, display_name, roles=()):
-        self.id = member_id
-        self.display_name = display_name
-        self.roles = list(roles)
-
-
 class FakeAuditEntry:
     def __init__(self, action, user, target, reason, created_at):
         self.action = SimpleNamespace(name=action)
@@ -126,8 +119,30 @@ class FakeScheduledEvent:
         self.status = SimpleNamespace(name=status)
 
 
+class FakeMembersHTTP:
+    """Fakes the one HTTP method role_holders() calls directly — paginates like the real
+    GET /guilds/{id}/members: up to _PAGE_SIZE per page, ``after`` is the last-seen user id."""
+
+    def __init__(self, guild):
+        self._guild = guild
+
+    async def get_members(self, guild_id, limit, after):
+        if self._guild.member_fetch_error is not None:
+            raise self._guild.member_fetch_error
+        pool = self._guild.member_payloads
+        if after is not None:
+            pool = [m for m in pool if int(m["user"]["id"]) > after]
+        return pool[:limit]
+
+
+class FakeConnectionState:
+    def __init__(self, guild):
+        self.http = FakeMembersHTTP(guild)
+
+
 class FakeGuild:
     def __init__(self):
+        self.id = 999
         self.roles = [FakeRole(0, "@everyone")]
         self.categories = []
         self.text_channels = []
@@ -137,8 +152,9 @@ class FakeGuild:
         self._next_id = 1000
         self.last_overwrites = None
         self.me = FakeRole(1, "Roger")  # the bot's own member (guild.me); hashable overwrite key
-        self.members = []  # populated via add_member(); fetch_members() yields these
+        self.member_payloads = []  # raw REST payloads, populated via add_member()
         self.member_fetch_error = None  # set to an exception to simulate no Members intent
+        self._state = FakeConnectionState(self)
         self.audit_log_entries = []
         self.audit_log_error = None
         self.invite_list = []
@@ -146,12 +162,6 @@ class FakeGuild:
         self.webhook_list = []
         self.webhooks_error = None
         self.scheduled_event_list = []
-
-    async def fetch_members(self, *, limit=None):
-        if self.member_fetch_error is not None:
-            raise self.member_fetch_error
-        for member in self.members:
-            yield member
 
     async def audit_logs(self, *, limit=100):
         if self.audit_log_error is not None:
@@ -173,9 +183,16 @@ class FakeGuild:
         return self.scheduled_event_list
 
     def add_member(self, name, *, roles=()):
-        member = FakeMember(self._id(), name, roles=roles)
-        self.members.append(member)
-        return member
+        """Append a raw REST member payload — the shape GET /guilds/{id}/members actually
+        returns, since role_holders() reads payloads directly rather than building a real
+        discord.Member (see roger/tools/members.py)."""
+        payload = {
+            "user": {"id": self._id(), "username": name, "global_name": None},
+            "nick": None,
+            "roles": [str(r.id) for r in roles],
+        }
+        self.member_payloads.append(payload)
+        return payload
 
     @property
     def default_role(self):
@@ -414,9 +431,20 @@ async def test_role_holders_filters_by_role():
     guild = FakeGuild()
     role = guild.add_role("DJs")
     other = guild.add_role("MCs")
-    alice = guild.add_member("Alice", roles=[role])
+    guild.add_member("Alice", roles=[role])
     guild.add_member("Bob", roles=[other])
-    assert await members.role_holders(guild, role) == [alice]
+    assert await members.role_holders(guild, role) == ["Alice"]
+
+
+async def test_role_holders_paginates(monkeypatch):
+    """Hand-rolled since role_holders bypasses Guild.fetch_members() (see roger/tools/members.py)
+    — prove the page-size/after-cursor loop actually walks more than one page."""
+    monkeypatch.setattr(members, "_PAGE_SIZE", 2)
+    guild = FakeGuild()
+    role = guild.add_role("DJs")
+    for name in ("Alice", "Bob", "Carol", "Dave", "Eve"):
+        guild.add_member(name, roles=[role])
+    assert await members.role_holders(guild, role) == ["Alice", "Bob", "Carol", "Dave", "Eve"]
 
 
 async def test_create_readonly_text_channel_denies_send_for_everyone():

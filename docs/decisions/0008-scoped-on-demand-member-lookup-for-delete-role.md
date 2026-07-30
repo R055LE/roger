@@ -63,3 +63,26 @@ deciding; this just gives them a real answer instead of a disclosed blind spot.
 - No new config surface: the Discord portal toggle is the only switch. A Roger-level flag on top of
   it was considered and dropped as unneeded — start small, add one later if a second feature needs
   the same capability and the single-chokepoint discipline starts feeling thin.
+
+## Amendment (2026-07-30): the original implementation didn't actually work
+
+The Discord-API-level research above was correct — but `role_holders()` originally called `Guild.
+fetch_members()`, discord.py's own convenience wrapper, and that wrapper has its *own* client-side
+guard: `if not self._state._intents.members: raise ClientException(...)`. It checks Roger's local
+`Intents` object (always `members=False`, §2.1) unconditionally — regardless of the portal toggle.
+So the fallback path never actually triggered in production: the wrapper raised `ClientException`,
+which isn't a `discord.HTTPException`, so callers' `except discord.HTTPException` never caught it,
+and the owner saw a raw "Intents.members must be enabled" error no matter what they did in the
+portal. Caught via live container logs after `list_role_members` shipped and the owner reported
+Roger "still saying it needs intent" after enabling the toggle.
+
+Fixed by going one layer lower: `role_holders()` now calls `guild._state.http.get_members(...)`
+directly — the same REST call `fetch_members()` makes internally, minus its intents guard — and
+works from the raw payload instead of constructing a real `discord.Member` (which needs a live
+`ConnectionState` to build correctly; the raw payload has everything `role_holders()` actually
+needs — role ids and a display name). The decision above is otherwise unchanged: still one function,
+one call site now two (`list_role_members` also uses it), still on-demand, still discarded after use.
+The added, real cost: `guild._state` and `.http` are private discord.py attributes, not part of its
+public API, so a future discord.py upgrade could rename or restructure them without a deprecation
+path — mitigated by the pinned version in `pyproject.toml` and a dedicated pagination test
+(`test_role_holders_paginates`) that would fail loudly rather than silently degrade.
