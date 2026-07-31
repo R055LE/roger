@@ -321,12 +321,22 @@ no confirm flow anywhere in the module, because neither is ever needed:
 
 Triggered two ways: on demand via `/gigabrain <question>`, and optionally on a periodic,
 unprompted check-in (`run_gigabrain_suggestion`) — a fixed "review the server, propose
-improvements" prompt through the same read-only loop, **DMed directly to the owner**, not posted to
-any channel (these are meant to be candid, owner-only musings, unlike the digest's public post).
-Off by default (`GIGABRAIN_INTERVAL_DAYS=0`); when set, a daily `tasks.loop` tick at
-`GIGABRAIN_HOUR` calls it unconditionally and the function decides for itself whether it's actually
-due, the same "the job decides, not the caller" shape as `run_digest_job`'s "no new items". Cadence
-is tracked via a `gigabrain_last_run_date` key in `meta` (§10) rather than an in-memory guard,
-because a several-day interval must survive a mid-cycle restart. A failed DM (owner has DMs closed,
-blocked the bot, etc.) is logged and surfaced once via the ops watchdog, not retried — the next
-scheduled tick will naturally try again once the interval elapses.
+improvements" prompt through the same read-only loop. Delivered to `GIGABRAIN_CHANNEL_ID` if set,
+else **DMed directly to the owner** — DM is the safer default (these can be candid, owner-only
+musings, unlike the digest's public post), but a dedicated private channel is supported for anyone
+who'd rather have a scrollable history than a string of DMs; either way it's the deploy owner's
+choice of destination and privacy, not Roger's. Off by default (`GIGABRAIN_INTERVAL_DAYS=0`); when
+set, a daily `tasks.loop` tick at `GIGABRAIN_HOUR` calls it unconditionally and the function decides
+for itself whether it's actually due, the same "the job decides, not the caller" shape as
+`run_digest_job`'s "no new items". Cadence is tracked via a `gigabrain_last_run_date` key in `meta`
+(§10) rather than an in-memory guard, because a several-day interval must survive a mid-cycle
+restart. A failed delivery (DM closed, bot blocked, configured channel not found or not
+postable) is logged and surfaced once via the ops watchdog, not retried — the next scheduled tick
+will naturally try again once the interval elapses.
+
+The check-in uses the delivery destination's id as `channel_id`, not `None` — unlike the digest, it
+*should* have continuity: each run sees prior check-ins via the same `recent_gigabrain` memory an
+interactive conversation uses. The prompt is explicit about using that memory well: lead with
+what's changed, stay brief when nothing has, and don't re-flag the same unaddressed suggestion
+every single cycle — repetition-by-default is exactly the "why aren't you doing anything" nagging
+a periodic advisor should avoid.

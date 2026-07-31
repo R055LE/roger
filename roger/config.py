@@ -52,9 +52,11 @@ class Settings(BaseSettings):
     # OpenRouter unified `reasoning.effort` (e.g. "high") — sent only if set; opt-in per model.
     gigabrain_reasoning_effort: str = ""
 
-    # --- gigabrain periodic suggestions (owner DM) ---
+    # --- gigabrain periodic suggestions ---
     gigabrain_interval_days: int = 0  # 0 = disabled; e.g. 7 for weekly
     gigabrain_hour: int = 9
+    # unset = DM the owner directly; set = post there instead (same shape as digest_channel_id).
+    gigabrain_channel_id: int | None = None
 
     # --- ambient rate limiting ---
     ambient_rate_per_user: int = 5
@@ -79,7 +81,9 @@ class Settings(BaseSettings):
     db_path: str = "/data/roger.db"
     log_level: str = "INFO"
 
-    @field_validator("digest_channel_id", "ops_channel_id", mode="before")
+    @field_validator(
+        "digest_channel_id", "ops_channel_id", "gigabrain_channel_id", mode="before"
+    )
     @classmethod
     def _empty_to_none(cls, value: object) -> object:
         # compose interpolation yields "" for an unset optional int; treat it as absent.

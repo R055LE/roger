@@ -54,9 +54,20 @@ SYSTEM_PROMPT = (
 )
 
 # Periodic, unprompted check-in (§12) — a fixed self-request through the same read-only loop.
+# Sent with channel_id set to the owner's DM channel (not None), so this reuses the same
+# recent_gigabrain memory as an interactive conversation — each check-in can see what it told the
+# owner last time instead of starting cold every run.
 SUGGESTION_PROMPT = (
-    "Review the current server state and propose 2-4 concrete, prioritized improvements. Be "
-    "specific — reference actual channels, roles, or patterns you see, not generic advice."
+    "This is your periodic, unprompted check-in with the server owner — nobody asked a question "
+    "this time. If you have memory of previous check-ins, lead with what's actually changed since "
+    "then. If nothing meaningful has changed, say so briefly instead of manufacturing a fresh "
+    "report — a short 'still true, nothing new' beats padding, and don't re-flag the same "
+    "unaddressed suggestion every single cycle; let it rest sometimes rather than nagging. "
+    "Otherwise, review the current server state and raise what's specific and worth raising — "
+    "reference actual channels, roles, or patterns, not generic advice. If this looks like your "
+    "first check-in, say so plainly rather than implying a history that isn't there. If you do "
+    "have a concrete suggestion, end with the single highest-priority thing the owner could ask "
+    "Roger's admin mode (/roger) to do right now."
 )
 LAST_RUN_META_KEY = "gigabrain_last_run_date"
 
@@ -174,13 +185,16 @@ async def handle_gigabrain_request(
 async def run_gigabrain_suggestion(
     *, client: Any, settings: Any, llm: LLM, store: Store
 ) -> dict[str, Any]:
-    """Periodic, unprompted server-improvement suggestions — DMed to the owner.
+    """Periodic, unprompted server-improvement suggestions.
 
     Self-gated on ``gigabrain_interval_days`` via a last-run date persisted in ``meta`` (survives
     restarts, unlike an in-memory guard), so a naive daily tick that just calls this unconditionally
     is safe — mirrors how ``run_digest_job`` decides "no new items" itself rather than the caller
-    precomputing it. No conversation memory of its own (``channel_id=None``): this is a one-shot job
-    like the digest, not a user-initiated exchange.
+    precomputing it. Delivered to ``gigabrain_channel_id`` if set, else DMed to the owner directly
+    (same fallback shape as ``digest_channel_id``). Either way the destination's id is used as
+    ``channel_id`` (not ``None``): unlike the digest, this *should* have continuity — each check-in
+    can see what it told the owner last time via the same ``recent_gigabrain`` memory an interactive
+    conversation uses, instead of starting cold and risking the same advice verbatim every run.
     """
     if settings.gigabrain_interval_days <= 0:
         return {"status": "periodic suggestions not configured"}
@@ -196,6 +210,19 @@ async def run_gigabrain_suggestion(
     if guild is None:
         return {"status": f"guild {settings.guild_id} not visible"}
 
+    channel_id = getattr(settings, "gigabrain_channel_id", None)
+    if channel_id is not None:
+        destination = client.get_channel(channel_id)
+        if destination is None:
+            return {"status": f"gigabrain channel {channel_id} not found"}
+    else:
+        try:
+            owner = await client.fetch_user(settings.owner_id)
+            destination = await owner.create_dm()
+        except discord.DiscordException:
+            log.exception("failed to open a DM with the owner for gigabrain's periodic check-in")
+            return {"status": "DM failed; suggestion not delivered"}
+
     ctx = ToolContext(llm=llm, store=store, settings=settings, client=client)
     try:
         answer = await handle_gigabrain_request(
@@ -205,26 +232,25 @@ async def run_gigabrain_suggestion(
             llm=llm,
             store=store,
             ctx=ctx,
-            channel_id=None,
+            channel_id=destination.id,
         )
     except Exception:
         log.exception("periodic gigabrain suggestion failed")
         return {"status": "error running suggestion"}
 
     try:
-        owner = await client.fetch_user(settings.owner_id)
         if len(answer) <= 4096:
             embed = discord.Embed(title="Giga Brain — periodic check-in", description=answer)
-            await owner.send(embed=embed)
+            await destination.send(embed=embed)
         else:
             file = discord.File(io.BytesIO(answer.encode("utf-8")), filename="gigabrain-checkin.md")
-            await owner.send(
+            await destination.send(
                 content="Giga Brain's periodic check-in ran long — full report attached.",
                 file=file,
             )
     except discord.DiscordException:
-        log.exception("failed to DM owner with gigabrain suggestion")
-        return {"status": "DM failed; suggestion not delivered"}
+        log.exception("failed to deliver gigabrain's periodic check-in")
+        return {"status": "delivery failed; suggestion not sent"}
 
     await store.set_meta(LAST_RUN_META_KEY, today.isoformat())
     return {"status": "delivered"}

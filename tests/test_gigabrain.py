@@ -300,8 +300,11 @@ async def test_gigabrain_memory_is_scoped_per_channel(tmp_path):
 # --------------------------------------------------------------------------- periodic suggestions
 
 
-class FakeUser:
-    def __init__(self, raise_on_send=None):
+class FakeSendable:
+    """A fake for anything with .id + .send() — a DM channel or a real guild text channel."""
+
+    def __init__(self, channel_id=7001, raise_on_send=None):
+        self.id = channel_id
         self.sent = []
         self._raise = raise_on_send
 
@@ -311,13 +314,28 @@ class FakeUser:
         self.sent.append(file if file is not None else (embed if embed is not None else content))
 
 
+class FakeUser:
+    def __init__(self, raise_on_create_dm=None, dm_channel=None):
+        self._raise_on_create_dm = raise_on_create_dm
+        self.dm_channel = dm_channel if dm_channel is not None else FakeSendable()
+
+    async def create_dm(self):
+        if self._raise_on_create_dm is not None:
+            raise self._raise_on_create_dm
+        return self.dm_channel
+
+
 class FakeSuggestionClient:
-    def __init__(self, guild, user):
+    def __init__(self, guild, user, channel=None):
         self._guild = guild
         self._user = user
+        self._channel = channel
 
     def get_guild(self, guild_id):
         return self._guild
+
+    def get_channel(self, channel_id):
+        return self._channel
 
     async def fetch_user(self, user_id):
         return self._user
@@ -367,9 +385,9 @@ async def test_periodic_suggestion_runs_and_dms_owner_on_first_call(tmp_path):
             client=client, settings=_settings(), llm=llm, store=store
         )
         assert out["status"] == "delivered"
-        assert len(user.sent) == 1
-        assert isinstance(user.sent[0], discord.Embed)
-        assert "Add a rules channel." in user.sent[0].description
+        assert len(user.dm_channel.sent) == 1
+        assert isinstance(user.dm_channel.sent[0], discord.Embed)
+        assert "Add a rules channel." in user.dm_channel.sent[0].description
         assert await store.get_meta(gigabrain.LAST_RUN_META_KEY) is not None
     finally:
         await store.close()
@@ -386,10 +404,48 @@ async def test_periodic_suggestion_attaches_a_file_when_the_answer_is_long(tmp_p
             client=client, settings=_settings(), llm=llm, store=store
         )
         assert out["status"] == "delivered"
-        assert len(user.sent) == 1
-        assert isinstance(user.sent[0], discord.File)
-        assert user.sent[0].filename == "gigabrain-checkin.md"
-        assert user.sent[0].fp.read().decode("utf-8") == long_answer
+        assert len(user.dm_channel.sent) == 1
+        assert isinstance(user.dm_channel.sent[0], discord.File)
+        assert user.dm_channel.sent[0].filename == "gigabrain-checkin.md"
+        assert user.dm_channel.sent[0].fp.read().decode("utf-8") == long_answer
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_posts_to_the_configured_channel_instead_of_dming(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        user = FakeUser()  # never touched — channel takes priority
+        channel = FakeSendable(channel_id=555)
+        client = FakeSuggestionClient(guild=object(), user=user, channel=channel)
+        llm = FakeLLM([_resp(content="Add a rules channel.")])
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client,
+            settings=_settings(gigabrain_channel_id=555),
+            llm=llm,
+            store=store,
+        )
+        assert out["status"] == "delivered"
+        assert len(channel.sent) == 1
+        assert isinstance(channel.sent[0], discord.Embed)
+        assert user.dm_channel.sent == []  # the DM path was never touched
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_reports_when_the_configured_channel_is_missing(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        client = FakeSuggestionClient(guild=object(), user=FakeUser(), channel=None)
+        llm = FakeLLM([])
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client,
+            settings=_settings(gigabrain_channel_id=555),
+            llm=llm,
+            store=store,
+        )
+        assert "555" in out["status"] and "not found" in out["status"]
+        assert llm.calls == 0
     finally:
         await store.close()
 
@@ -406,16 +462,65 @@ async def test_periodic_suggestion_guild_not_visible(tmp_path):
         await store.close()
 
 
-async def test_periodic_suggestion_dm_failure_is_reported_and_meta_not_updated(tmp_path):
+async def test_periodic_suggestion_delivery_failure_is_reported_and_meta_not_updated(tmp_path):
     store = await _open_store(tmp_path)
     try:
-        user = FakeUser(raise_on_send=_http_error(discord.Forbidden, 403))
+        dm_channel = FakeSendable(raise_on_send=_http_error(discord.Forbidden, 403))
+        user = FakeUser(dm_channel=dm_channel)
         client = FakeSuggestionClient(guild=object(), user=user)
         llm = FakeLLM([_resp(content="Add a rules channel.")])
         out = await gigabrain.run_gigabrain_suggestion(
             client=client, settings=_settings(), llm=llm, store=store
         )
-        assert "DM failed" in out["status"]
+        assert "delivery failed" in out["status"]
         assert await store.get_meta(gigabrain.LAST_RUN_META_KEY) is None
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_create_dm_failure_skips_the_llm_call(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        user = FakeUser(raise_on_create_dm=_http_error(discord.Forbidden, 403))
+        client = FakeSuggestionClient(guild=object(), user=user)
+        llm = FakeLLM([])
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client, settings=_settings(), llm=llm, store=store
+        )
+        assert "DM failed" in out["status"]
+        assert llm.calls == 0  # never spent a token if the DM can't even be opened
+        assert await store.get_meta(gigabrain.LAST_RUN_META_KEY) is None
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_remembers_the_previous_check_in(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        user = FakeUser()
+        client = FakeSuggestionClient(guild=object(), user=user)
+
+        out1 = await gigabrain.run_gigabrain_suggestion(
+            client=client,
+            settings=_settings(),
+            llm=FakeLLM([_resp(content="Consider a rules channel.")]),
+            store=store,
+        )
+        assert out1["status"] == "delivered"
+
+        # Back-date last-run so the second call is due, then confirm the DM channel's memory
+        # (not None) actually threaded through by checking what the second LLM call was shown.
+        a_week_ago = datetime.date.today() - datetime.timedelta(days=7)
+        await store.set_meta(gigabrain.LAST_RUN_META_KEY, a_week_ago.isoformat())
+        sink = {}
+        out2 = await gigabrain.run_gigabrain_suggestion(
+            client=client,
+            settings=_settings(),
+            llm=_CapturingLLM([_resp(content="Still no rules channel.")], sink),
+            store=store,
+        )
+        assert out2["status"] == "delivered"
+        contents = [m["content"] for m in sink["messages"] if m.get("content")]
+        assert any("Consider a rules channel." in c for c in contents)
     finally:
         await store.close()
