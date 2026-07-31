@@ -10,6 +10,12 @@ deliberately NOT exercised here — it gets the full tool registry, and create_c
 aren't confirm-gated by default, so an open-ended smoke-test prompt could theoretically create real
 state. Revisit once handle_admin_request can take a restricted tool subset.
 
+The reply-delivery helpers (_send_chunked, _send_report) get their own deterministic checks with
+synthetic long text, not just whatever a model happens to write — a short fixed prompt is basically
+never going to produce output long enough to hit the multi-message/file-attachment branches on its
+own, so leaving that to real model output would make the exact regression this module exists to
+catch dependent on model verbosity.
+
 Run against the deployed container (reuses its env — no new secrets, no separate checkout):
     docker exec "$(docker ps -q --filter name=roger)" python -m roger.smoke_test
 
@@ -76,6 +82,79 @@ async def _check_snapshot(guild: discord.Guild) -> _Result:
         f"{len(snap.get('channels', []))} channels, {len(snap.get('roles', []))} roles, "
         f"{stats.get('members')} members",
     )
+
+
+_LONG_SAMPLE = "This is a deterministic synthetic paragraph for testing. " * 40  # ~2360 chars
+
+
+async def _check_chunked_delivery_mechanics() -> _Result:
+    """Deterministic check of _send_chunked's splitting — no live call, no model involved.
+
+    Ambient's low max_tokens keeps real replies well under 2000 chars, so _check_ambient below can
+    never organically exercise the multi-message branch. This does, every run, regardless of what
+    any model happens to write.
+    """
+    sent: list[Any] = []
+
+    async def sink(content: Any = None, **_kwargs: Any) -> None:
+        sent.append(content)
+
+    try:
+        await _send_chunked(sink, _LONG_SAMPLE)
+    except Exception as exc:
+        return _Result("send_chunked mechanics", False, f"raised: {exc!r}")
+
+    if len(sent) < 2:
+        return _Result(
+            "send_chunked mechanics", False, f"expected multiple messages, got {len(sent)}"
+        )
+    if any(len(chunk) > 2000 for chunk in sent):
+        return _Result("send_chunked mechanics", False, "a chunk exceeded Discord's 2000-char cap")
+    if "".join(sent) != _LONG_SAMPLE:
+        return _Result("send_chunked mechanics", False, "reconstructed chunks lost content")
+    return _Result(
+        "send_chunked mechanics", True, f"{len(_LONG_SAMPLE)} chars split into {len(sent)} messages"
+    )
+
+
+async def _check_report_delivery_mechanics() -> _Result:
+    """Deterministic check of _send_report's branching — no live call, no model involved.
+
+    _check_gigabrain below uses a short, fixed prompt, so it's basically never going to produce
+    output long enough to trigger the file-attachment path — the exact path that had the original
+    truncation bug. This exercises both branches directly and asserts byte-exact content, every
+    run, regardless of model verbosity.
+    """
+    short_sent: list[Any] = []
+
+    async def short_sink(content: Any = None, **_kwargs: Any) -> None:
+        short_sent.append(content)
+
+    long_sent: list[Any] = []
+
+    async def long_sink(content: Any = None, **kwargs: Any) -> None:
+        long_sent.append(kwargs.get("file") if kwargs.get("file") is not None else content)
+
+    try:
+        await _send_report(short_sink, "Short and sweet.")
+        await _send_report(long_sink, _LONG_SAMPLE)
+    except Exception as exc:
+        return _Result("send_report mechanics", False, f"raised: {exc!r}")
+
+    if short_sent != ["Short and sweet."]:
+        return _Result(
+            "send_report mechanics", False, "short text was not delivered as plain text"
+        )
+
+    file = long_sent[0] if long_sent else None
+    if not isinstance(file, discord.File):
+        return _Result("send_report mechanics", False, "long text did not attach a file")
+    content = file.fp.read().decode("utf-8")
+    if content != _LONG_SAMPLE:
+        return _Result(
+            "send_report mechanics", False, "attached file content didn't match the original text"
+        )
+    return _Result("send_report mechanics", True, "short -> text, long -> file, both byte-exact")
 
 
 async def _check_ambient(
@@ -182,6 +261,8 @@ async def _run_checks(
     results = [
         await _check_status(store=store, settings=settings, guild=guild),
         await _check_snapshot(guild),
+        await _check_chunked_delivery_mechanics(),
+        await _check_report_delivery_mechanics(),
     ]
     channel_id = guild.text_channels[0].id if guild.text_channels else None
     results.append(
