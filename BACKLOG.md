@@ -212,11 +212,14 @@ cycle. Env stays the seed/default; the store owns the live value once set (the s
 owns it" pattern the feed list already uses). Keeps secrets in env; only non-secret operational knobs
 move to the store.
 
-### 4.2 Config preflight at boot — **S**
-Nothing validates the OpenRouter key or the configured model IDs until the first real call fails. A
-lightweight boot preflight (validate the key, resolve the model chains against OpenRouter's model
-list) reported through the boot self-report makes a misconfiguration obvious immediately instead of on
-first use.
+### 4.2 Config preflight at boot — **S** — *channel reachability shipped; OpenRouter part remains*
+Two distinct gaps under one label. **Channel reachability** (which configured channel IDs —
+`digest_channel_id`, `ops_channel_id`, `gigabrain_channel_id` — Roger can actually see and post in,
+not just whether the guild-level role permission is granted) is shipped: `_unreachable_channels`
+runs at boot (folded into the boot self-report) and every watchdog tick, the same treatment
+`_missing_permissions` already got. **Still open:** nothing validates the OpenRouter key or the
+configured model IDs until the first real call fails — a lightweight preflight (validate the key,
+resolve the model chains against OpenRouter's model list) reported the same way would close this.
 
 ### 4.3 Periodic feed-health check — **S**
 `suggest_feeds` / `add_feed` validate a feed *at add time*, but a feed can go dead later and silently

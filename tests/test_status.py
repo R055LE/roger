@@ -4,28 +4,75 @@ from types import SimpleNamespace
 
 import discord
 
-from roger.bot import _boot_header, _format_status, gather_status
+from roger.bot import _boot_header, _format_status, _unreachable_channels, gather_status
 from roger.store import AuditStatus, Store
 
 # The invite integer documented in deploy/README.md — grants exactly the required scopes.
 FULL_PERMS = 268454928
 
 
+class _FakeChannel:
+    def __init__(self, name="digest", perms=None):
+        self.name = name
+        self._perms = perms if perms is not None else discord.Permissions(FULL_PERMS)
+
+    def permissions_for(self, member):
+        return self._perms
+
+
+def _fake_guild(name="Live Guild", channels=None, perms=FULL_PERMS):
+    channels = channels or {}
+    return SimpleNamespace(
+        name=name,
+        me=SimpleNamespace(guild_permissions=discord.Permissions(perms)),
+        get_channel=lambda cid: channels.get(cid),
+    )
+
+
 def test_boot_header_ok_is_green_and_shows_the_version():
-    line = _boot_header("sha-abc1234", [])
+    line = _boot_header("sha-abc1234", [], [])
     assert "✅" in line and "roger online" in line and "sha-abc1234" in line
 
 
 def test_boot_header_warns_lists_missing_scopes_and_shows_version():
-    line = _boot_header("dev", ["Manage Channels", "Manage Roles"])
+    line = _boot_header("dev", ["Manage Channels", "Manage Roles"], [])
     assert "⚠️" in line and "Manage Channels, Manage Roles" in line
     assert "re-invite" in line and "dev" in line
+
+
+def test_boot_header_warns_on_channel_problems_even_with_full_permissions():
+    line = _boot_header("dev", [], ["digest channel 42 not found"])
+    assert "⚠️" in line and "digest channel 42 not found" in line
+
+
+def test_unreachable_channels_flags_a_missing_channel():
+    guild = _fake_guild(channels={})
+    settings = SimpleNamespace(digest_channel_id=42, ops_channel_id=None, gigabrain_channel_id=None)
+    problems = _unreachable_channels(guild, settings)
+    assert "digest channel 42 not found" in problems[0]
+
+
+def test_unreachable_channels_flags_a_channel_roger_cant_post_in():
+    no_send = discord.Permissions(view_channel=True, send_messages=False)
+    guild = _fake_guild(channels={99: _FakeChannel(name="checkins", perms=no_send)})
+    settings = SimpleNamespace(
+        digest_channel_id=None, ops_channel_id=None, gigabrain_channel_id=99
+    )
+    problems = _unreachable_channels(guild, settings)
+    assert "gigabrain check-in channel #checkins not postable" in problems[0]
+
+
+def test_unreachable_channels_empty_when_nothing_configured_or_everything_reachable():
+    guild = _fake_guild(channels={42: _FakeChannel()})
+    settings = SimpleNamespace(digest_channel_id=42, ops_channel_id=None, gigabrain_channel_id=None)
+    assert _unreachable_channels(guild, settings) == []
 
 
 def test_format_status_renders_perms_usage_feeds_and_actions():
     body = _format_status(
         guild_name="Test Guild",
         missing_perms=[],
+        channel_problems=[],
         usage={"admin": 12345, "ambient": 0, "digest": 200},
         caps={"admin": 150000, "ambient": 40000, "digest": 30000},
         cost={"admin": 0.0123, "ambient": 0.0, "digest": 0.002},
@@ -36,6 +83,7 @@ def test_format_status_renders_perms_usage_feeds_and_actions():
         tz="UTC",
     )
     assert "permissions: OK" in body
+    assert "channels: OK" in body
     assert "12,345 / 150,000" in body
     assert "$0.0123" in body  # per-brain cost
     assert "total" in body and "$0.0143" in body  # summed across brains
@@ -47,6 +95,7 @@ def test_format_status_flags_missing_perms_and_unconfigured_digest():
     body = _format_status(
         guild_name="G",
         missing_perms=["Manage Roles"],
+        channel_problems=[],
         usage={},
         caps={},
         cost={},
@@ -60,10 +109,28 @@ def test_format_status_flags_missing_perms_and_unconfigured_digest():
     assert "digest: unconfigured" in body
 
 
+def test_format_status_flags_channel_problems():
+    body = _format_status(
+        guild_name="G",
+        missing_perms=[],
+        channel_problems=["gigabrain check-in channel 555 not found"],
+        usage={},
+        caps={},
+        cost={},
+        feeds_count=0,
+        recent_audit=[],
+        digest_hour=8,
+        digest_configured=True,
+        tz="UTC",
+    )
+    assert "channels: gigabrain check-in channel 555 not found" in body
+
+
 def test_format_status_includes_audit_detail_when_present():
     body = _format_status(
         guild_name="G",
         missing_perms=[],
+        channel_problems=[],
         usage={},
         caps={},
         cost={},
@@ -102,17 +169,25 @@ async def test_gather_status_reads_live_store(tmp_path):
             actor_id=1, brain="admin", tool="create_channel", args=None,
             status=AuditStatus.OK, detail=None,
         )
-        guild = SimpleNamespace(
-            name="Live Guild",
-            me=SimpleNamespace(guild_permissions=discord.Permissions(FULL_PERMS)),
-        )
+        guild = _fake_guild(channels={42: _FakeChannel()})
         body = await gather_status(store=store, settings=_settings(), guild=guild)
         assert "Live Guild" in body
         assert "permissions: OK" in body  # the full invite set grants everything required
+        assert "channels: OK" in body  # digest_channel_id=42 resolves and is postable
         assert "150 / 150,000" in body
         assert "$0.0075" in body  # OpenRouter-reported cost surfaced from the live store
         assert "feeds: 1" in body
         assert "create_channel" in body
+    finally:
+        await store.close()
+
+
+async def test_gather_status_flags_an_unreachable_configured_channel(tmp_path):
+    store = await Store(str(tmp_path / "s.db")).open()
+    try:
+        guild = _fake_guild(channels={})  # digest_channel_id=42 won't resolve
+        body = await gather_status(store=store, settings=_settings(), guild=guild)
+        assert "channels: digest channel 42 not found" in body
     finally:
         await store.close()
 
@@ -125,6 +200,7 @@ async def test_gather_status_without_a_visible_guild(tmp_path):
         )
         assert "roger status — 9" in body  # falls back to the guild id
         assert "permissions: OK" in body  # no guild -> nothing reported missing
+        assert "channels: OK" in body  # no guild -> nothing to check either
         assert "digest: unconfigured" in body
     finally:
         await store.close()

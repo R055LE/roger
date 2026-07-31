@@ -221,6 +221,38 @@ def _missing_permissions(perms: discord.Permissions) -> list[str]:
     return [label for attr, label in REQUIRED_PERMISSIONS if not getattr(perms, attr)]
 
 
+# Every optional channel a brain posts to unprompted — each is worth confirming Roger can actually
+# reach *before* the feature that needs it silently fails days or weeks later on a scheduled tick.
+_CONFIGURED_CHANNELS: tuple[tuple[str, str], ...] = (
+    ("digest_channel_id", "digest"),
+    ("ops_channel_id", "ops"),
+    ("gigabrain_channel_id", "gigabrain check-in"),
+)
+
+
+def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
+    """Configured channel IDs Roger can't actually see or post in (pure given a live guild+config).
+
+    A guild-level permission grant (``_missing_permissions``) says nothing about a *specific*
+    channel — a per-channel overwrite can still deny Roger there. This is the check that would
+    have caught a wrong or unpermissioned ``GIGABRAIN_CHANNEL_ID`` at boot instead of on the first
+    silent scheduled-tick failure.
+    """
+    problems = []
+    for attr, label in _CONFIGURED_CHANNELS:
+        channel_id = getattr(settings, attr, None)
+        if channel_id is None:
+            continue
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            problems.append(f"{label} channel {channel_id} not found")
+            continue
+        perms = channel.permissions_for(guild.me)
+        if not perms.view_channel or not perms.send_messages:
+            problems.append(f"{label} channel #{channel.name} not postable (missing view/send)")
+    return problems
+
+
 # --------------------------------------------------------------------------- status & ops
 
 _BRAINS = ("admin", "ambient", "digest", "gigabrain")
@@ -236,20 +268,25 @@ def _daily_caps(settings: Settings) -> dict[str, int]:
     }
 
 
-def _boot_header(version: str, missing: list[str]) -> str:
+def _boot_header(version: str, missing: list[str], channel_problems: list[str]) -> str:
     """Header of the boot self-report (pure): health glyph + the deployed build.
 
     The full state block — permissions, token/dollar spend, digest schedule, recent actions — is
     rendered separately by ``gather_status`` and appended under this header, so the ops channel gets
     a complete snapshot on every deploy instead of a bare "online" line. A missing required scope
-    adds an actionable re-invite hint here (it's the one thing you must fix by hand off-box).
+    adds an actionable re-invite hint here (it's the one thing you must fix by hand off-box); an
+    unreachable configured channel gets its own line for the same reason.
     """
+    lines = []
     if missing:
-        return (
-            f"⚠️ **roger online** · `{version}`\n"
+        lines.append(
             f"Missing permissions: **{', '.join(missing)}** — admin tools that need them will "
             "fail; re-invite per `deploy/README.md`."
         )
+    if channel_problems:
+        lines.append("Channel config: " + "; ".join(channel_problems))
+    if lines:
+        return f"⚠️ **roger online** · `{version}`\n" + "\n".join(lines)
     return f"✅ **roger online** · `{version}`"
 
 
@@ -261,6 +298,7 @@ def _format_status(
     *,
     guild_name: str,
     missing_perms: list[str],
+    channel_problems: list[str],
     usage: dict[str, int],
     caps: dict[str, int],
     cost: dict[str, float],
@@ -272,9 +310,11 @@ def _format_status(
 ) -> str:
     """Render the /status readout body (pure). The caller wraps it in a code block."""
     perms = "OK" if not missing_perms else "MISSING: " + ", ".join(missing_perms)
+    channels = "OK" if not channel_problems else "; ".join(channel_problems)
     lines = [
         f"roger status — {guild_name}",
         f"permissions: {perms}",
+        f"channels: {channels}",
         "spend today (tokens used / cap · cost):",
     ]
     total_cost = 0.0
@@ -301,17 +341,16 @@ def _format_status(
 async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
     """Gather live status and render the /status body. Kept client-free so it unit-tests alone."""
     guild_name = guild.name if guild is not None else str(settings.guild_id)
-    missing = (
-        _missing_permissions(guild.me.guild_permissions)
-        if guild is not None and guild.me is not None
-        else []
-    )
+    have_guild = guild is not None and guild.me is not None
+    missing = _missing_permissions(guild.me.guild_permissions) if have_guild else []
+    channel_problems = _unreachable_channels(guild, settings) if have_guild else []
     usage = {brain: await store.usage_today(brain) for brain in _BRAINS}
     cost = {brain: await store.cost_today(brain) for brain in _BRAINS}
     caps = _daily_caps(settings)
     return _format_status(
         guild_name=guild_name,
         missing_perms=missing,
+        channel_problems=channel_problems,
         usage=usage,
         caps=caps,
         cost=cost,
@@ -505,7 +544,10 @@ class RogerClient(discord.Client):
             )
         else:
             log.info("permission check ok — all required scopes granted")
-        header = _boot_header(ROGER_VERSION[:12], missing)
+        channel_problems = _unreachable_channels(guild, self.settings)
+        if channel_problems:
+            log.warning("configured channel problems: %s", "; ".join(channel_problems))
+        header = _boot_header(ROGER_VERSION[:12], missing, channel_problems)
         body = await gather_status(store=self.store, settings=self.settings, guild=guild)
         await self._post_ops(f"{header}\n```\n{body}\n```")
 
@@ -660,6 +702,13 @@ class RogerClient(discord.Client):
                     f"perms:{','.join(sorted(missing))}",
                     f"⚠️ **permission loss** — missing **{', '.join(missing)}**; "
                     "re-invite per `deploy/README.md`.",
+                    cooldown_s=_PERM_ALERT_COOLDOWN_S,
+                )
+            channel_problems = _unreachable_channels(guild, self.settings)
+            if channel_problems:
+                await self._ops.alert(
+                    f"channels:{','.join(sorted(channel_problems))}",
+                    f"⚠️ **channel config problem** — {'; '.join(channel_problems)}",
                     cooldown_s=_PERM_ALERT_COOLDOWN_S,
                 )
         caps = _daily_caps(self.settings)
