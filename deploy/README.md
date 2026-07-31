@@ -137,6 +137,10 @@ read-only container can write the SQLite DB into the bind mount.
   env, so wrap those as `sops exec-env /opt/roger/roger.env 'docker compose … <cmd>'`.
 - **Change config/secrets:** `cd /opt/roger && sops roger.env`, save, then trigger a deploy.
   `up -d` recreates the container with the new env.
+- **Smoke-test the live deployment:** `docker exec "$(docker ps -q --filter name=roger)" python -m
+  roger.smoke_test` — runs real requests against the real Discord API and prints pass/fail per
+  check plus token spend. On-demand only, not part of CI or the deploy timer; see the module
+  docstring for exactly what it does and deliberately doesn't cover.
 
 ## Notes
 

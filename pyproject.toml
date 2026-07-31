@@ -47,4 +47,5 @@ testpaths = ["tests"]
 
 [tool.coverage.run]
 # __main__ is the `asyncio.run(main())` entrypoint — nothing to unit-test there.
-omit = ["roger/__main__.py"]
+# smoke_test needs a real Discord connection + real LLM calls — deliberately outside pytest.
+omit = ["roger/__main__.py", "roger/smoke_test.py"]
