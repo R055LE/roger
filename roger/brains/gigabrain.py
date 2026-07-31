@@ -11,6 +11,7 @@ anywhere in this module: nothing it can reach ever needs one.
 from __future__ import annotations
 
 import datetime
+import io
 import json
 import logging
 from typing import Any
@@ -212,8 +213,15 @@ async def run_gigabrain_suggestion(
 
     try:
         owner = await client.fetch_user(settings.owner_id)
-        embed = discord.Embed(title="Giga Brain — periodic check-in", description=answer[:4096])
-        await owner.send(embed=embed)
+        if len(answer) <= 4096:
+            embed = discord.Embed(title="Giga Brain — periodic check-in", description=answer)
+            await owner.send(embed=embed)
+        else:
+            file = discord.File(io.BytesIO(answer.encode("utf-8")), filename="gigabrain-checkin.md")
+            await owner.send(
+                content="Giga Brain's periodic check-in ran long — full report attached.",
+                file=file,
+            )
     except discord.DiscordException:
         log.exception("failed to DM owner with gigabrain suggestion")
         return {"status": "DM failed; suggestion not delivered"}

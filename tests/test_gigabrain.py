@@ -305,10 +305,10 @@ class FakeUser:
         self.sent = []
         self._raise = raise_on_send
 
-    async def send(self, embed=None, content=None):
+    async def send(self, embed=None, content=None, file=None):
         if self._raise is not None:
             raise self._raise
-        self.sent.append(embed if embed is not None else content)
+        self.sent.append(file if file is not None else (embed if embed is not None else content))
 
 
 class FakeSuggestionClient:
@@ -371,6 +371,25 @@ async def test_periodic_suggestion_runs_and_dms_owner_on_first_call(tmp_path):
         assert isinstance(user.sent[0], discord.Embed)
         assert "Add a rules channel." in user.sent[0].description
         assert await store.get_meta(gigabrain.LAST_RUN_META_KEY) is not None
+    finally:
+        await store.close()
+
+
+async def test_periodic_suggestion_attaches_a_file_when_the_answer_is_long(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        user = FakeUser()
+        client = FakeSuggestionClient(guild=object(), user=user)
+        long_answer = "z" * 4200
+        llm = FakeLLM([_resp(content=long_answer)])
+        out = await gigabrain.run_gigabrain_suggestion(
+            client=client, settings=_settings(), llm=llm, store=store
+        )
+        assert out["status"] == "delivered"
+        assert len(user.sent) == 1
+        assert isinstance(user.sent[0], discord.File)
+        assert user.sent[0].filename == "gigabrain-checkin.md"
+        assert user.sent[0].fp.read().decode("utf-8") == long_answer
     finally:
         await store.close()
 

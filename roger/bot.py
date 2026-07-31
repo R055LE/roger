@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import io
 import json
 import logging
 import os
@@ -110,6 +111,19 @@ async def _send_chunked(send: Callable[..., Awaitable[Any]], text: str) -> None:
     """Send ``text`` as one message, or several in succession if it exceeds Discord's cap."""
     for chunk in _chunk(text):
         await send(chunk)
+
+
+async def _send_report(send: Callable[..., Awaitable[Any]], text: str) -> None:
+    """Send short text inline; send long text as one message with a markdown file attached.
+
+    Gigabrain's longer answers read better as one attached report than as several chunked
+    message bubbles — attachments cap far above 2000 chars, so this never truncates either.
+    """
+    if len(text) <= DISCORD_MAX:
+        await send(text)
+        return
+    file = discord.File(io.BytesIO(text.encode("utf-8")), filename="gigabrain-report.md")
+    await send("That ran long — full analysis attached.", file=file)
 
 
 _MENTION_RE = re.compile(r"<@!?\d+>")
@@ -775,7 +789,7 @@ async def _handle_gigabrain_request(
     # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
     await interaction.response.defer(thinking=True)
     reply = await client._run_gigabrain(request, user_id, interaction.channel_id)
-    await _send_chunked(interaction.followup.send, reply)
+    await _send_report(interaction.followup.send, reply)
 
 
 async def _handle_status(client: RogerClient, interaction: discord.Interaction) -> None:

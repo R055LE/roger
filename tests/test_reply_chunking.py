@@ -1,6 +1,8 @@
 """Splitting long replies into multiple Discord messages instead of truncating them."""
 
-from roger.bot import _chunk, _send_chunked
+import discord
+
+from roger.bot import _chunk, _send_chunked, _send_report
 
 
 def test_chunk_returns_single_chunk_when_under_limit():
@@ -50,3 +52,30 @@ async def test_send_chunked_sends_multiple_messages_in_order_when_long():
     assert len(sent) == 3
     assert all(len(chunk) <= 2000 for chunk in sent)
     assert "".join(sent) == text
+
+
+async def test_send_report_sends_plain_text_when_short():
+    calls = []
+
+    async def fake_send(content, **kwargs):
+        calls.append((content, kwargs))
+
+    await _send_report(fake_send, "short analysis")
+    assert calls == [("short analysis", {})]
+
+
+async def test_send_report_attaches_a_file_when_long():
+    calls = []
+
+    async def fake_send(content, **kwargs):
+        calls.append((content, kwargs))
+
+    text = "y" * 2500
+    await _send_report(fake_send, text)
+    assert len(calls) == 1
+    content, kwargs = calls[0]
+    assert "attached" in content.lower()
+    file = kwargs["file"]
+    assert isinstance(file, discord.File)
+    assert file.filename == "gigabrain-report.md"
+    assert file.fp.read().decode("utf-8") == text
