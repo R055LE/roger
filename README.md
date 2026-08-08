@@ -42,8 +42,10 @@ Security is structural, not prompt-deep:
 
 Python 3.12 · [discord.py](https://github.com/Rapptz/discord.py) · the OpenAI SDK pointed at
 OpenRouter · `pydantic` · `aiosqlite` · `feedparser`. Runs as a non-root, read-only-rootfs
-container. `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host later is an
-env change, not a rewrite.
+container. `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host is an env
+change rather than a rewrite. That was tested and shelved on cost and hardware grounds, so hosted is
+the only supported setup today: see
+[ADR-0009](docs/decisions/0009-hosted-inference-over-local-serving.md).
 
 ## Configure
 
