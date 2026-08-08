@@ -9,12 +9,18 @@
 stated grounds that pointing Roger at a local inference host was an option worth
 keeping open. The README still says so.
 
-That option got tested. A separate spike lives in `R055LE/homelab` at
-`discord-bot/`: about 120 lines, `discord.py` plus an `AsyncOpenAI` client
-against a local llama-server on Thaddeus (a GTX 1070, 8GB VRAM). It was
-deliberately minimal, one small system prompt and no tools, because that was the
-only shape that ran acceptably on that card. Its own README records the pivot
-off Hermes for the chatbot use case for the same reason.
+That option got tested. A separate spike ran in `R055LE/homelab` at
+`discord-bot/`: 123 lines, `discord.py` plus an `AsyncOpenAI` client against a
+local llama-server on Thaddeus (a GTX 1070, 8GB VRAM). It was deliberately
+minimal, one small system prompt and no tools, because that was the only shape
+that ran acceptably on that card. Its README recorded the pivot off Hermes
+Agent for the chatbot use case for the same reason.
+
+The spike stopped running on 2026-07-22, when its systemd unit was deleted off
+hermes alongside Hermes Agent, and the directory was removed on 2026-08-08 once
+this ADR existed to hold the result. The source is still in `homelab`'s git
+history (`git log -- discord-bot/`); the measurements are in that repo's
+`docs/llm-serving.md`.
 
 What the spike established:
 
