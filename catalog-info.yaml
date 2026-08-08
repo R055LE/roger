@@ -1,0 +1,21 @@
+# Generated from catalog/fleet.yaml in R055LE/runbook. Do not edit here.
+# Change the source and run `scripts/catalog.py apply`; edits made here
+# are reported as drift and overwritten.
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: roger
+  annotations:
+    github.com/project-slug: R055LE/roger
+  tags:
+    - discord
+    - openrouter
+    - products
+    - python
+    - service
+spec:
+  type: service
+  lifecycle: production
+  owner: R055LE
+  domain: products
+  tier: 2
