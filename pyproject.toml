@@ -16,7 +16,7 @@ dependencies = [
     "pydantic-settings==2.14.2",
     "openai==2.52.0",
     "aiosqlite==0.22.1",
-    "feedparser==6.0.12",
+    "feedparser==6.0.14",
     "prometheus-client==0.26.0",
 ]
 
