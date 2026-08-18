@@ -268,6 +268,16 @@ def _daily_caps(settings: Settings) -> dict[str, int]:
     }
 
 
+def _daily_usd_caps(settings: Settings) -> dict[str, float]:
+    """Per-brain daily USD caps, keyed by brain (0 = disabled). Mirrors `_daily_caps`."""
+    return {
+        "admin": settings.daily_usd_admin,
+        "ambient": settings.daily_usd_ambient,
+        "digest": settings.daily_usd_digest,
+        "gigabrain": settings.daily_usd_gigabrain,
+    }
+
+
 def _boot_header(version: str, missing: list[str], channel_problems: list[str]) -> str:
     """Header of the boot self-report (pure): health glyph + the deployed build.
 
@@ -395,16 +405,34 @@ class OpsNotifier:
 
 
 def _budget_alert(
-    brain: str, used: int, cap: int, cost: float, *, fraction: float = BUDGET_ALERT_FRACTION
+    brain: str,
+    used: int,
+    cap: int,
+    cost: float,
+    *,
+    usd_cap: float = 0.0,
+    fraction: float = BUDGET_ALERT_FRACTION,
 ) -> str | None:
-    """Alert text when ``brain`` crosses ``fraction`` of its daily token cap, else None (pure)."""
-    if cap <= 0 or used < fraction * cap:
+    """Alert text once ``brain`` crosses ``fraction`` of its daily token or $ cap, else None (pure).
+
+    The two caps are independent — whichever fraction is worse decides both whether this fires
+    and the wording (exhausted vs. approaching). A disabled cap (``cap`` or ``usd_cap`` <= 0)
+    contributes 0 to that comparison, so it can never itself trigger an alert.
+    """
+    token_frac = used / cap if cap > 0 else 0.0
+    usd_frac = cost / usd_cap if usd_cap > 0 else 0.0
+    worst = max(token_frac, usd_frac)
+    if worst < fraction:
         return None
-    tokens = f"{used:,} / {cap:,} tokens today (${cost:.4f})"
-    if used >= cap:
-        return f"⚠️ **{brain} budget exhausted** — {tokens}. Calls refused until the daily reset."
-    pct = round(100 * used / cap)
-    return f"⚠️ **{brain} budget {pct}%** — {tokens}. Approaching the daily cap."
+    detail = f"{used:,} / {cap:,} tokens today" if cap > 0 else f"{used:,} tokens today"
+    if usd_cap > 0:
+        detail += f" · ${cost:.4f} / ${usd_cap:.4f}"
+    else:
+        detail += f" (${cost:.4f})"
+    if worst >= 1.0:
+        return f"⚠️ **{brain} budget exhausted** — {detail}. Calls refused until the daily reset."
+    pct = round(100 * worst)
+    return f"⚠️ **{brain} budget {pct}%** — {detail}. Approaching the daily cap."
 
 
 # Digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops ping.
@@ -712,6 +740,7 @@ class RogerClient(discord.Client):
                     cooldown_s=_PERM_ALERT_COOLDOWN_S,
                 )
         caps = _daily_caps(self.settings)
+        usd_caps = _daily_usd_caps(self.settings)
         today = time.strftime("%Y-%m-%d")
         for brain in _BRAINS:
             message = _budget_alert(
@@ -719,6 +748,7 @@ class RogerClient(discord.Client):
                 await self.store.usage_today(brain),
                 caps[brain],
                 await self.store.cost_today(brain),
+                usd_cap=usd_caps[brain],
             )
             if message:
                 await self._ops.alert(f"budget:{brain}:{today}", message, cooldown_s=_DAY_S)
