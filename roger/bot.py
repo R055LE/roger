@@ -317,8 +317,10 @@ def _format_status(
     digest_hour: int,
     digest_configured: bool,
     tz: str,
+    usd_caps: dict[str, float] | None = None,
 ) -> str:
     """Render the /status readout body (pure). The caller wraps it in a code block."""
+    usd_caps = usd_caps or {}
     perms = "OK" if not missing_perms else "MISSING: " + ", ".join(missing_perms)
     channels = "OK" if not channel_problems else "; ".join(channel_problems)
     lines = [
@@ -331,8 +333,12 @@ def _format_status(
     for brain in _BRAINS:
         spent = cost.get(brain, 0.0)
         total_cost += spent
+        cost_str = f"${spent:.4f}"
+        usd_cap = usd_caps.get(brain, 0.0)
+        if usd_cap > 0:
+            cost_str += f" / ${usd_cap:.4f}"
         lines.append(
-            f"  {brain:<10}{usage.get(brain, 0):>8,} / {caps.get(brain, 0):<8,}  ${spent:.4f}"
+            f"  {brain:<10}{usage.get(brain, 0):>8,} / {caps.get(brain, 0):<8,}  {cost_str}"
         )
     lines.append(f"  {'total':<29}  ${total_cost:.4f}")
     digest = f"{digest_hour:02d}:00 {tz}" if digest_configured else "unconfigured"
@@ -357,6 +363,7 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
     usage = {brain: await store.usage_today(brain) for brain in _BRAINS}
     cost = {brain: await store.cost_today(brain) for brain in _BRAINS}
     caps = _daily_caps(settings)
+    usd_caps = _daily_usd_caps(settings)
     return _format_status(
         guild_name=guild_name,
         missing_perms=missing,
@@ -364,6 +371,7 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         usage=usage,
         caps=caps,
         cost=cost,
+        usd_caps=usd_caps,
         feeds_count=await store.count_feeds(),
         recent_audit=await store.fetch_audit(limit=8),
         digest_hour=settings.digest_hour,

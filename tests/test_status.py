@@ -152,6 +152,10 @@ def _settings(**over):
         daily_tokens_ambient=40000,
         daily_tokens_digest=30000,
         daily_tokens_gigabrain=100000,
+        daily_usd_admin=0.0,
+        daily_usd_ambient=0.0,
+        daily_usd_digest=0.0,
+        daily_usd_gigabrain=0.0,
         digest_hour=8,
         digest_channel_id=42,
         tz="UTC",
@@ -202,5 +206,35 @@ async def test_gather_status_without_a_visible_guild(tmp_path):
         assert "permissions: OK" in body  # no guild -> nothing reported missing
         assert "channels: OK" in body  # no guild -> nothing to check either
         assert "digest: unconfigured" in body
+    finally:
+        await store.close()
+
+
+def test_format_status_shows_usd_cap_when_configured():
+    body = _format_status(
+        guild_name="G",
+        missing_perms=[],
+        channel_problems=[],
+        usage={"admin": 1000},
+        caps={"admin": 150000},
+        cost={"admin": 0.5},
+        usd_caps={"admin": 2.0},
+        feeds_count=0,
+        recent_audit=[],
+        digest_hour=8,
+        digest_configured=True,
+        tz="UTC",
+    )
+    assert "$0.5000 / $2.0000" in body
+
+
+async def test_gather_status_shows_usd_cap_from_settings(tmp_path):
+    store = await Store(str(tmp_path / "s.db")).open()
+    try:
+        await store.add_usage("admin", 10, 10, cost_usd=0.25)
+        guild = _fake_guild(channels={42: _FakeChannel()})
+        settings = _settings(daily_usd_admin=1.0)
+        body = await gather_status(store=store, settings=settings, guild=guild)
+        assert "$0.2500 / $1.0000" in body
     finally:
         await store.close()
