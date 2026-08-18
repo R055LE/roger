@@ -48,8 +48,41 @@ async def test_budget_exceeded_before_network(monkeypatch, tmp_path):
     try:
         await store.add_usage("admin", 8, 5)  # 13 >= 10
         llm = LLM(Settings(), store)
-        with pytest.raises(BudgetExceeded):
+        with pytest.raises(BudgetExceeded) as exc_info:
             await llm.complete("admin", [{"role": "user", "content": "hi"}])
+        assert exc_info.value.unit == "tokens"
+    finally:
+        await store.close()
+
+
+async def test_usd_budget_exceeded_before_network(monkeypatch, tmp_path):
+    # Token cap (default 150k) is nowhere near tripped — only the $ cap should fire.
+    _env(monkeypatch, MODEL_ADMIN="a/b", DAILY_USD_ADMIN="1.0")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        await store.add_usage("admin", 1, 1, cost_usd=1.5)  # $1.50 >= $1.00 cap
+        llm = LLM(Settings(), store)
+        with pytest.raises(BudgetExceeded) as exc_info:
+            await llm.complete("admin", [{"role": "user", "content": "hi"}])
+        assert exc_info.value.unit == "usd"
+    finally:
+        await store.close()
+
+
+async def test_usd_cap_does_not_trip_below_threshold(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_ADMIN="a/b", DAILY_USD_ADMIN="1.0")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        await store.add_usage("admin", 1, 1, cost_usd=0.5)  # $0.50 < $1.00 cap
+        llm = LLM(Settings(), store)
+
+        async def fake_create(**kwargs):
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1, cost=0.1)
+            )
+
+        monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+        await llm.complete("admin", [{"role": "user", "content": "hi"}])  # does not raise
     finally:
         await store.close()
 

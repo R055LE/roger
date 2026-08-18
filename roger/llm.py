@@ -58,11 +58,16 @@ class LLMConfigError(RuntimeError):
 
 
 class BudgetExceeded(RuntimeError):
-    def __init__(self, brain: str, used: int, cap: int) -> None:
-        super().__init__(f"{brain} daily token budget exceeded ({used} >= {cap})")
+    def __init__(self, brain: str, used: float, cap: float, *, unit: str = "tokens") -> None:
+        if unit == "usd":
+            message = f"{brain} daily $ budget exceeded (${used:.4f} >= ${cap:.4f})"
+        else:
+            message = f"{brain} daily token budget exceeded ({used} >= {cap})"
+        super().__init__(message)
         self.brain = brain
         self.used = used
         self.cap = cap
+        self.unit = unit
 
 
 class LLM:
@@ -87,6 +92,12 @@ class LLM:
             "digest": settings.daily_tokens_digest,
             "gigabrain": settings.daily_tokens_gigabrain,
         }
+        self._usd_caps = {
+            "admin": settings.daily_usd_admin,
+            "ambient": settings.daily_usd_ambient,
+            "digest": settings.daily_usd_digest,
+            "gigabrain": settings.daily_usd_gigabrain,
+        }
         # Opt-in OpenRouter `reasoning.effort` passthrough — only gigabrain ever sets this today.
         self._reasoning_effort = {"gigabrain": settings.gigabrain_reasoning_effort or None}
 
@@ -104,7 +115,14 @@ class LLM:
         cap = self._caps[brain]
         if used >= cap:
             metrics.LLM_BUDGET_EXCEEDED.labels(brain, "tokens").inc()
-            raise BudgetExceeded(brain, used, cap)
+            raise BudgetExceeded(brain, used, cap, unit="tokens")
+
+        usd_cap = self._usd_caps[brain]
+        if usd_cap > 0:
+            spent = await self._store.cost_today(brain)
+            if spent >= usd_cap:
+                metrics.LLM_BUDGET_EXCEEDED.labels(brain, "usd").inc()
+                raise BudgetExceeded(brain, spent, usd_cap, unit="usd")
 
         extra_body: dict[str, Any] = {"models": chain}
         if tools:
