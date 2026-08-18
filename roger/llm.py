@@ -103,7 +103,7 @@ class LLM:
         used = await self._store.usage_today(brain)
         cap = self._caps[brain]
         if used >= cap:
-            metrics.LLM_BUDGET_EXCEEDED.labels(brain).inc()
+            metrics.LLM_BUDGET_EXCEEDED.labels(brain, "tokens").inc()
             raise BudgetExceeded(brain, used, cap)
 
         extra_body: dict[str, Any] = {"models": chain}
