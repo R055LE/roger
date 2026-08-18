@@ -67,3 +67,18 @@ def test_missing_required_field_raises(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_daily_usd_defaults_to_disabled(monkeypatch):
+    _set_required(monkeypatch)
+    settings = Settings()
+    assert settings.daily_usd_admin == 0.0
+    assert settings.daily_usd_ambient == 0.0
+    assert settings.daily_usd_digest == 0.0
+    assert settings.daily_usd_gigabrain == 0.0
+
+
+def test_daily_usd_parses_from_env(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("DAILY_USD_ADMIN", "2.5")
+    assert Settings().daily_usd_admin == 2.5

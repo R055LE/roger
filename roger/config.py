@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     daily_tokens_digest: int = 30_000
     daily_tokens_gigabrain: int = 100_000
 
+    # --- budgets (daily USD, layered on top of the token caps above) ---
+    # 0 = disabled (opt-in); set to a real figure once OpenRouter cost data looks right for your
+    # model mix. The token cap above keeps enforcing regardless — this is an additional, tighter
+    # trip wire, not a replacement (a provider that never reports cost would otherwise leave the
+    # brain with no effective cap at all).
+    daily_usd_admin: float = 0.0
+    daily_usd_ambient: float = 0.0
+    daily_usd_digest: float = 0.0
+    daily_usd_gigabrain: float = 0.0
+
     # --- admin tool loop bounds (§2.9) ---
     admin_max_tool_calls: int = 10
     admin_max_turns: int = 14
