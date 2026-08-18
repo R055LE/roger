@@ -1,6 +1,6 @@
 # ADR-0001: Track spend in dollars, keep enforcement on tokens
 
-- **Status:** Accepted
+- **Status:** Accepted; enforcement mechanism superseded by [ADR-0010](0010-layer-the-dollar-budget-gate-not-flip-to-it.md)
 - **Date:** 2026-07-23
 
 ## Context

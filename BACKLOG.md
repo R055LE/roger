@@ -17,7 +17,7 @@ Effort key: **S** ≈ an afternoon, **M** ≈ a day or two, **L** ≈ multi-day.
 
 Gaps that matter for a bot that's actually live. These are the ones I'd do first.
 
-### 1.1 Track spend in dollars, not just tokens — **M** — *visibility shipped; gate remains*
+### 1.1 Track spend in dollars, not just tokens — **M** — *shipped*
 `llm.py` records `prompt_tokens` / `completion_tokens` per brain (`add_usage`) and the daily cap is a
 raw token count. But a brain's model chain mixes models at very different prices, so a token budget
 is a weak proxy for the thing that actually costs money. OpenRouter returns the real generation cost
@@ -26,9 +26,9 @@ is a weak proxy for the thing that actually costs money. OpenRouter returns the 
 - [x] Add a `cost_usd` column to the `usage` table (with an idempotent migration for live DBs);
       capture the OpenRouter-reported cost per call in `LLM.complete`. *(a2689b5)*
 - [x] Surface per-brain and total `$ today` in `/status`. *(a2689b5)*
-- [ ] Make the daily gate dollar-denominated (env: `DAILY_USD_*`) with the token cap as the fallback
-      when a provider doesn't report cost. Deferred: enforcement is a semantic change, kept out of the
-      visibility commit.
+- [x] Make the daily gate dollar-denominated (env: `DAILY_USD_*`), layered on top of the token cap
+      rather than replacing it — a provider that never reports cost leaves the token cap as the real
+      backstop, so nothing regresses for a non-OpenRouter host.
 
 *Why:* the single most portfolio-differentiating item here — real LLM cost governance is exactly the
 infra+AI bridge the portfolio is aiming at, and it's the honest version of the budget the code

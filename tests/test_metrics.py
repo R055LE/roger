@@ -18,6 +18,10 @@ def _settings():
         daily_tokens_ambient=40_000,
         daily_tokens_digest=30_000,
         daily_tokens_gigabrain=100_000,
+        daily_usd_admin=0.0,
+        daily_usd_ambient=0.0,
+        daily_usd_digest=0.0,
+        daily_usd_gigabrain=0.0,
     )
 
 
@@ -82,5 +86,20 @@ async def test_completion_increments_the_request_counter(monkeypatch, tmp_path):
         await llm.complete("admin", [{"role": "user", "content": "hi"}])
         after = REGISTRY.get_sample_value("roger_llm_requests_total", {"brain": "admin"})
         assert after == before + 1
+    finally:
+        await store.close()
+
+
+async def test_refresh_populates_usd_cap_gauge(tmp_path):
+    store = await Store(str(tmp_path / "m.db")).open()
+    try:
+        settings = _settings()
+        settings.daily_usd_admin = 2.5
+
+        await metrics.refresh(store, settings, "sha-test")
+
+        get = REGISTRY.get_sample_value
+        assert get("roger_cost_usd_cap", {"brain": "admin"}) == 2.5
+        assert get("roger_cost_usd_cap", {"brain": "ambient"}) == 0.0
     finally:
         await store.close()

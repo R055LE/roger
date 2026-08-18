@@ -524,3 +524,16 @@ async def test_periodic_suggestion_remembers_the_previous_check_in(tmp_path):
         assert any("Consider a rules channel." in c for c in contents)
     finally:
         await store.close()
+
+
+async def test_budget_exceeded_audit_detail_reflects_unit(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        llm = FakeLLM([BudgetExceeded("gigabrain", 2.5, 2.0, unit="usd")])
+        await gigabrain.handle_gigabrain_request(
+            request="anything", guild=object(), actor_id=1, llm=llm, store=store
+        )
+        rows = await store.fetch_audit()
+        assert any(r["detail"] == "daily $ cap" for r in rows)
+    finally:
+        await store.close()

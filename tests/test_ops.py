@@ -60,6 +60,22 @@ def test_budget_alert_ignores_zero_or_negative_cap():
     assert _budget_alert("admin", 5, 0, 0.0) is None
 
 
+def test_budget_alert_fires_from_usd_cap_alone():
+    # tokens are nowhere near their cap (10%); the $ cap (84%) is what should trip this.
+    msg = _budget_alert("gigabrain", 10_000, 100_000, 4.2, usd_cap=5.0)
+    assert msg is not None
+    assert "84%" in msg and "$4.2000 / $5.0000" in msg
+
+
+def test_budget_alert_usd_exhausted_reads_as_exhausted():
+    msg = _budget_alert("gigabrain", 1_000, 100_000, 6.0, usd_cap=5.0)
+    assert msg is not None and "exhausted" in msg
+
+
+def test_budget_alert_silent_when_both_caps_disabled():
+    assert _budget_alert("admin", 1_000_000, 0, 999.0, usd_cap=0.0) is None
+
+
 def test_digest_problem_none_for_success_statuses():
     assert _digest_problem("posted") is None
     assert _digest_problem("no new items") is None
