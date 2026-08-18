@@ -165,16 +165,16 @@ async def handle_admin_request(
                     detail=detail,
                 )
                 messages.append(_tool_message(call.id, result))
-    except BudgetExceeded:
+    except BudgetExceeded as exc:
         await store.record_audit(
             actor_id=actor_id,
             brain="admin",
             tool=None,
             args={"request": request},
             status=AuditStatus.ERROR,
-            detail="daily token cap",
+            detail=f"daily {exc.unit} cap",
         )
-        return "I've hit my daily token budget for admin work. Try again tomorrow."
+        return "I've hit my daily budget for admin work. Try again tomorrow."
     except LLMConfigError as exc:
         return f"The admin brain isn't configured yet ({exc})."
 

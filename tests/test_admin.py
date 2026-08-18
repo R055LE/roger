@@ -320,3 +320,16 @@ async def test_admin_memory_is_scoped_per_channel(tmp_path):
         assert not any("channel A request" in c for c in contents)  # no cross-channel bleed
     finally:
         await store.close()
+
+
+async def test_budget_exceeded_audit_detail_reflects_unit(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        llm = FakeLLM([BudgetExceeded("admin", 2.5, 2.0, unit="usd")])
+        await admin.handle_admin_request(
+            request="anything", guild=object(), actor_id=1, llm=llm, store=store
+        )
+        rows = await store.fetch_audit()
+        assert any(r["detail"] == "daily usd cap" for r in rows)
+    finally:
+        await store.close()
