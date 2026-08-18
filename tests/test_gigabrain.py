@@ -534,6 +534,6 @@ async def test_budget_exceeded_audit_detail_reflects_unit(tmp_path):
             request="anything", guild=object(), actor_id=1, llm=llm, store=store
         )
         rows = await store.fetch_audit()
-        assert any(r["detail"] == "daily usd cap" for r in rows)
+        assert any(r["detail"] == "daily $ cap" for r in rows)
     finally:
         await store.close()

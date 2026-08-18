@@ -172,7 +172,7 @@ async def handle_admin_request(
             tool=None,
             args={"request": request},
             status=AuditStatus.ERROR,
-            detail=f"daily {exc.unit} cap",
+            detail=f"daily {'$' if exc.unit == 'usd' else 'token'} cap",
         )
         return "I've hit my daily budget for admin work. Try again tomorrow."
     except LLMConfigError as exc:

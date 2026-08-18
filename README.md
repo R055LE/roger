@@ -81,9 +81,9 @@ SQLite so they survive restarts. Key series:
 | Metric | Type | Labels |
 |---|---|---|
 | `roger_tokens_today` / `roger_tokens_cap` | gauge | `brain` |
-| `roger_cost_usd_today` | gauge | `brain` |
+| `roger_cost_usd_today` / `roger_cost_usd_cap` | gauge | `brain` |
 | `roger_llm_requests_total` / `roger_llm_errors_total` | counter | `brain` (`type`) |
-| `roger_llm_budget_exceeded_total` | counter | `brain` |
+| `roger_llm_budget_exceeded_total` | counter | `brain`, `reason` |
 | `roger_audit_events` | gauge | `tool`, `status` |
 | `roger_feeds`, `roger_build_info` | gauge | — (`version`) |
 

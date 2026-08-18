@@ -98,7 +98,7 @@ async def run_digest_job(*, client: Any, settings: Any, llm: LLM, store: Store) 
     try:
         summary = await _summarize(entries, llm)
     except BudgetExceeded as exc:
-        log.warning("digest skipped: daily %s budget hit", exc.unit)
+        log.warning("digest skipped: daily %s budget hit", "$" if exc.unit == "usd" else "token")
         return {"status": "budget exceeded; skipped"}
     except LLMConfigError as exc:
         return {"status": f"digest brain not configured ({exc})"}

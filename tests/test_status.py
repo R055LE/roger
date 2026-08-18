@@ -226,6 +226,7 @@ def test_format_status_shows_usd_cap_when_configured():
         tz="UTC",
     )
     assert "$0.5000 / $2.0000" in body
+    assert "ambient" in body and "$0.0000 / $" not in body  # unconfigured brain: no cap suffix
 
 
 async def test_gather_status_shows_usd_cap_from_settings(tmp_path):

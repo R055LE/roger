@@ -327,7 +327,7 @@ def _format_status(
         f"roger status — {guild_name}",
         f"permissions: {perms}",
         f"channels: {channels}",
-        "spend today (tokens used / cap · cost):",
+        "spend today (tokens used / cap · cost / $ cap if set):",
     ]
     total_cost = 0.0
     for brain in _BRAINS:

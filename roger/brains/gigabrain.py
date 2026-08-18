@@ -175,7 +175,7 @@ async def handle_gigabrain_request(
             tool=None,
             args={"request": request},
             status=AuditStatus.ERROR,
-            detail=f"daily {exc.unit} cap",
+            detail=f"daily {'$' if exc.unit == 'usd' else 'token'} cap",
         )
         return "I've hit my daily budget for gigabrain work. Try again tomorrow."
     except LLMConfigError as exc:
