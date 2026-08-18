@@ -80,10 +80,11 @@ These hold regardless of what any model outputs. They are the load-bearing part 
   be *static* (a tool always confirms) or *conditional on the args* (`create_channel` confirms only
   when `private`), via `ToolSpec.needs_confirm`.
 - **§2.9 Budgets.** A hard cap of **10 tool calls per request** (`ADMIN_MAX_TOOL_CALLS`) and **14
-  model round-trips** (`ADMIN_MAX_TURNS`), plus per-brain **daily token caps** (§11) checked before
-  every call. Both caps are env-overridable per deployment; hitting the tool-call cap mid-request
-  logs a warning and posts once to the ops channel (if configured), and the model is told to say so
-  plainly — the cap resets on the next request, not on a timer.
+  model round-trips** (`ADMIN_MAX_TURNS`), plus per-brain **daily token caps**, optionally layered
+  with a **daily USD cap** (§11), checked before every call. All caps are env-overridable per
+  deployment; hitting the tool-call cap mid-request logs a warning and posts once to the ops channel
+  (if configured), and the model is told to say so plainly — the cap resets on the next request, not
+  on a timer.
 - **§2.10 No secrets in git — ever, not even encrypted.** Secrets live only in a `sops`+`age`
   encrypted `roger.env` on the host. The repo carries `.sops.yaml` (the public recipient) and
   `roger.env.example`. See [`deploy/`](deploy/README.md).
@@ -277,16 +278,23 @@ behaviour adds rows, not migrations.
 ## §11 LLM layer & budgets
 
 `roger/llm.py` wraps the OpenAI SDK pointed at OpenRouter. Per call: pick the brain's model chain
-(§3), **check the daily token cap before spending** (raises `BudgetExceeded` if over), call with
-automatic fallback down the chain, then **record actual usage** to `usage`. A missing/empty model
-chain raises `LLMConfigError`, which callers turn into a plain "not configured" reply rather than a
-crash. Real spend is additionally bounded off-box by the OpenRouter key's own credit limit.
+(§3), **check the daily token cap before spending** (raises `BudgetExceeded` if over), then — if a
+`DAILY_USD_<BRAIN>` cap is also set — check accumulated USD spend the same way. The two caps are
+layered, not either/or: the token cap always enforces, and the USD cap is an additional, optional
+trip wire on top of it. That's deliberate — a provider that never reports cost
+(`OPENROUTER_BASE_URL` pointed elsewhere, ADR-0009) would otherwise leave the USD cap permanently
+silent, so the token cap stays the real backstop in that case. Once both checks pass, the call
+proceeds with automatic fallback down the chain, then **records actual usage** to `usage`. A
+missing/empty model chain raises `LLMConfigError`, which callers turn into a plain "not configured"
+reply rather than a crash. Real spend is additionally bounded off-box by the OpenRouter key's own
+credit limit.
 
 Limits at a glance (defaults; all env-overridable):
 
 | Control | Default |
 |---|---|
 | Daily tokens — admin / ambient / digest / gigabrain | 150k / 40k / 30k / 100k |
+| Daily USD — admin / ambient / digest / gigabrain | off / off / off / off (0 = disabled) |
 | Tool calls per admin request | 10 |
 | Model round-trips per admin request | 14 |
 | Tool calls / round-trips per gigabrain request | 10 / 14 |
