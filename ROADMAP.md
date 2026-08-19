@@ -13,7 +13,7 @@ Same effort key as BACKLOG: **S** ≈ an afternoon, **M** ≈ a day or two, **L*
 
 ---
 
-## 1. Personal digest — **S/M** — *spec written*
+## 1. Personal digest — **S/M** — *shipped*
 
 A feed roundup DM'd to the owner only, separate list and schedule from the public digest. Directly
 answers "I'm out of the loop" — reuses Digest's existing RSS/feeds/curation plumbing rather than

@@ -257,6 +257,13 @@ triggerable via the `run_digest` tool. There is **no user input anywhere in this
   are truncated to 500 chars before the model sees them.
 - **Exactly-once posting.** Items are marked **seen** (`seen` table) only *after* a successful post,
   so a failed post retries the same items next time rather than dropping them.
+- **A personal, DM'd sibling.** `run_personal_digest_job` is the same mechanism — fetch, dedupe,
+  summarize — pointed at a second, separately-curated `personal_feeds` list, and delivered to the
+  owner only (`PERSONAL_DIGEST_CHANNEL_ID` if set, else a DM — same fallback shape Giga Brain's
+  periodic check-in uses, §12). It shares the `digest` brain's model and daily budget; it's a
+  second job, not a second brain. Curated the same way — `suggest_personal_feeds` / `add_personal_feed`
+  / `remove_personal_feed` / `list_personal_feeds` mirror the public digest's four curation tools
+  exactly.
 
 ## §10 Persistence
 
@@ -272,6 +279,7 @@ behaviour adds rows, not migrations.
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |
 | `feeds` | The curated digest feed list (§9) |
+| `personal_feeds` | The owner's personal digest feed list, curated separately from `feeds` (§9) |
 | `meta` | Small key/value bot state (persisted presence outfit, gigabrain's last-run date) — never pruned |
 
 ## §11 LLM layer & budgets

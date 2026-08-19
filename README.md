@@ -114,6 +114,8 @@ Feature-complete across the planned phases:
 - **Digest** — a scheduled daily RSS/Atom summary (also triggerable via `/roger run the digest
   now`), deduped so nothing posts twice. Roger curates its own feed list: `DIGEST_FEEDS` seeds it
   once, then Roger validates candidates against the live web and adds or drops them on request.
+  A second, privately-curated feed list can also be DM'd to the owner only
+  (`PERSONAL_DIGEST_FEEDS`), on its own schedule.
 
 Runs as a non-root, read-only-rootfs container. ~110 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder
