@@ -236,3 +236,15 @@ async def test_missing_cost_field_defaults_to_zero(monkeypatch, tmp_path):
         assert await store.cost_today("admin") == 0.0
     finally:
         await store.close()
+
+
+async def test_spark_budget_exceeded_before_network(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_SPARK="a/b", DAILY_TOKENS_SPARK="10")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        await store.add_usage("spark", 8, 5)  # 13 >= 10
+        llm = LLM(Settings(), store)
+        with pytest.raises(BudgetExceeded):
+            await llm.complete("spark", [{"role": "user", "content": "hi"}])
+    finally:
+        await store.close()
