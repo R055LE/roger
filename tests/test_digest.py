@@ -186,17 +186,20 @@ async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
 
 
 class FakeDMChannel:
-    def __init__(self):
+    def __init__(self, raise_on_send=None):
         self.sent = []
+        self._raise_on_send = raise_on_send
 
     async def send(self, embed=None, content=None):
+        if self._raise_on_send is not None:
+            raise self._raise_on_send
         self.sent.append(embed if embed is not None else content)
 
 
 class FakeUser:
-    def __init__(self, raise_on_create_dm=None):
+    def __init__(self, raise_on_create_dm=None, raise_on_send=None):
         self._raise_on_create_dm = raise_on_create_dm
-        self.dm_channel = FakeDMChannel()
+        self.dm_channel = FakeDMChannel(raise_on_send=raise_on_send)
 
     async def create_dm(self):
         if self._raise_on_create_dm is not None:
@@ -354,5 +357,23 @@ async def test_personal_budget_skips_post_and_stays_retryable(tmp_path, monkeypa
         assert "budget" in out["status"]
         assert user.dm_channel.sent == []
         assert len(await _collect_new(["http://pf"], store)) == 1  # not marked seen
+    finally:
+        await store.close()
+
+
+async def test_personal_send_failure_is_reported(tmp_path, monkeypatch):
+    store = await _personal_store(tmp_path)
+    try:
+        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        user = FakeUser(raise_on_send=_http_error(discord.HTTPException, 500))
+        out = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=user),
+            settings=_personal_settings(channel_id=None),
+            llm=FakeLLM([_resp("summary")]),
+            store=store,
+        )
+        assert out["status"] == "delivery failed; digest not sent"
+        # Item not marked seen after send failure, so it's retryable
+        assert len(await _collect_new(["http://pf"], store)) == 1
     finally:
         await store.close()
