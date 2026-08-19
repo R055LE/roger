@@ -29,7 +29,12 @@ from discord.ext import tasks
 from roger import metrics
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
-from roger.brains.digest import run_digest_job, seed_feeds_if_empty
+from roger.brains.digest import (
+    run_digest_job,
+    run_personal_digest_job,
+    seed_feeds_if_empty,
+    seed_personal_feeds_if_empty,
+)
 from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
@@ -418,6 +423,18 @@ def _digest_problem(status: str) -> str | None:
     return status
 
 
+# Personal digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops
+# ping — same OK-prefix shape as the public digest.
+_PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items")
+
+
+def _personal_digest_problem(status: str) -> str | None:
+    """The personal digest status if it signals a problem worth alerting on, else None (pure)."""
+    if any(status.startswith(prefix) for prefix in _PERSONAL_DIGEST_OK_PREFIXES):
+        return None
+    return status
+
+
 # Gigabrain statuses that mean "nothing to flag" — including its own self-gating no-ops.
 _GIGABRAIN_OK_PREFIXES = ("delivered", "not due yet", "periodic suggestions not configured")
 
@@ -466,6 +483,11 @@ class RogerClient(discord.Client):
         seeded = await seed_feeds_if_empty(self.store, self.settings)
         if seeded:
             log.info("seeded %d feed(s) from DIGEST_FEEDS into the store", seeded)
+        personal_seeded = await seed_personal_feeds_if_empty(self.store, self.settings)
+        if personal_seeded:
+            log.info(
+                "seeded %d feed(s) from PERSONAL_DIGEST_FEEDS into the store", personal_seeded
+            )
         await self._maybe_prune()  # tidy expired rows on boot; the watchdog repeats it daily
         self._heartbeat.start()  # liveness for the Dockerfile HEALTHCHECK (always on)
         if self.settings.metrics_port:
@@ -482,6 +504,20 @@ class RogerClient(discord.Client):
             self._digest_loop.start()
             log.info(
                 "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
+            )
+        # Turned on by configuring at least one seed feed — DM delivery needs no channel to be set,
+        # unlike the public digest's channel-required gate.
+        if self.settings.personal_digest_feeds:
+            self._personal_digest_loop.change_interval(
+                time=datetime.time(
+                    hour=self.settings.personal_digest_hour, tzinfo=ZoneInfo(self.settings.tz)
+                )
+            )
+            self._personal_digest_loop.start()
+            log.info(
+                "personal digest scheduled daily at %02d:00 %s",
+                self.settings.personal_digest_hour,
+                self.settings.tz,
             )
         # Same pattern as digest: a daily tick that self-gates on the configured interval (§12).
         if self.settings.gigabrain_interval_days > 0:
@@ -661,6 +697,25 @@ class RogerClient(discord.Client):
 
     @_digest_loop.before_loop
     async def _before_digest(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=7))
+    async def _personal_digest_loop(self) -> None:
+        result = await run_personal_digest_job(
+            client=self, settings=self.settings, llm=self.llm, store=self.store
+        )
+        status = str(result.get("status", ""))
+        log.info("scheduled personal digest: %s", status)
+        problem = _personal_digest_problem(status)
+        if problem:
+            await self._ops.alert(
+                f"personal_digest:{time.strftime('%Y-%m-%d')}",
+                f"⚠️ **personal digest problem** — {problem}",
+                cooldown_s=_DAY_S,
+            )
+
+    @_personal_digest_loop.before_loop
+    async def _before_personal_digest(self) -> None:
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=9))
