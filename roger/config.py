@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     digest_channel_id: int | None = None
     digest_hour: int = 8
 
+    # --- personal digest (owner-only, DM by default) ---
+    personal_digest_feeds: str = ""
+    # unset = DM the owner directly; set = post there instead (same shape as digest_channel_id).
+    personal_digest_channel_id: int | None = None
+    personal_digest_hour: int = 7
+
     # --- ops ---
     # where Roger posts its boot self-report; None disables the report (logs still fire).
     ops_channel_id: int | None = None
@@ -82,7 +88,11 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @field_validator(
-        "digest_channel_id", "ops_channel_id", "gigabrain_channel_id", mode="before"
+        "digest_channel_id",
+        "ops_channel_id",
+        "gigabrain_channel_id",
+        "personal_digest_channel_id",
+        mode="before",
     )
     @classmethod
     def _empty_to_none(cls, value: object) -> object:
@@ -110,6 +120,10 @@ class Settings(BaseSettings):
     @property
     def feeds(self) -> list[str]:
         return _split_csv(self.digest_feeds)
+
+    @property
+    def personal_feeds(self) -> list[str]:
+        return _split_csv(self.personal_digest_feeds)
 
 
 def load_settings() -> Settings:

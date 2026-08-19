@@ -62,6 +62,27 @@ def test_empty_digest_channel_id_becomes_none(monkeypatch):
     assert Settings().digest_channel_id is None
 
 
+def test_personal_digest_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    settings = Settings()
+    assert settings.personal_digest_feeds == ""
+    assert settings.personal_feeds == []
+    assert settings.personal_digest_channel_id is None
+    assert settings.personal_digest_hour == 7
+
+
+def test_personal_feeds_is_parsed_to_list(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("PERSONAL_DIGEST_FEEDS", "http://a, http://b ,http://c")
+    assert Settings().personal_feeds == ["http://a", "http://b", "http://c"]
+
+
+def test_empty_personal_digest_channel_id_becomes_none(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("PERSONAL_DIGEST_CHANNEL_ID", "")
+    assert Settings().personal_digest_channel_id is None
+
+
 def test_missing_required_field_raises(monkeypatch):
     for key in _REQUIRED:
         monkeypatch.delenv(key, raising=False)
