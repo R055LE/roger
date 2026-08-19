@@ -53,6 +53,7 @@ from roger.tools.schemas import (
     RemoveReactionArgs,
     ReplyToForumPostArgs,
     RunDigestArgs,
+    RunSparkArgs,
     ServerStatsArgs,
     SetNicknameArgs,
     SetPermissionsArgs,
@@ -628,6 +629,18 @@ async def run_digest(
     )
 
 
+async def run_spark(
+    guild: discord.Guild, args: RunSparkArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    if ctx is None or ctx.settings is None:
+        return {"status": "spark unavailable in this context"}
+    from roger.brains.spark import run_spark_job
+
+    return await run_spark_job(
+        client=ctx.client, settings=ctx.settings, llm=ctx.llm, store=ctx.store
+    )
+
+
 # --------------------------------------------------------------------------- digest feeds
 
 
@@ -1177,6 +1190,7 @@ EXECUTORS = {
     "reply_to_forum_post": reply_to_forum_post,
     "move_channel": move_channel,
     "run_digest": run_digest,
+    "run_spark": run_spark,
     "suggest_feeds": suggest_feeds,
     "add_feed": add_feed,
     "remove_feed": remove_feed,

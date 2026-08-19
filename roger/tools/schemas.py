@@ -161,6 +161,10 @@ class RunDigestArgs(ToolArgs):
     """No arguments — triggers the digest job immediately."""
 
 
+class RunSparkArgs(ToolArgs):
+    """No arguments — triggers the spark job immediately."""
+
+
 class ListFeedsArgs(ToolArgs):
     """No arguments — returns the digest's current feed list."""
 
@@ -424,6 +428,14 @@ REGISTRY: dict[str, ToolSpec] = {
         name="run_digest",
         description="Trigger the RSS/Atom digest job immediately.",
         args_model=RunDigestArgs,
+    ),
+    "run_spark": ToolSpec(
+        name="run_spark",
+        description=(
+            "Trigger the spark job (spotlight one feed item + a discussion question) "
+            "immediately."
+        ),
+        args_model=RunSparkArgs,
     ),
     "list_feeds": ToolSpec(
         name="list_feeds",
