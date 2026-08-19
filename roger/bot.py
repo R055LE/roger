@@ -232,6 +232,7 @@ _CONFIGURED_CHANNELS: tuple[tuple[str, str], ...] = (
     ("digest_channel_id", "digest"),
     ("ops_channel_id", "ops"),
     ("gigabrain_channel_id", "gigabrain check-in"),
+    ("personal_digest_channel_id", "personal digest"),
 )
 
 
@@ -425,7 +426,7 @@ def _digest_problem(status: str) -> str | None:
 
 # Personal digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops
 # ping — same OK-prefix shape as the public digest.
-_PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items")
+_PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items", "personal digest not configured")
 
 
 def _personal_digest_problem(status: str) -> str | None:
@@ -505,20 +506,22 @@ class RogerClient(discord.Client):
             log.info(
                 "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
             )
-        # Turned on by configuring at least one seed feed — DM delivery needs no channel to be set,
-        # unlike the public digest's channel-required gate.
-        if self.settings.personal_digest_feeds:
-            self._personal_digest_loop.change_interval(
-                time=datetime.time(
-                    hour=self.settings.personal_digest_hour, tzinfo=ZoneInfo(self.settings.tz)
-                )
+        # Always scheduled, unconditionally — DM delivery needs no channel or feeds pre-configured.
+        # run_personal_digest_job self-gates on "no feeds" the same way run_gigabrain_suggestion
+        # self-gates on its interval (§12): the job decides, not the caller. This also means feeds
+        # curated live via the admin tools (with PERSONAL_DIGEST_FEEDS left unset) actually get
+        # scheduled, not just seeded into a table nothing reads from.
+        self._personal_digest_loop.change_interval(
+            time=datetime.time(
+                hour=self.settings.personal_digest_hour, tzinfo=ZoneInfo(self.settings.tz)
             )
-            self._personal_digest_loop.start()
-            log.info(
-                "personal digest scheduled daily at %02d:00 %s",
-                self.settings.personal_digest_hour,
-                self.settings.tz,
-            )
+        )
+        self._personal_digest_loop.start()
+        log.info(
+            "personal digest scheduled daily at %02d:00 %s",
+            self.settings.personal_digest_hour,
+            self.settings.tz,
+        )
         # Same pattern as digest: a daily tick that self-gates on the configured interval (§12).
         if self.settings.gigabrain_interval_days > 0:
             self._gigabrain_loop.change_interval(

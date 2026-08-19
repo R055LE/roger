@@ -117,7 +117,7 @@ Feature-complete across the planned phases:
   A second, privately-curated feed list can also be DM'd to the owner only
   (`PERSONAL_DIGEST_FEEDS`), on its own schedule.
 
-Runs as a non-root, read-only-rootfs container. ~110 tests cover the guard rules, the tool loop
+Runs as a non-root, read-only-rootfs container. ~275 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder
 tools), the rate limiter, and the digest and feed-curation paths.
 
