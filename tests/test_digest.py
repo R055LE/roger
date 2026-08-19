@@ -180,3 +180,179 @@ async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
         assert len(await _collect_new(["http://f"], store)) == 1  # not marked seen
     finally:
         await store.close()
+
+
+# --------------------------------------------------------------------------- personal digest
+
+
+class FakeDMChannel:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, embed=None, content=None):
+        self.sent.append(embed if embed is not None else content)
+
+
+class FakeUser:
+    def __init__(self, raise_on_create_dm=None):
+        self._raise_on_create_dm = raise_on_create_dm
+        self.dm_channel = FakeDMChannel()
+
+    async def create_dm(self):
+        if self._raise_on_create_dm is not None:
+            raise self._raise_on_create_dm
+        return self.dm_channel
+
+
+class FakePersonalClient:
+    def __init__(self, user=None, channel=None):
+        self._user = user
+        self._channel = channel
+
+    def get_channel(self, channel_id):
+        return self._channel
+
+    async def fetch_user(self, user_id):
+        return self._user
+
+
+def _http_error(kind, status):
+    """Build a real discord HTTP error without a live aiohttp response."""
+    response = SimpleNamespace(status=status, reason="test")
+    return kind(response, "boom")
+
+
+def _personal_settings(channel_id=None, tz="America/Detroit", owner_id=1):
+    return SimpleNamespace(personal_digest_channel_id=channel_id, tz=tz, owner_id=owner_id)
+
+
+async def _personal_store(tmp_path, feeds=("http://pf",)):
+    store = await Store(str(tmp_path / "pdig.db")).open()
+    for url in feeds:
+        await store.add_personal_feed(url, None)
+    return store
+
+
+async def test_personal_seed_if_empty_is_one_shot(tmp_path):
+    store = await _personal_store(tmp_path, feeds=())  # start empty
+    try:
+        seeded = await digest.seed_personal_feeds_if_empty(
+            store, SimpleNamespace(personal_feeds=["http://s1", "http://s2"])
+        )
+        assert seeded == 2
+        assert await store.count_personal_feeds() == 2
+        # A later env change does NOT re-seed once the store is populated.
+        again = await digest.seed_personal_feeds_if_empty(
+            store, SimpleNamespace(personal_feeds=["http://s3"])
+        )
+        assert again == 0
+    finally:
+        await store.close()
+
+
+async def test_personal_not_configured_when_no_feeds(tmp_path):
+    store = await _personal_store(tmp_path, feeds=())
+    try:
+        user = FakeUser()
+        out = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=user),
+            settings=_personal_settings(),
+            llm=FakeLLM([]),
+            store=store,
+        )
+        assert "not configured" in out["status"]
+        assert user.dm_channel.sent == []
+    finally:
+        await store.close()
+
+
+async def test_personal_no_new_items_skips(tmp_path, monkeypatch):
+    store = await _personal_store(tmp_path)
+    try:
+        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([]))
+        out = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=FakeUser()),
+            settings=_personal_settings(),
+            llm=FakeLLM([]),
+            store=store,
+        )
+        assert out["status"] == "no new items"
+    finally:
+        await store.close()
+
+
+async def test_personal_posts_via_dm_when_no_channel_configured(tmp_path, monkeypatch):
+    store = await _personal_store(tmp_path)
+    try:
+        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        user = FakeUser()
+        out = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=user),
+            settings=_personal_settings(channel_id=None),
+            llm=FakeLLM([_resp("summary")]),
+            store=store,
+        )
+        assert out["status"] == "posted" and out["count"] == 1
+        assert len(user.dm_channel.sent) == 1
+        assert isinstance(user.dm_channel.sent[0], discord.Embed)
+
+        out2 = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=user),
+            settings=_personal_settings(channel_id=None),
+            llm=FakeLLM([]),
+            store=store,
+        )
+        assert out2["status"] == "no new items"  # marked seen after the first post
+    finally:
+        await store.close()
+
+
+async def test_personal_posts_to_channel_when_configured(tmp_path, monkeypatch):
+    store = await _personal_store(tmp_path)
+    try:
+        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        channel = FakeChannel()
+        out = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=FakeUser(), channel=channel),
+            settings=_personal_settings(channel_id=99),
+            llm=FakeLLM([_resp("summary")]),
+            store=store,
+        )
+        assert out["status"] == "posted"
+        assert len(channel.sent) == 1
+    finally:
+        await store.close()
+
+
+async def test_personal_dm_creation_failure_is_reported(tmp_path, monkeypatch):
+    store = await _personal_store(tmp_path)
+    try:
+        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        user = FakeUser(raise_on_create_dm=_http_error(discord.Forbidden, 403))
+        out = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=user),
+            settings=_personal_settings(channel_id=None),
+            llm=FakeLLM([_resp("summary")]),
+            store=store,
+        )
+        assert "DM failed" in out["status"]
+    finally:
+        await store.close()
+
+
+async def test_personal_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
+    store = await _personal_store(tmp_path)
+    try:
+        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        user = FakeUser()
+        out = await digest.run_personal_digest_job(
+            client=FakePersonalClient(user=user),
+            settings=_personal_settings(channel_id=None),
+            llm=FakeLLM([BudgetExceeded("digest", 100, 50)]),
+            store=store,
+        )
+        assert "budget" in out["status"]
+        assert user.dm_channel.sent == []
+        assert len(await _collect_new(["http://pf"], store)) == 1  # not marked seen
+    finally:
+        await store.close()
