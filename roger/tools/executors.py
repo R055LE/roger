@@ -28,6 +28,7 @@ from roger.tools.guard import (
 from roger.tools.schemas import (
     AddFeedArgs,
     AddMemberRoleArgs,
+    AddPersonalFeedArgs,
     AddReactionArgs,
     CreateChannelArgs,
     CreateForumPostArgs,
@@ -39,6 +40,7 @@ from roger.tools.schemas import (
     ListFeedsArgs,
     ListForumPostsArgs,
     ListInvitesArgs,
+    ListPersonalFeedsArgs,
     ListRoleMembersArgs,
     ListScheduledEventsArgs,
     ListStructureArgs,
@@ -47,6 +49,7 @@ from roger.tools.schemas import (
     PostMessageArgs,
     RemoveFeedArgs,
     RemoveMemberRoleArgs,
+    RemovePersonalFeedArgs,
     RemoveReactionArgs,
     ReplyToForumPostArgs,
     RunDigestArgs,
@@ -55,6 +58,7 @@ from roger.tools.schemas import (
     SetPermissionsArgs,
     SetPresenceArgs,
     SuggestFeedsArgs,
+    SuggestPersonalFeedsArgs,
 )
 
 # --------------------------------------------------------------------------- snapshot
@@ -697,6 +701,58 @@ async def list_feeds(
     }
 
 
+# --------------------------------------------------------------------------- personal digest feeds
+
+
+async def suggest_personal_feeds(
+    guild: discord.Guild, args: SuggestPersonalFeedsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    candidates = await asyncio.gather(*(validate_feed(url) for url in args.urls))
+    return {"candidates": list(candidates)}
+
+
+async def add_personal_feed(
+    guild: discord.Guild, args: AddPersonalFeedArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    store = _need_store(ctx)
+    checked = await validate_feed(args.url)
+    if not checked["ok"]:
+        return {"added": False, "url": args.url, "error": checked["error"]}
+    added = await store.add_personal_feed(args.url, checked.get("title"))
+    return {
+        "added": added,
+        "url": args.url,
+        "title": checked.get("title"),
+        "entries": checked.get("entries"),
+        "note": None if added else "already in the personal feed list",
+    }
+
+
+async def remove_personal_feed(
+    guild: discord.Guild, args: RemovePersonalFeedArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    store = _need_store(ctx)
+    removed = await store.remove_personal_feed(args.url)
+    return {
+        "removed": removed,
+        "url": args.url,
+        "note": None
+        if removed
+        else "no feed with that exact URL (call list_personal_feeds first)",
+    }
+
+
+async def list_personal_feeds(
+    guild: discord.Guild, args: ListPersonalFeedsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    store = _need_store(ctx)
+    rows = await store.list_personal_feeds()
+    return {
+        "feeds": [{"url": r["url"], "title": r["title"]} for r in rows],
+        "count": len(rows),
+    }
+
+
 # --------------------------------------------------------------------------- toys (self / read)
 
 # Where the persisted presence "outfit" lives in the meta table. bot.py reads this key on boot to
@@ -1125,6 +1181,10 @@ EXECUTORS = {
     "add_feed": add_feed,
     "remove_feed": remove_feed,
     "list_feeds": list_feeds,
+    "suggest_personal_feeds": suggest_personal_feeds,
+    "add_personal_feed": add_personal_feed,
+    "remove_personal_feed": remove_personal_feed,
+    "list_personal_feeds": list_personal_feeds,
     "set_presence": set_presence,
     "set_nickname": set_nickname,
     "server_stats": server_stats,

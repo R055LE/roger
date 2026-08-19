@@ -177,6 +177,22 @@ class RemoveFeedArgs(ToolArgs):
     url: str  # exact stored URL (from list_feeds)
 
 
+class ListPersonalFeedsArgs(ToolArgs):
+    """No arguments — returns the owner's personal digest feed list."""
+
+
+class SuggestPersonalFeedsArgs(ToolArgs):
+    urls: list[str] = Field(min_length=1, max_length=8)  # candidate feed URLs to vet
+
+
+class AddPersonalFeedArgs(ToolArgs):
+    url: str  # RSS/Atom feed URL; validated live before it is stored
+
+
+class RemovePersonalFeedArgs(ToolArgs):
+    url: str  # exact stored URL (from list_personal_feeds)
+
+
 # --------------------------------------------------------------------------- toys (self / read)
 
 StatusName = Literal["online", "idle", "dnd", "invisible"]
@@ -438,6 +454,37 @@ REGISTRY: dict[str, ToolSpec] = {
             "the exact URL."
         ),
         args_model=RemoveFeedArgs,
+    ),
+    "list_personal_feeds": ToolSpec(
+        name="list_personal_feeds",
+        description="List the RSS/Atom feeds in the owner's personal digest (DM'd privately, "
+        "separate from the public digest). Read-only.",
+        args_model=ListPersonalFeedsArgs,
+    ),
+    "suggest_personal_feeds": ToolSpec(
+        name="suggest_personal_feeds",
+        description=(
+            "Validate candidate RSS/Atom feed URLs WITHOUT adding them to the personal digest. "
+            "Returns, per URL, whether it's a live feed, its title, and how many items it has. "
+            "Use this to vet feeds you propose before calling add_personal_feed."
+        ),
+        args_model=SuggestPersonalFeedsArgs,
+    ),
+    "add_personal_feed": ToolSpec(
+        name="add_personal_feed",
+        description=(
+            "Validate and add one RSS/Atom feed to the owner's personal digest. Fails if the URL "
+            "isn't a live feed. Idempotent — adding an existing feed is a no-op."
+        ),
+        args_model=AddPersonalFeedArgs,
+    ),
+    "remove_personal_feed": ToolSpec(
+        name="remove_personal_feed",
+        description=(
+            "Remove a feed from the owner's personal digest by its exact URL. Call "
+            "list_personal_feeds first to get the exact URL."
+        ),
+        args_model=RemovePersonalFeedArgs,
     ),
     "set_presence": ToolSpec(
         name="set_presence",
