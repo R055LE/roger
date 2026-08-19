@@ -13,6 +13,7 @@ from roger.tools.guard import GuardError
 from roger.tools.schemas import (
     AddFeedArgs,
     AddMemberRoleArgs,
+    AddPersonalFeedArgs,
     ChannelGrant,
     CreateChannelArgs,
     CreateForumPostArgs,
@@ -24,6 +25,7 @@ from roger.tools.schemas import (
     ListFeedsArgs,
     ListForumPostsArgs,
     ListInvitesArgs,
+    ListPersonalFeedsArgs,
     ListRoleMembersArgs,
     ListScheduledEventsArgs,
     ListWebhooksArgs,
@@ -32,9 +34,11 @@ from roger.tools.schemas import (
     PostMessageArgs,
     RemoveFeedArgs,
     RemoveMemberRoleArgs,
+    RemovePersonalFeedArgs,
     ReplyToForumPostArgs,
     SetPermissionsArgs,
     SuggestFeedsArgs,
+    SuggestPersonalFeedsArgs,
 )
 
 
@@ -1244,6 +1248,70 @@ async def test_suggest_feeds_validates_without_persisting(feeds):
 async def test_feed_tool_without_store_raises_guard_error():
     with pytest.raises(GuardError):
         await executors.list_feeds(None, ListFeedsArgs(), None)
+
+
+async def test_add_personal_feed_validates_and_persists(feeds):
+    feeds.responses["http://good"] = _good_feed(title="Good Blog", n=5)
+    out = await executors.add_personal_feed(
+        None, AddPersonalFeedArgs(url="http://good"), feeds.ctx
+    )
+    assert out["added"] is True
+    assert out["title"] == "Good Blog"
+    assert [f["url"] for f in await feeds.store.list_personal_feeds()] == ["http://good"]
+
+
+async def test_add_personal_feed_rejects_non_feed(feeds):
+    out = await executors.add_personal_feed(
+        None, AddPersonalFeedArgs(url="http://nope"), feeds.ctx
+    )
+    assert out["added"] is False
+    assert await feeds.store.count_personal_feeds() == 0
+
+
+async def test_add_personal_feed_is_idempotent(feeds):
+    feeds.responses["http://good"] = _good_feed()
+    await executors.add_personal_feed(None, AddPersonalFeedArgs(url="http://good"), feeds.ctx)
+    out = await executors.add_personal_feed(
+        None, AddPersonalFeedArgs(url="http://good"), feeds.ctx
+    )
+    assert out["added"] is False
+    assert out["note"] == "already in the personal feed list"
+
+
+async def test_remove_personal_feed_hit_and_miss(feeds):
+    feeds.responses["http://good"] = _good_feed()
+    await executors.add_personal_feed(None, AddPersonalFeedArgs(url="http://good"), feeds.ctx)
+    hit = await executors.remove_personal_feed(
+        None, RemovePersonalFeedArgs(url="http://good"), feeds.ctx
+    )
+    assert hit["removed"] is True
+    miss = await executors.remove_personal_feed(
+        None, RemovePersonalFeedArgs(url="http://good"), feeds.ctx
+    )
+    assert miss["removed"] is False
+
+
+async def test_list_personal_feeds_returns_current(feeds):
+    feeds.responses["http://a"] = _good_feed(title="A")
+    await executors.add_personal_feed(None, AddPersonalFeedArgs(url="http://a"), feeds.ctx)
+    out = await executors.list_personal_feeds(None, ListPersonalFeedsArgs(), feeds.ctx)
+    assert out["count"] == 1
+    assert out["feeds"][0] == {"url": "http://a", "title": "A"}
+
+
+async def test_suggest_personal_feeds_validates_without_persisting(feeds):
+    feeds.responses["http://ok"] = _good_feed(title="OK", n=2)
+    out = await executors.suggest_personal_feeds(
+        None, SuggestPersonalFeedsArgs(urls=["http://ok"]), feeds.ctx
+    )
+    by_url = {c["url"]: c for c in out["candidates"]}
+    assert by_url["http://ok"]["ok"] is True
+    assert await feeds.store.count_personal_feeds() == 0  # suggest never writes
+
+
+async def test_personal_feed_tool_without_store_raises_guard_error():
+    with pytest.raises(GuardError):
+        await executors.list_personal_feeds(None, ListPersonalFeedsArgs(), None)
 
 
 # ------------------------------------------------------------------ read-only server info

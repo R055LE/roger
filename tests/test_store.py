@@ -72,6 +72,36 @@ async def test_feed_crud_and_dedupe(tmp_path):
         await store.close()
 
 
+async def test_personal_feed_crud(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        assert await store.count_personal_feeds() == 0
+        assert await store.add_personal_feed("http://a", "A") is True
+        assert await store.add_personal_feed("http://a", "A") is False  # duplicate URL ignored
+        assert await store.add_personal_feed("http://b", None) is True
+        assert [f["url"] for f in await store.list_personal_feeds()] == ["http://a", "http://b"]
+
+        assert await store.remove_personal_feed("http://a") is True
+        assert await store.remove_personal_feed("http://a") is False  # already gone
+        assert [f["url"] for f in await store.list_personal_feeds()] == ["http://b"]
+    finally:
+        await store.close()
+
+
+async def test_personal_feeds_are_isolated_from_the_public_list(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        await store.add_feed("http://shared", None)
+        await store.add_personal_feed("http://shared", None)
+        assert await store.count_feeds() == 1
+        assert await store.count_personal_feeds() == 1
+        await store.remove_feed("http://shared")
+        assert await store.count_feeds() == 0
+        assert await store.count_personal_feeds() == 1  # independent lists
+    finally:
+        await store.close()
+
+
 async def test_usage_accumulates_tokens_and_cost(tmp_path):
     store = await Store(str(tmp_path / "roger.db")).open()
     try:
@@ -155,5 +185,15 @@ async def test_seed_feeds_ignores_existing(tmp_path):
         await store.add_feed("http://a", None)
         await store.seed_feeds(["http://a", "http://b"])  # "http://a" already present
         assert {f["url"] for f in await store.list_feeds()} == {"http://a", "http://b"}
+    finally:
+        await store.close()
+
+
+async def test_seed_personal_feeds_ignores_existing(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        await store.add_personal_feed("http://a", None)
+        await store.seed_personal_feeds(["http://a", "http://b"])  # "http://a" already present
+        assert {f["url"] for f in await store.list_personal_feeds()} == {"http://a", "http://b"}
     finally:
         await store.close()

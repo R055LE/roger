@@ -189,6 +189,10 @@ Registry:
 | `suggest_feeds` | no (validates only) | — |
 | `add_feed` | yes | no |
 | `remove_feed` | yes | no |
+| `list_personal_feeds` | no | — |
+| `suggest_personal_feeds` | no (validates only) | — |
+| `add_personal_feed` | yes | no |
+| `remove_personal_feed` | yes | no |
 | `set_presence` | self only (own status/activity, persisted) | no |
 | `set_nickname` | self only (own guild nickname) | no |
 | `server_stats` | no | — |
@@ -258,6 +262,21 @@ triggerable via the `run_digest` tool. There is **no user input anywhere in this
   are truncated to 500 chars before the model sees them.
 - **Exactly-once posting.** Items are marked **seen** (`seen` table) only *after* a successful post,
   so a failed post retries the same items next time rather than dropping them.
+- **A personal, DM'd sibling.** `run_personal_digest_job` is the same mechanism — fetch, dedupe,
+  summarize — pointed at a second, separately-curated `personal_feeds` list, delivered to
+  `PERSONAL_DIGEST_CHANNEL_ID` if set, else DMed directly to the owner — same fallback shape and
+  the same "deploy owner's choice of destination and privacy, not Roger's" reasoning as Giga
+  Brain's periodic check-in (§12). It shares the `digest` brain's model and daily budget; it's a
+  second job, not a second brain. Curated the same way — `suggest_personal_feeds` /
+  `add_personal_feed` / `remove_personal_feed` / `list_personal_feeds` mirror the public digest's
+  four curation tools exactly. Scheduled unconditionally, same as Giga Brain's interval check —
+  the job itself decides "not configured" (no feeds) rather than the caller gating on whether a
+  seed env var happens to still be set, so feeds curated live via chat are actually delivered.
+- **One caveat: `seen` is shared.** Dedup is keyed on `(feed_url, entry_id)` globally, not per
+  list — a URL curated into *both* `feeds` and `personal_feeds` is only ever delivered by
+  whichever job runs first that day (personal digest defaults to `PERSONAL_DIGEST_HOUR=7`, before
+  the public digest's `DIGEST_HOUR=8`). Don't add the same feed to both lists if you want it in
+  both digests.
 
 ## §10 Persistence
 
@@ -273,6 +292,7 @@ behaviour adds rows, not migrations.
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |
 | `feeds` | The curated digest feed list (§9) |
+| `personal_feeds` | The owner's personal digest feed list, curated separately from `feeds` (§9) |
 | `meta` | Small key/value bot state (persisted presence outfit, gigabrain's last-run date) — never pruned |
 
 ## §11 LLM layer & budgets
