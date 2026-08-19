@@ -62,6 +62,16 @@ def test_unreachable_channels_flags_a_channel_roger_cant_post_in():
     assert "gigabrain check-in channel #checkins not postable" in problems[0]
 
 
+def test_unreachable_channels_flags_a_missing_spark_channel():
+    guild = _fake_guild(channels={})
+    settings = SimpleNamespace(
+        digest_channel_id=None, ops_channel_id=None, gigabrain_channel_id=None,
+        spark_channel_id=42,
+    )
+    problems = _unreachable_channels(guild, settings)
+    assert "spark channel 42 not found" in problems[0]
+
+
 def test_unreachable_channels_empty_when_nothing_configured_or_everything_reachable():
     guild = _fake_guild(channels={42: _FakeChannel()})
     settings = SimpleNamespace(digest_channel_id=42, ops_channel_id=None, gigabrain_channel_id=None)

@@ -36,6 +36,7 @@ from roger.brains.digest import (
     seed_personal_feeds_if_empty,
 )
 from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
+from roger.brains.spark import run_spark_job
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
@@ -233,6 +234,7 @@ _CONFIGURED_CHANNELS: tuple[tuple[str, str], ...] = (
     ("ops_channel_id", "ops"),
     ("gigabrain_channel_id", "gigabrain check-in"),
     ("personal_digest_channel_id", "personal digest"),
+    ("spark_channel_id", "spark"),
 )
 
 
@@ -460,6 +462,19 @@ def _digest_problem(status: str) -> str | None:
     return status
 
 
+# Spark statuses that mean "ran fine, nothing to flag"; anything else is worth an ops ping —
+# mirrors _DIGEST_OK_PREFIXES exactly: the loop only ever starts once a channel is configured,
+# so a "not configured" status is unreachable from the loop and needs no OK-prefix here.
+_SPARK_OK_PREFIXES = ("posted", "no new items")
+
+
+def _spark_problem(status: str) -> str | None:
+    """The spark status if it signals a problem worth alerting on, else None (pure)."""
+    if any(status.startswith(prefix) for prefix in _SPARK_OK_PREFIXES):
+        return None
+    return status
+
+
 # Personal digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops
 # ping — same OK-prefix shape as the public digest.
 _PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items", "personal digest not configured")
@@ -541,6 +556,16 @@ class RogerClient(discord.Client):
             self._digest_loop.start()
             log.info(
                 "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
+            )
+        if self.settings.spark_channel_id is not None:
+            self._spark_loop.change_interval(
+                time=datetime.time(
+                    hour=self.settings.spark_hour, tzinfo=ZoneInfo(self.settings.tz)
+                )
+            )
+            self._spark_loop.start()
+            log.info(
+                "spark scheduled daily at %02d:00 %s", self.settings.spark_hour, self.settings.tz
             )
         # Always scheduled, unconditionally — DM delivery needs no channel or feeds pre-configured.
         # run_personal_digest_job self-gates on "no feeds" the same way run_gigabrain_suggestion
@@ -736,6 +761,25 @@ class RogerClient(discord.Client):
 
     @_digest_loop.before_loop
     async def _before_digest(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=7))
+    async def _spark_loop(self) -> None:
+        result = await run_spark_job(
+            client=self, settings=self.settings, llm=self.llm, store=self.store
+        )
+        status = str(result.get("status", ""))
+        log.info("scheduled spark: %s", status)
+        problem = _spark_problem(status)
+        if problem:
+            await self._ops.alert(
+                f"spark:{time.strftime('%Y-%m-%d')}",
+                f"⚠️ **spark problem** — {problem}",
+                cooldown_s=_DAY_S,
+            )
+
+    @_spark_loop.before_loop
+    async def _before_spark(self) -> None:
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=7))
