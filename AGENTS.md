@@ -56,6 +56,7 @@ the workflow; keep it working.
 
 ## Claude Code specifics
 
-`CLAUDE.md` is a symlink to this file. Codex reads only `AGENTS.md`, Claude Code
-reads only `CLAUDE.md`, and neither reads the other's, so one file serves both.
-`/init` will try to replace the symlink with a real file.
+`CLAUDE.md` is a symlink to this file, per `decisions/0012`. Fleet-wide
+conventions — the symlink mechanics, and the PR/merge recipe this repo's
+default-branch protection requires — live in the mirror root's `AGENTS.md`,
+see `decisions/0023`.
