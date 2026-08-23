@@ -28,8 +28,8 @@ from roger.store import Store
 log = logging.getLogger("roger.llm")
 
 # Sampling + output ceilings per brain (§11).
-_TEMPERATURE = {"admin": 0.1, "digest": 0.3, "ambient": 0.8, "gigabrain": 0.3}
-_MAX_TOKENS = {"admin": 1024, "digest": 1500, "ambient": 300, "gigabrain": 2048}
+_TEMPERATURE = {"admin": 0.1, "digest": 0.3, "ambient": 0.8, "gigabrain": 0.3, "spark": 0.6}
+_MAX_TOKENS = {"admin": 1024, "digest": 1500, "ambient": 300, "gigabrain": 2048, "spark": 400}
 
 # Retry policy. The SDK maps every status >= 500 to InternalServerError, so that one type covers all
 # 5xx. A hung request must not sit on a deferred Discord interaction, hence the hard timeout too.
@@ -85,18 +85,21 @@ class LLM:
             "ambient": settings.ambient_models,
             "digest": settings.digest_models,
             "gigabrain": settings.gigabrain_models,
+            "spark": settings.spark_models,
         }
         self._caps = {
             "admin": settings.daily_tokens_admin,
             "ambient": settings.daily_tokens_ambient,
             "digest": settings.daily_tokens_digest,
             "gigabrain": settings.daily_tokens_gigabrain,
+            "spark": settings.daily_tokens_spark,
         }
         self._usd_caps = {
             "admin": settings.daily_usd_admin,
             "ambient": settings.daily_usd_ambient,
             "digest": settings.daily_usd_digest,
             "gigabrain": settings.daily_usd_gigabrain,
+            "spark": settings.daily_usd_spark,
         }
         # Opt-in OpenRouter `reasoning.effort` passthrough — only gigabrain ever sets this today.
         self._reasoning_effort = {"gigabrain": settings.gigabrain_reasoning_effort or None}

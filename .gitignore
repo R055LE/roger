@@ -21,6 +21,7 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+uv.lock
 
 # OS / editor
 .DS_Store

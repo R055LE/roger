@@ -103,3 +103,34 @@ def test_daily_usd_parses_from_env(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("DAILY_USD_ADMIN", "2.5")
     assert Settings().daily_usd_admin == 2.5
+
+
+def test_spark_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    settings = Settings()
+    assert settings.spark_channel_id is None
+    assert settings.spark_hour == 7
+    assert settings.model_spark == ""
+    assert settings.spark_models == []
+    assert settings.daily_tokens_spark == 30_000
+    assert settings.daily_usd_spark == 0.0
+
+
+def test_empty_spark_channel_id_becomes_none(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SPARK_CHANNEL_ID", "")
+    assert Settings().spark_channel_id is None
+
+
+def test_spark_model_chain_is_parsed_to_list(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MODEL_SPARK", "a/b, c/d")
+    assert Settings().spark_models == ["a/b", "c/d"]
+
+
+@pytest.mark.parametrize("hour", ["-1", "24"])
+def test_spark_hour_must_be_a_clock_hour(monkeypatch, hour):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SPARK_HOUR", hour)
+    with pytest.raises(ValidationError):
+        Settings()

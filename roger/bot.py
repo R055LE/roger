@@ -3,7 +3,7 @@
 Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped commands, the
 owner gate with audit logging, and message routing. Owner requests (via ``/roger``, a DM, or an
 @mention) go to the admin brain, which keeps short per-channel memory; ``/chat`` and non-owner chat
-go to the ambient brain; a scheduled digest posts on its own loop.
+go to the ambient brain; Digest and Spark post on their own scheduled loops.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from roger.brains.digest import (
     seed_personal_feeds_if_empty,
 )
 from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
+from roger.brains.spark import run_spark_job
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
@@ -233,6 +234,7 @@ _CONFIGURED_CHANNELS: tuple[tuple[str, str], ...] = (
     ("ops_channel_id", "ops"),
     ("gigabrain_channel_id", "gigabrain check-in"),
     ("personal_digest_channel_id", "personal digest"),
+    ("spark_channel_id", "spark"),
 )
 
 
@@ -253,6 +255,9 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
         if channel is None:
             problems.append(f"{label} channel {channel_id} not found")
             continue
+        if not callable(getattr(channel, "send", None)):
+            problems.append(f"{label} channel #{channel.name} is not postable")
+            continue
         perms = channel.permissions_for(guild.me)
         if not perms.view_channel or not perms.send_messages:
             problems.append(f"{label} channel #{channel.name} not postable (missing view/send)")
@@ -261,7 +266,7 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
 
 # --------------------------------------------------------------------------- status & ops
 
-_BRAINS = ("admin", "ambient", "digest", "gigabrain")
+_BRAINS = ("admin", "ambient", "digest", "spark", "gigabrain")
 
 
 def _daily_caps(settings: Settings) -> dict[str, int]:
@@ -270,6 +275,7 @@ def _daily_caps(settings: Settings) -> dict[str, int]:
         "admin": settings.daily_tokens_admin,
         "ambient": settings.daily_tokens_ambient,
         "digest": settings.daily_tokens_digest,
+        "spark": settings.daily_tokens_spark,
         "gigabrain": settings.daily_tokens_gigabrain,
     }
 
@@ -280,6 +286,7 @@ def _daily_usd_caps(settings: Settings) -> dict[str, float]:
         "admin": settings.daily_usd_admin,
         "ambient": settings.daily_usd_ambient,
         "digest": settings.daily_usd_digest,
+        "spark": settings.daily_usd_spark,
         "gigabrain": settings.daily_usd_gigabrain,
     }
 
@@ -322,6 +329,8 @@ def _format_status(
     recent_audit: list[dict[str, Any]],
     digest_hour: int,
     digest_configured: bool,
+    spark_hour: int,
+    spark_configured: bool,
     tz: str,
     usd_caps: dict[str, float] | None = None,
 ) -> str:
@@ -348,7 +357,8 @@ def _format_status(
         )
     lines.append(f"  {'total':<29}  ${total_cost:.4f}")
     digest = f"{digest_hour:02d}:00 {tz}" if digest_configured else "unconfigured"
-    lines.append(f"feeds: {feeds_count}   digest: {digest}")
+    spark = f"{spark_hour:02d}:00 {tz}" if spark_configured else "unconfigured"
+    lines.append(f"feeds: {feeds_count}   digest: {digest}   spark: {spark}")
     if recent_audit:
         lines.append("recent actions:")
         for row in recent_audit:
@@ -382,6 +392,8 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         recent_audit=await store.fetch_audit(limit=8),
         digest_hour=settings.digest_hour,
         digest_configured=settings.digest_channel_id is not None,
+        spark_hour=settings.spark_hour,
+        spark_configured=settings.spark_channel_id is not None,
         tz=settings.tz,
     )
 
@@ -456,6 +468,19 @@ _DIGEST_OK_PREFIXES = ("posted", "no new items")
 def _digest_problem(status: str) -> str | None:
     """The digest status if it signals a problem worth alerting on, else None (pure)."""
     if any(status.startswith(prefix) for prefix in _DIGEST_OK_PREFIXES):
+        return None
+    return status
+
+
+# Spark statuses that mean "ran fine, nothing to flag"; anything else is worth an ops ping —
+# mirrors _DIGEST_OK_PREFIXES exactly: the loop only ever starts once a channel is configured,
+# so a "not configured" status is unreachable from the loop and needs no OK-prefix here.
+_SPARK_OK_PREFIXES = ("posted", "no new items")
+
+
+def _spark_problem(status: str) -> str | None:
+    """The spark status if it signals a problem worth alerting on, else None (pure)."""
+    if any(status.startswith(prefix) for prefix in _SPARK_OK_PREFIXES):
         return None
     return status
 
@@ -541,6 +566,16 @@ class RogerClient(discord.Client):
             self._digest_loop.start()
             log.info(
                 "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
+            )
+        if self.settings.spark_channel_id is not None:
+            self._spark_loop.change_interval(
+                time=datetime.time(
+                    hour=self.settings.spark_hour, tzinfo=ZoneInfo(self.settings.tz)
+                )
+            )
+            self._spark_loop.start()
+            log.info(
+                "spark scheduled daily at %02d:00 %s", self.settings.spark_hour, self.settings.tz
             )
         # Always scheduled, unconditionally — DM delivery needs no channel or feeds pre-configured.
         # run_personal_digest_job self-gates on "no feeds" the same way run_gigabrain_suggestion
@@ -736,6 +771,25 @@ class RogerClient(discord.Client):
 
     @_digest_loop.before_loop
     async def _before_digest(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=7))
+    async def _spark_loop(self) -> None:
+        result = await run_spark_job(
+            client=self, settings=self.settings, llm=self.llm, store=self.store
+        )
+        status = str(result.get("status", ""))
+        log.info("scheduled spark: %s", status)
+        problem = _spark_problem(status)
+        if problem:
+            await self._ops.alert(
+                f"spark:{time.strftime('%Y-%m-%d')}",
+                f"⚠️ **spark problem** — {problem}",
+                cooldown_s=_DAY_S,
+            )
+
+    @_spark_loop.before_loop
+    async def _before_spark(self) -> None:
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=7))

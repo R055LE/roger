@@ -1404,3 +1404,28 @@ async def test_list_scheduled_events_reports_current_events():
     assert out["events"][0]["name"] == "Movie Night"
     assert out["events"][0]["location"] == "stage"
     assert out["events"][0]["status"] == "scheduled"
+
+
+async def test_run_spark_without_context_reports_unavailable():
+    from roger.tools.executors import RunSparkArgs, run_spark
+
+    result = await run_spark(guild=None, args=RunSparkArgs(), ctx=None)
+    assert result["status"] == "spark unavailable in this context"
+
+
+async def test_run_spark_delegates_to_run_spark_job(monkeypatch):
+    from roger.tools.context import ToolContext
+    from roger.tools.executors import RunSparkArgs, run_spark
+
+    captured = {}
+
+    async def fake_run_spark_job(*, client, settings, llm, store):
+        captured["called"] = True
+        return {"status": "posted", "title": "x"}
+
+    monkeypatch.setattr("roger.brains.spark.run_spark_job", fake_run_spark_job)
+
+    ctx = ToolContext(llm="llm", store="store", settings="settings", client="client")
+    result = await run_spark(guild=None, args=RunSparkArgs(), ctx=ctx)
+    assert captured["called"] is True
+    assert result == {"status": "posted", "title": "x"}

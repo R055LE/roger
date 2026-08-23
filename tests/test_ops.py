@@ -6,6 +6,7 @@ from roger.bot import (
     _digest_problem,
     _gigabrain_problem,
     _personal_digest_problem,
+    _spark_problem,
 )
 
 
@@ -114,3 +115,17 @@ def test_gigabrain_problem_flags_failures():
     assert _gigabrain_problem("DM failed; suggestion not delivered") is not None
     assert _gigabrain_problem("guild 9 not visible") is not None
     assert _gigabrain_problem("error running suggestion") is not None
+
+
+def test_spark_problem_none_for_success_statuses():
+    assert _spark_problem("posted") is None
+    assert _spark_problem("no new items") is None
+
+
+def test_spark_problem_flags_failures():
+    assert _spark_problem("budget exceeded; skipped") is not None
+    assert _spark_problem("spark channel 42 not found") is not None
+    assert _spark_problem("spark brain not configured (no models)") is not None
+    assert _spark_problem("unparseable response; skipped") is not None
+    assert _spark_problem("delivery failed; not posted") is not None
+    assert _spark_problem("spark not configured (SPARK_CHANNEL_ID unset)") is not None

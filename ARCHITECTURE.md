@@ -11,7 +11,7 @@ turns.
 ## §1 Overview
 
 Roger is a **single-guild, owner-gated Discord assistant** built on hosted models via OpenRouter.
-It runs as one process with four independent **brains**, chosen entirely by *who* is talking and
+It runs as one process with five independent **brains**, chosen entirely by *who* is talking and
 *where*:
 
 | Brain | Purpose | Tools | Who |
@@ -19,6 +19,7 @@ It runs as one process with four independent **brains**, chosen entirely by *who
 | **Admin** (§6) | Server concierge — creates channels/roles, sets permissions, curates feeds | Yes | Owner only |
 | **Ambient** (§8) | Deadpan chat persona | None | Anyone |
 | **Digest** (§9) | Scheduled RSS/Atom summary | n/a (scheduled) | — |
+| **Spark** (§9) | Scheduled grounded item spotlight and discussion question | None | n/a |
 | **Giga Brain** (§12) | Deep, occasional strategic analysis — reviews server state, proposes ideas, never acts | Read-only subset | Owner only |
 
 No agent framework. The admin brain is a hand-rolled tool loop (§6) so every step is inspectable
@@ -94,8 +95,9 @@ These hold regardless of what any model outputs. They are the load-bearing part 
 All settings load from the process environment via `pydantic-settings` (`roger/config.py`), injected
 at runtime by `sops exec-env`. Nothing is read from a committed file. Notable shapes:
 
-- `MODEL_ADMIN` / `MODEL_AMBIENT` / `MODEL_DIGEST` are **comma-separated priority chains** — primary
-  first, the rest are OpenRouter fallbacks. Every model in the admin chain must support tool calling.
+- `MODEL_ADMIN` / `MODEL_AMBIENT` / `MODEL_DIGEST` / `MODEL_SPARK` are **comma-separated priority
+  chains**. The primary comes first, followed by OpenRouter fallbacks. Every model in the admin
+  chain must support tool calling.
 - `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host is an env change.
 - `DIGEST_FEEDS` seeds the feed list **once** (§9); after that the store owns it.
 
@@ -104,7 +106,7 @@ at runtime by `sops exec-env`. Nothing is read from a committed file. Notable sh
 One `asyncio` process (`python -m roger`). Non-root, read-only root filesystem, `/tmp` on tmpfs,
 one writable bind mount at `/data` for the SQLite DB. Structured JSON logs to stdout
 (`_JsonFormatter`); discord.py's gateway chatter is pinned to WARNING. `discord.py`'s
-`ext.tasks` drives the daily digest loop (§9).
+`ext.tasks` drives the daily digest and Spark loops (§9).
 
 ## §5 Dispatch & routing
 
@@ -185,6 +187,7 @@ Registry:
 | `reply_to_forum_post` | side effect (mass mentions suppressed) | **yes** (§2.8) |
 | `move_channel` | yes (reorder a channel/category — position only) | **yes** (§2.8) |
 | `run_digest` | side effect | no |
+| `run_spark` | side effect | no |
 | `list_feeds` | no | — |
 | `suggest_feeds` | no (validates only) | — |
 | `add_feed` | yes | no |
@@ -248,10 +251,11 @@ never touches the admin path.
 Roger's emerging character (and where a future personality pass would steer it) is logged in
 [`docs/personality.md`](docs/personality.md) — tone only; it never loosens §2/§7/§8.
 
-## §9 Digest brain
+## §9 Digest and Spark brains
 
 A scheduled RSS/Atom summary, on a daily `tasks.loop` fired at `DIGEST_HOUR` in `TZ`, also
-triggerable via the `run_digest` tool. There is **no user input anywhere in this path**.
+triggerable via the `run_digest` tool. No Discord message input enters this path. Feed content is
+external and untrusted.
 
 - **Feed list is store-owned.** `DIGEST_FEEDS` seeds the `feeds` table **once** on first run
   (`seed_feeds_if_empty`); after that Roger curates it live via `suggest_feeds` / `add_feed` /
@@ -277,6 +281,16 @@ triggerable via the `run_digest` tool. There is **no user input anywhere in this
   whichever job runs first that day (personal digest defaults to `PERSONAL_DIGEST_HOUR=7`, before
   the public digest's `DIGEST_HOUR=8`). Don't add the same feed to both lists if you want it in
   both digests.
+- **Spark posts one grounded item.** `run_spark_job` reuses the public `feeds` list and
+  `_collect_new`, then asks its own tool-free model identity to pick one item and write a short
+  blurb and question. Candidate titles and summaries are bounded and encoded as JSON data. The
+  response must match `ITEM:` / `BLURB:` / `QUESTION:` exactly. Public output is length-bounded,
+  mentions are suppressed, and only HTTP(S) item links without embedded credentials are accepted.
+  A malformed response or failed delivery posts nothing and leaves the item eligible for retry.
+- **Spark runs before the roundup.** Its chosen item is marked seen only after a successful post.
+  `SPARK_HOUR=7` defaults before `DIGEST_HOUR=8`, so the later roundup does not repeat the item.
+  Other candidates remain unseen. An unset `SPARK_CHANNEL_ID` disables the loop; there is no DM
+  fallback because the feature needs a public audience.
 
 ## §10 Persistence
 
@@ -287,7 +301,7 @@ behaviour adds rows, not migrations.
 |---|---|
 | `audit` | Every admin action + gate rejection — the tamper-evident trail |
 | `usage` | Daily token spend per brain — drives the budget gate (§11) |
-| `seen` | `(feed_url, entry_id)` dedupe keys for the digest (§9) |
+| `seen` | `(feed_url, entry_id)` dedupe keys for Digest and Spark (§9) |
 | `ambient_log` | Ambient own-thread memory, per user+channel (§8) |
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |
@@ -313,8 +327,8 @@ Limits at a glance (defaults; all env-overridable):
 
 | Control | Default |
 |---|---|
-| Daily tokens — admin / ambient / digest / gigabrain | 150k / 40k / 30k / 100k |
-| Daily USD — admin / ambient / digest / gigabrain | off / off / off / off (0 = disabled) |
+| Daily tokens — admin / ambient / digest / spark / gigabrain | 150k / 40k / 30k / 30k / 100k |
+| Daily USD — admin / ambient / digest / spark / gigabrain | off / off / off / off / off (0 = disabled) |
 | Tool calls per admin request | 10 |
 | Model round-trips per admin request | 14 |
 | Tool calls / round-trips per gigabrain request | 10 / 14 |

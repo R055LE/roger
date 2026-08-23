@@ -6,7 +6,7 @@ Nothing is read from a committed file — see the security posture in the README
 
 from __future__ import annotations
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,12 +35,14 @@ class Settings(BaseSettings):
     model_ambient: str = ""
     model_digest: str = ""
     model_gigabrain: str = ""
+    model_spark: str = ""
 
     # --- budgets (daily in+out tokens per brain) ---
     daily_tokens_admin: int = 150_000
     daily_tokens_ambient: int = 40_000
     daily_tokens_digest: int = 30_000
     daily_tokens_gigabrain: int = 100_000
+    daily_tokens_spark: int = 30_000
 
     # --- budgets (daily USD, layered on top of the token caps above) ---
     # 0 = disabled (opt-in); set to a real figure once OpenRouter cost data looks right for your
@@ -51,6 +53,7 @@ class Settings(BaseSettings):
     daily_usd_ambient: float = 0.0
     daily_usd_digest: float = 0.0
     daily_usd_gigabrain: float = 0.0
+    daily_usd_spark: float = 0.0
 
     # --- admin tool loop bounds (§2.9) ---
     admin_max_tool_calls: int = 10
@@ -84,6 +87,11 @@ class Settings(BaseSettings):
     personal_digest_channel_id: int | None = None
     personal_digest_hour: int = 7
 
+    # --- spark (no feed list of its own — reuses digest_feeds). Required channel, no DM
+    # fallback: a discussion prompt needs an audience. ---
+    spark_channel_id: int | None = None
+    spark_hour: int = Field(default=7, ge=0, le=23)
+
     # --- ops ---
     # where Roger posts its boot self-report; None disables the report (logs still fire).
     ops_channel_id: int | None = None
@@ -102,6 +110,7 @@ class Settings(BaseSettings):
         "ops_channel_id",
         "gigabrain_channel_id",
         "personal_digest_channel_id",
+        "spark_channel_id",
         mode="before",
     )
     @classmethod
@@ -126,6 +135,10 @@ class Settings(BaseSettings):
     @property
     def gigabrain_models(self) -> list[str]:
         return _split_csv(self.model_gigabrain)
+
+    @property
+    def spark_models(self) -> list[str]:
+        return _split_csv(self.model_spark)
 
     @property
     def feeds(self) -> list[str]:

@@ -23,28 +23,20 @@ spec](docs/superpowers/specs/2026-08-18-personal-digest-design.md).
 *Why it's first:* smallest of the four, reuses infrastructure that already exists and is already
 tested, and is the most direct fix for the stated pain.
 
-## 2. Proactive public content ("Spark") — **L** — *idea only*
+## 2. Proactive public content ("Spark") — **L** — *shipped*
 
 The flagship. A new scheduled capability that posts unprompted to a public channel to spark
 discussion — reacting to real fetched items (AI/tech headlines, story recs, art highlights, open
 questions), not free-generated commentary that could confidently state something wrong. Same risk
-shape as Digest (§9 of `ARCHITECTURE.md`): scheduled, no user in the path, posts a message, nothing
-destructive.
+shape as Digest (§9 of `ARCHITECTURE.md`): scheduled, no Discord message input in the path, posts a
+message, nothing destructive. Feed content is bounded as untrusted data, the model has no tools,
+and public output is strictly parsed and sanitized. See
+[ADR-0011](docs/decisions/0011-spark-grounded-discussion-prompts.md).
 
-Needs its own design pass — content grounding, cadence, tone, and probably its own ADR given it's a
-new class of unprompted public output. Not spec'd yet.
+## 3. Model allocation pass — **S** — *shipped*
 
-*Why it's not first:* biggest unknown, and the personal digest's grounding-vs-hallucination question
-(item 1) is a smaller version of the same problem worth solving first.
-
-## 3. Model allocation pass — **S** — *idea only*
-
-Give content-generation brains (Spark once it exists, Giga Brain now) their own tuned/creative model
-chain distinct from admin's tool-calling chain. There's real headroom to do this — Giga Brain's spend
-has been low. Mostly config + evaluation, not new code.
-
-*Why it's not standalone:* rides along with items 1 and 2 rather than being picked up on its own —
-worth doing once there's actual creative-generation output to tune against.
+Spark and Giga Brain each have their own model chain, token cap, and optional dollar cap, distinct
+from admin's tool-calling chain. Spark shipped the last missing allocation with item 2.
 
 ## 4. Parked — self-serve commands for other members
 

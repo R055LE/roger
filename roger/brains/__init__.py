@@ -1,1 +1,1 @@
-"""The three brains: admin (tools), ambient (chat), digest (scheduled)."""
+"""Roger's five brains: admin, ambient, digest, spark, and gigabrain."""
