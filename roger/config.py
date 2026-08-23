@@ -6,7 +6,7 @@ Nothing is read from a committed file — see the security posture in the README
 
 from __future__ import annotations
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -90,7 +90,7 @@ class Settings(BaseSettings):
     # --- spark (no feed list of its own — reuses digest_feeds). Required channel, no DM
     # fallback: a discussion prompt needs an audience. ---
     spark_channel_id: int | None = None
-    spark_hour: int = 7
+    spark_hour: int = Field(default=7, ge=0, le=23)
 
     # --- ops ---
     # where Roger posts its boot self-report; None disables the report (logs still fire).

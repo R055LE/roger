@@ -1,8 +1,9 @@
 # AGENTS.md: roger
 
-A single-guild, owner-gated Discord assistant on OpenRouter. One process, four
+A single-guild, owner-gated Discord assistant on OpenRouter. One process, five
 independent brains chosen by who is talking and where: Admin (owner, has tools),
-Ambient (anyone, no tools), Digest (scheduled), Giga Brain (owner, read-only).
+Ambient (anyone, no tools), Digest (scheduled), Spark (scheduled, no tools),
+Giga Brain (owner, read-only).
 
 No agent framework. The admin brain is a hand-rolled tool loop so every step is
 inspectable and bounded.

@@ -19,6 +19,9 @@ class _FakeChannel:
     def permissions_for(self, member):
         return self._perms
 
+    async def send(self, **kwargs):
+        pass
+
 
 def _fake_guild(name="Live Guild", channels=None, perms=FULL_PERMS):
     channels = channels or {}
@@ -72,6 +75,16 @@ def test_unreachable_channels_flags_a_missing_spark_channel():
     assert "spark channel 42 not found" in problems[0]
 
 
+def test_unreachable_channels_flags_a_non_messageable_spark_channel():
+    channel = SimpleNamespace(
+        name="category",
+        permissions_for=lambda member: discord.Permissions(FULL_PERMS),
+    )
+    guild = _fake_guild(channels={42: channel})
+    settings = SimpleNamespace(spark_channel_id=42)
+    assert _unreachable_channels(guild, settings) == ["spark channel #category is not postable"]
+
+
 def test_unreachable_channels_empty_when_nothing_configured_or_everything_reachable():
     guild = _fake_guild(channels={42: _FakeChannel()})
     settings = SimpleNamespace(digest_channel_id=42, ops_channel_id=None, gigabrain_channel_id=None)
@@ -90,6 +103,8 @@ def test_format_status_renders_perms_usage_feeds_and_actions():
         recent_audit=[{"ts": 0, "tool": "create_channel", "status": "ok", "detail": None}],
         digest_hour=8,
         digest_configured=True,
+        spark_hour=7,
+        spark_configured=True,
         tz="UTC",
     )
     assert "permissions: OK" in body
@@ -97,7 +112,8 @@ def test_format_status_renders_perms_usage_feeds_and_actions():
     assert "12,345 / 150,000" in body
     assert "$0.0123" in body  # per-brain cost
     assert "total" in body and "$0.0143" in body  # summed across brains
-    assert "feeds: 3" in body and "08:00 UTC" in body
+    assert "feeds: 3" in body and "digest: 08:00 UTC" in body
+    assert "spark: 07:00 UTC" in body
     assert "00:00  create_channel" in body  # epoch ts rendered in the given tz
 
 
@@ -113,10 +129,13 @@ def test_format_status_flags_missing_perms_and_unconfigured_digest():
         recent_audit=[],
         digest_hour=8,
         digest_configured=False,
+        spark_hour=7,
+        spark_configured=False,
         tz="UTC",
     )
     assert "permissions: MISSING: Manage Roles" in body
     assert "digest: unconfigured" in body
+    assert "spark: unconfigured" in body
 
 
 def test_format_status_flags_channel_problems():
@@ -131,6 +150,8 @@ def test_format_status_flags_channel_problems():
         recent_audit=[],
         digest_hour=8,
         digest_configured=True,
+        spark_hour=7,
+        spark_configured=False,
         tz="UTC",
     )
     assert "channels: gigabrain check-in channel 555 not found" in body
@@ -150,6 +171,8 @@ def test_format_status_includes_audit_detail_when_present():
         ],
         digest_hour=8,
         digest_configured=True,
+        spark_hour=7,
+        spark_configured=False,
         tz="UTC",
     )
     assert "set_permissions" in body and "denied (owner denied)" in body
@@ -161,13 +184,17 @@ def _settings(**over):
         daily_tokens_admin=150000,
         daily_tokens_ambient=40000,
         daily_tokens_digest=30000,
+        daily_tokens_spark=30000,
         daily_tokens_gigabrain=100000,
         daily_usd_admin=0.0,
         daily_usd_ambient=0.0,
         daily_usd_digest=0.0,
+        daily_usd_spark=0.0,
         daily_usd_gigabrain=0.0,
         digest_hour=8,
         digest_channel_id=42,
+        spark_hour=7,
+        spark_channel_id=None,
         tz="UTC",
     )
     base.update(over)
@@ -178,6 +205,7 @@ async def test_gather_status_reads_live_store(tmp_path):
     store = await Store(str(tmp_path / "s.db")).open()
     try:
         await store.add_usage("admin", 100, 50, cost_usd=0.0075)  # 150 in+out
+        await store.add_usage("spark", 20, 10, cost_usd=0.001)
         await store.add_feed("http://a", "A")
         await store.record_audit(
             actor_id=1, brain="admin", tool="create_channel", args=None,
@@ -190,6 +218,7 @@ async def test_gather_status_reads_live_store(tmp_path):
         assert "channels: OK" in body  # digest_channel_id=42 resolves and is postable
         assert "150 / 150,000" in body
         assert "$0.0075" in body  # OpenRouter-reported cost surfaced from the live store
+        assert "spark" in body and "30 / 30,000" in body
         assert "feeds: 1" in body
         assert "create_channel" in body
     finally:
@@ -233,6 +262,8 @@ def test_format_status_shows_usd_cap_when_configured():
         recent_audit=[],
         digest_hour=8,
         digest_configured=True,
+        spark_hour=7,
+        spark_configured=False,
         tz="UTC",
     )
     assert "$0.5000 / $2.0000" in body

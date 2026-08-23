@@ -3,7 +3,7 @@
 Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped commands, the
 owner gate with audit logging, and message routing. Owner requests (via ``/roger``, a DM, or an
 @mention) go to the admin brain, which keeps short per-channel memory; ``/chat`` and non-owner chat
-go to the ambient brain; a scheduled digest posts on its own loop.
+go to the ambient brain; Digest and Spark post on their own scheduled loops.
 """
 
 from __future__ import annotations
@@ -255,6 +255,9 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
         if channel is None:
             problems.append(f"{label} channel {channel_id} not found")
             continue
+        if not callable(getattr(channel, "send", None)):
+            problems.append(f"{label} channel #{channel.name} is not postable")
+            continue
         perms = channel.permissions_for(guild.me)
         if not perms.view_channel or not perms.send_messages:
             problems.append(f"{label} channel #{channel.name} not postable (missing view/send)")
@@ -263,7 +266,7 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
 
 # --------------------------------------------------------------------------- status & ops
 
-_BRAINS = ("admin", "ambient", "digest", "gigabrain")
+_BRAINS = ("admin", "ambient", "digest", "spark", "gigabrain")
 
 
 def _daily_caps(settings: Settings) -> dict[str, int]:
@@ -272,6 +275,7 @@ def _daily_caps(settings: Settings) -> dict[str, int]:
         "admin": settings.daily_tokens_admin,
         "ambient": settings.daily_tokens_ambient,
         "digest": settings.daily_tokens_digest,
+        "spark": settings.daily_tokens_spark,
         "gigabrain": settings.daily_tokens_gigabrain,
     }
 
@@ -282,6 +286,7 @@ def _daily_usd_caps(settings: Settings) -> dict[str, float]:
         "admin": settings.daily_usd_admin,
         "ambient": settings.daily_usd_ambient,
         "digest": settings.daily_usd_digest,
+        "spark": settings.daily_usd_spark,
         "gigabrain": settings.daily_usd_gigabrain,
     }
 
@@ -324,6 +329,8 @@ def _format_status(
     recent_audit: list[dict[str, Any]],
     digest_hour: int,
     digest_configured: bool,
+    spark_hour: int,
+    spark_configured: bool,
     tz: str,
     usd_caps: dict[str, float] | None = None,
 ) -> str:
@@ -350,7 +357,8 @@ def _format_status(
         )
     lines.append(f"  {'total':<29}  ${total_cost:.4f}")
     digest = f"{digest_hour:02d}:00 {tz}" if digest_configured else "unconfigured"
-    lines.append(f"feeds: {feeds_count}   digest: {digest}")
+    spark = f"{spark_hour:02d}:00 {tz}" if spark_configured else "unconfigured"
+    lines.append(f"feeds: {feeds_count}   digest: {digest}   spark: {spark}")
     if recent_audit:
         lines.append("recent actions:")
         for row in recent_audit:
@@ -384,6 +392,8 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         recent_audit=await store.fetch_audit(limit=8),
         digest_hour=settings.digest_hour,
         digest_configured=settings.digest_channel_id is not None,
+        spark_hour=settings.spark_hour,
+        spark_configured=settings.spark_channel_id is not None,
         tz=settings.tz,
     )
 

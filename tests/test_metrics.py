@@ -17,10 +17,12 @@ def _settings():
         daily_tokens_admin=150_000,
         daily_tokens_ambient=40_000,
         daily_tokens_digest=30_000,
+        daily_tokens_spark=30_000,
         daily_tokens_gigabrain=100_000,
         daily_usd_admin=0.0,
         daily_usd_ambient=0.0,
         daily_usd_digest=0.0,
+        daily_usd_spark=0.0,
         daily_usd_gigabrain=0.0,
     )
 
@@ -41,6 +43,7 @@ async def test_refresh_populates_gauges_from_the_store(tmp_path):
         assert get("roger_tokens_today", {"brain": "admin"}) == 150
         assert get("roger_cost_usd_today", {"brain": "admin"}) == 0.0123
         assert get("roger_tokens_cap", {"brain": "admin"}) == 150_000
+        assert get("roger_tokens_cap", {"brain": "spark"}) == 30_000
         assert get("roger_tokens_cap", {"brain": "gigabrain"}) == 100_000
         assert get("roger_feeds") == 1
         assert get("roger_audit_events", {"tool": "create_channel", "status": "ok"}) == 1

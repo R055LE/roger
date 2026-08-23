@@ -126,3 +126,11 @@ def test_spark_model_chain_is_parsed_to_list(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("MODEL_SPARK", "a/b, c/d")
     assert Settings().spark_models == ["a/b", "c/d"]
+
+
+@pytest.mark.parametrize("hour", ["-1", "24"])
+def test_spark_hour_must_be_a_clock_hour(monkeypatch, hour):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("SPARK_HOUR", hour)
+    with pytest.raises(ValidationError):
+        Settings()

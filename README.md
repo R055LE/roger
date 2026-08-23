@@ -4,7 +4,7 @@ An [OpenRouter](https://openrouter.ai)-backed Discord bot — the spiritual succ
 [`roger-bot`](https://github.com/R055LE/roger-bot), my first-ever programming project. Same
 character, rebuilt from scratch on hosted models and modern tooling.
 
-Roger is a single-guild, owner-gated Discord assistant with four separate "brains":
+Roger is a single-guild, owner-gated Discord assistant with five separate "brains":
 
 - **Admin** — an owner-only server concierge, reachable by `/roger`, a DM, or an @mention. Ask in
   plain language ("a read-only podcast channel under Media that DJs can post in") and it creates
@@ -13,6 +13,8 @@ Roger is a single-guild, owner-gated Discord assistant with four separate "brain
 - **Ambient** — a deadpan chat persona (via `/chat`, or any non-owner @mention/DM). No tools, no
   authority.
 - **Digest** — a scheduled RSS/Atom summary posted to a channel.
+- **Spark** — a scheduled public spotlight: one bounded feed item, a short blurb, and a discussion
+  question. It has no tools and its own model budget.
 - **Giga Brain** — an owner-only, read-only strategic-analysis mode, reachable by `/gigabrain`. It
   reviews live server state and reasons about it — never acts. Optionally also checks in on its
   own on a configurable interval, DMing the owner unprompted suggestions.
@@ -32,6 +34,8 @@ Security is structural, not prompt-deep:
   access is granted through channel overwrites. No delete, kick, ban, or purge tools exist — Roger
   creates and adjusts, never destroys, and every change to existing state is owner-confirmed.
 - **Budgeted.** Per-brain daily token caps and a hard cap on tool calls per request.
+- **Untrusted feed output is bounded.** Spark treats feed fields as quoted data, strictly parses the
+  model response, accepts only HTTP(S) item links, and suppresses Discord mentions on delivery.
 - **No secrets in git — ever, not even encrypted.** Secrets live in a `sops`+`age`-encrypted
   `roger.env` on the host; the repo carries only `.sops.yaml` and `roger.env.example`.
 - **Signed, scanned supply chain.** CI audits deps (`pip-audit`) and scans the image (Trivy, build →
@@ -115,9 +119,11 @@ Feature-complete across the planned phases:
   now`), deduped so nothing posts twice. Roger curates its own feed list: `DIGEST_FEEDS` seeds it
   once, then Roger validates candidates against the live web and adds or drops them on request.
   A second, privately-curated feed list can also be DM'd to the owner only
-  (`PERSONAL_DIGEST_FEEDS`), on its own schedule.
+  (`PERSONAL_DIGEST_FEEDS`), on its own schedule. Spark spotlights one item from the public feed
+  list each day with a discussion question instead of a roundup (`SPARK_CHANNEL_ID`, also
+  triggerable via `/roger run spark now`).
 
-Runs as a non-root, read-only-rootfs container. ~275 tests cover the guard rules, the tool loop
+Runs as a non-root, read-only-rootfs container. More than 300 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder
 tools), the rate limiter, and the digest and feed-curation paths.
 

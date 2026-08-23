@@ -1,6 +1,6 @@
 # Backlog
 
-Roger is feature-complete for its stated scope (see [`README.md`](README.md) → Status): three brains,
+Roger is feature-complete for its stated scope (see [`README.md`](README.md) → Status): five brains,
 the bounded admin tool loop, feed curation, `/status`, and the boot self-report all ship and are
 tested. This backlog is therefore **not** a feature wishlist — it's the production-hardening layer
 that separates "runs on my homelab" from "portfolio-grade LLM service," ordered by value-for-effort.
