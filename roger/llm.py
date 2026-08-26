@@ -15,6 +15,7 @@ from typing import Any
 
 from openai import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AsyncOpenAI,
     InternalServerError,
@@ -163,6 +164,41 @@ class LLM:
                 cost_usd=float(getattr(usage, "cost", 0.0) or 0.0),
             )
         return response
+
+    async def preflight(self) -> list[str]:
+        """OpenRouter key + configured model chains, checked once at boot (§11, BACKLOG 4.2).
+
+        Nothing else validates these until the first real call fails — possibly days after a typo'd
+        env value shipped. Both checks are plain GETs: no completion call, no token/$ spend.
+        """
+        problems: list[str] = []
+        try:
+            await self._client.get("/key", cast_to=object)
+        except APIStatusError as exc:
+            problems.append(f"OpenRouter key rejected: {exc.message}")
+        except APIConnectionError as exc:
+            problems.append(f"OpenRouter key check failed: {exc}")
+
+        configured = {
+            (brain, model_id) for brain, chain in self._chains.items() for model_id in chain
+        }
+        if not configured:
+            return problems
+
+        try:
+            response = await self._client.get("/models", cast_to=object)
+        except APIStatusError as exc:
+            problems.append(f"OpenRouter model catalog fetch failed: {exc.message}")
+            return problems
+        except APIConnectionError as exc:
+            problems.append(f"OpenRouter model catalog fetch failed: {exc}")
+            return problems
+
+        catalog = {row.get("id") for row in response.get("data", [])}
+        for brain, model_id in sorted(configured):
+            if model_id not in catalog:
+                problems.append(f"MODEL_{brain.upper()}: {model_id!r} not in OpenRouter's catalog")
+        return problems
 
     async def _call_with_retries(self, kwargs: dict[str, Any]) -> Any:
         for attempt in range(MAX_ATTEMPTS):

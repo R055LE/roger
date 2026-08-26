@@ -212,14 +212,18 @@ cycle. Env stays the seed/default; the store owns the live value once set (the s
 owns it" pattern the feed list already uses). Keeps secrets in env; only non-secret operational knobs
 move to the store.
 
-### 4.2 Config preflight at boot — **S** — *channel reachability shipped; OpenRouter part remains*
+### 4.2 Config preflight at boot — **S** — *shipped*
 Two distinct gaps under one label. **Channel reachability** (which configured channel IDs —
 `digest_channel_id`, `ops_channel_id`, `gigabrain_channel_id` — Roger can actually see and post in,
 not just whether the guild-level role permission is granted) is shipped: `_unreachable_channels`
 runs at boot (folded into the boot self-report) and every watchdog tick, the same treatment
-`_missing_permissions` already got. **Still open:** nothing validates the OpenRouter key or the
-configured model IDs until the first real call fails — a lightweight preflight (validate the key,
-resolve the model chains against OpenRouter's model list) reported the same way would close this.
+`_missing_permissions` already got. **OpenRouter key + model IDs** is shipped too: `LLM.preflight()`
+does a `GET /key` (catches a rejected key) and, if any brain has a model configured, a `GET /models`
+resolved against every entry in every brain's chain — both plain GETs, no completion call or spend.
+Folded into the boot header the same way, but boot-only, not on the watchdog or `/status`: unlike a
+Discord channel, `OPENROUTER_API_KEY`/`MODEL_*` are env-sourced and frozen for the process's life, so
+re-polling them on a timer can't catch anything new, and `/status` is documented as a deterministic,
+no-spend readout that shouldn't start depending on OpenRouter's API being reachable at query time.
 
 ### 4.3 Periodic feed-health check — **S**
 `suggest_feeds` / `add_feed` validate a feed *at add time*, but a feed can go dead later and silently
