@@ -4,7 +4,14 @@ FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9
 
 # Non-root runtime user with a fixed uid/gid so the host can chown the bind-mounted /data
 # to match. The app writes only to /data (volume) and /tmp (tmpfs), so the rootfs is read-only.
-RUN groupadd --system --gid 10001 roger \
+#
+# APT_CACHE_BUST (release.yml sets it per workflow run) forces `apt-get update` to actually re-run
+# instead of reusing a GHA-cached layer — otherwise a Debian security patch that lands between base-
+# image digest bumps never reaches the image: the layer's cache key is just this RUN's literal text,
+# which doesn't change on its own between digest bumps.
+ARG APT_CACHE_BUST=0
+RUN echo "apt cache bust: ${APT_CACHE_BUST}" \
+ && groupadd --system --gid 10001 roger \
  && useradd --system --uid 10001 --gid 10001 --home-dir /app --no-create-home roger \
  && apt-get update \
  && apt-get upgrade -y \
