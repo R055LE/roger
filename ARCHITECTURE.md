@@ -323,6 +323,14 @@ missing/empty model chain raises `LLMConfigError`, which callers turn into a pla
 reply rather than a crash. Real spend is additionally bounded off-box by the OpenRouter key's own
 credit limit.
 
+`LLM.preflight()` runs once at boot (folded into the boot self-report, BACKLOG 4.2): a `GET /key`
+confirms the configured key is actually accepted, and — if any brain has a model configured — a
+`GET /models` confirms every model ID in every brain's chain resolves in OpenRouter's catalog.
+Neither call spends a token; both exist so a typo'd key or model ID surfaces at boot instead of on
+the first real request, possibly days later. It's boot-only by design, not re-checked on the
+watchdog or `/status`: env values can't drift without a restart, so polling them on a timer buys
+nothing.
+
 Limits at a glance (defaults; all env-overridable):
 
 | Control | Default |

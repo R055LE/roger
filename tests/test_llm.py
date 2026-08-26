@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from openai import APIConnectionError
+from openai import APIConnectionError, APIStatusError
 
 from roger.config import Settings
 from roger.llm import LLM, MAX_ATTEMPTS, BudgetExceeded, LLMConfigError, _retry_after_seconds
@@ -234,6 +234,116 @@ async def test_missing_cost_field_defaults_to_zero(monkeypatch, tmp_path):
         await llm.complete("admin", [{"role": "user", "content": "hi"}])
         assert await store.usage_today("admin") == 30
         assert await store.cost_today("admin") == 0.0
+    finally:
+        await store.close()
+
+
+async def test_preflight_ok_when_key_and_all_configured_models_resolve(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_ADMIN="a/b", MODEL_AMBIENT="a/b,c/d")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+
+        async def fake_get(path, **_kwargs):
+            if path == "/key":
+                return {"data": {"label": "test"}}
+            assert path == "/models"
+            return {"data": [{"id": "a/b"}, {"id": "c/d"}]}
+
+        monkeypatch.setattr(llm._client, "get", fake_get)
+        assert await llm.preflight() == []
+    finally:
+        await store.close()
+
+
+async def test_preflight_flags_a_rejected_key(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_ADMIN="a/b")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        resp = httpx.Response(401, request=_REQUEST)
+
+        async def fake_get(path, **_kwargs):
+            if path == "/key":
+                raise APIStatusError("Error code: 401", response=resp, body=None)
+            return {"data": [{"id": "a/b"}]}
+
+        monkeypatch.setattr(llm._client, "get", fake_get)
+        problems = await llm.preflight()
+        assert any("OpenRouter key rejected" in p for p in problems)
+    finally:
+        await store.close()
+
+
+async def test_preflight_flags_a_key_check_connection_failure(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_ADMIN="a/b")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+
+        async def fake_get(path, **_kwargs):
+            if path == "/key":
+                raise APIConnectionError(request=_REQUEST)
+            return {"data": [{"id": "a/b"}]}
+
+        monkeypatch.setattr(llm._client, "get", fake_get)
+        problems = await llm.preflight()
+        assert any("OpenRouter key check failed" in p for p in problems)
+    finally:
+        await store.close()
+
+
+async def test_preflight_flags_a_model_not_in_the_catalog(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_ADMIN="a/bogus,a/b")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+
+        async def fake_get(path, **_kwargs):
+            if path == "/key":
+                return {"data": {}}
+            return {"data": [{"id": "a/b"}]}
+
+        monkeypatch.setattr(llm._client, "get", fake_get)
+        problems = await llm.preflight()
+        assert len(problems) == 1
+        assert "MODEL_ADMIN" in problems[0] and "a/bogus" in problems[0]
+    finally:
+        await store.close()
+
+
+async def test_preflight_flags_a_model_catalog_fetch_failure(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_ADMIN="a/b")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+
+        async def fake_get(path, **_kwargs):
+            if path == "/key":
+                return {"data": {}}
+            raise APIConnectionError(request=_REQUEST)
+
+        monkeypatch.setattr(llm._client, "get", fake_get)
+        problems = await llm.preflight()
+        assert any("model catalog fetch failed" in p for p in problems)
+    finally:
+        await store.close()
+
+
+async def test_preflight_skips_the_catalog_call_when_nothing_is_configured(monkeypatch, tmp_path):
+    _env(monkeypatch)  # no MODEL_* set for any brain
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        calls = []
+
+        async def fake_get(path, **_kwargs):
+            calls.append(path)
+            return {"data": {}}
+
+        monkeypatch.setattr(llm._client, "get", fake_get)
+        assert await llm.preflight() == []
+        assert calls == ["/key"]  # /models never fetched — nothing to check it against
     finally:
         await store.close()
 

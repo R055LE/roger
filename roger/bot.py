@@ -291,14 +291,17 @@ def _daily_usd_caps(settings: Settings) -> dict[str, float]:
     }
 
 
-def _boot_header(version: str, missing: list[str], channel_problems: list[str]) -> str:
+def _boot_header(
+    version: str, missing: list[str], channel_problems: list[str], openrouter_problems: list[str]
+) -> str:
     """Header of the boot self-report (pure): health glyph + the deployed build.
 
     The full state block — permissions, token/dollar spend, digest schedule, recent actions — is
     rendered separately by ``gather_status`` and appended under this header, so the ops channel gets
     a complete snapshot on every deploy instead of a bare "online" line. A missing required scope
     adds an actionable re-invite hint here (it's the one thing you must fix by hand off-box); an
-    unreachable configured channel gets its own line for the same reason.
+    unreachable configured channel, or a bad OpenRouter key/model ID, gets its own line for the same
+    reason — all three are things you'd otherwise only discover when a feature silently fails later.
     """
     lines = []
     if missing:
@@ -308,6 +311,8 @@ def _boot_header(version: str, missing: list[str], channel_problems: list[str]) 
         )
     if channel_problems:
         lines.append("Channel config: " + "; ".join(channel_problems))
+    if openrouter_problems:
+        lines.append("OpenRouter config: " + "; ".join(openrouter_problems))
     if lines:
         return f"⚠️ **roger online** · `{version}`\n" + "\n".join(lines)
     return f"✅ **roger online** · `{version}`"
@@ -657,7 +662,10 @@ class RogerClient(discord.Client):
         channel_problems = _unreachable_channels(guild, self.settings)
         if channel_problems:
             log.warning("configured channel problems: %s", "; ".join(channel_problems))
-        header = _boot_header(ROGER_VERSION[:12], missing, channel_problems)
+        openrouter_problems = await self.llm.preflight()
+        if openrouter_problems:
+            log.warning("OpenRouter config problems: %s", "; ".join(openrouter_problems))
+        header = _boot_header(ROGER_VERSION[:12], missing, channel_problems, openrouter_problems)
         body = await gather_status(store=self.store, settings=self.settings, guild=guild)
         await self._post_ops(f"{header}\n```\n{body}\n```")
 

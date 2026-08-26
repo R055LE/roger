@@ -33,19 +33,24 @@ def _fake_guild(name="Live Guild", channels=None, perms=FULL_PERMS):
 
 
 def test_boot_header_ok_is_green_and_shows_the_version():
-    line = _boot_header("sha-abc1234", [], [])
+    line = _boot_header("sha-abc1234", [], [], [])
     assert "✅" in line and "roger online" in line and "sha-abc1234" in line
 
 
 def test_boot_header_warns_lists_missing_scopes_and_shows_version():
-    line = _boot_header("dev", ["Manage Channels", "Manage Roles"], [])
+    line = _boot_header("dev", ["Manage Channels", "Manage Roles"], [], [])
     assert "⚠️" in line and "Manage Channels, Manage Roles" in line
     assert "re-invite" in line and "dev" in line
 
 
 def test_boot_header_warns_on_channel_problems_even_with_full_permissions():
-    line = _boot_header("dev", [], ["digest channel 42 not found"])
+    line = _boot_header("dev", [], ["digest channel 42 not found"], [])
     assert "⚠️" in line and "digest channel 42 not found" in line
+
+
+def test_boot_header_warns_on_openrouter_problems_even_with_full_permissions():
+    line = _boot_header("dev", [], [], ["OpenRouter key rejected: bad key"])
+    assert "⚠️" in line and "OpenRouter key rejected: bad key" in line
 
 
 def test_unreachable_channels_flags_a_missing_channel():
