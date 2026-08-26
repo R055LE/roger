@@ -62,6 +62,7 @@ jobs:
           load: true
           build-args: |
             ROGER_VERSION=${{ github.sha }}
+            APT_CACHE_BUST=${{ github.run_id }}
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -90,6 +91,7 @@ jobs:
           push: true
           build-args: |
             ROGER_VERSION=${{ github.sha }}
+            APT_CACHE_BUST=${{ github.run_id }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true # signed build provenance attestation
