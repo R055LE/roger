@@ -40,6 +40,7 @@ from roger.brains.spark import run_spark_job
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
+from roger.request_context import current_request_id, request_context
 from roger.store import AuditStatus, Store
 from roger.tools import executors
 from roger.tools.context import ToolContext
@@ -82,6 +83,8 @@ class _JsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
+        if request_id := current_request_id():
+            payload["request_id"] = request_id
         return json.dumps(payload, default=str)
 
 
@@ -688,31 +691,37 @@ class RogerClient(discord.Client):
             message, owner_id=self.settings.owner_id, bot_user_id=self.user.id
         )
         if route in (Route.ADMIN_DM, Route.ADMIN_MENTION):
-            content = message.content
-            if route is Route.ADMIN_MENTION:
-                content = _strip_mentions(content)  # strip the mention first
-                if not content:
-                    return
-            reply = await self._run_admin(
-                content, message.author.id, message.channel.id, message.channel.send
-            )
-            await _send_chunked(message.channel.send, reply)
-        elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
-            content = message.content
-            if route is Route.AMBIENT_MENTION:
-                content = _strip_mentions(content)  # §5: strip the mention first
-                if not content:
-                    return
-            reply = await handle_ambient(
-                content=content,
-                user_id=message.author.id,
-                channel_id=message.channel.id,
-                llm=self.llm,
-                store=self.store,
-                limiter=self.ambient_limiter,
-            )
-            if reply:
+            with request_context():
+                content = message.content
+                if route is Route.ADMIN_MENTION:
+                    content = _strip_mentions(content)  # strip the mention first
+                    if not content:
+                        return
+                reply = await self._run_admin(
+                    content, message.author.id, message.channel.id, message.channel.send
+                )
                 await _send_chunked(message.channel.send, reply)
+        elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
+            with request_context():
+                try:
+                    content = message.content
+                    if route is Route.AMBIENT_MENTION:
+                        content = _strip_mentions(content)  # §5: strip the mention first
+                        if not content:
+                            return
+                    reply = await handle_ambient(
+                        content=content,
+                        user_id=message.author.id,
+                        channel_id=message.channel.id,
+                        llm=self.llm,
+                        store=self.store,
+                        limiter=self.ambient_limiter,
+                    )
+                    if reply:
+                        await _send_chunked(message.channel.send, reply)
+                except Exception:
+                    log.exception("ambient request failed for user %s", message.author.id)
+                    raise
 
     async def _run_admin(
         self,
@@ -950,28 +959,29 @@ def _register_commands(client: RogerClient) -> None:
 async def _handle_roger_request(
     client: RogerClient, interaction: discord.Interaction, request: str
 ) -> None:
-    user_id = interaction.user.id
+    with request_context():
+        user_id = interaction.user.id
 
-    # Owner gate (§2.3): runs before any LLM dispatch — zero tokens spent on a non-owner.
-    if user_id != client.settings.owner_id:
-        await client.store.record_audit(
-            actor_id=user_id,
-            brain="admin",
-            tool=None,
-            args={"request": request},
-            status=AuditStatus.GATE_REJECTED,
-            detail="non-owner /roger",
+        # Owner gate (§2.3): runs before any LLM dispatch — zero tokens spent on a non-owner.
+        if user_id != client.settings.owner_id:
+            await client.store.record_audit(
+                actor_id=user_id,
+                brain="admin",
+                tool=None,
+                args={"request": request},
+                status=AuditStatus.GATE_REJECTED,
+                detail="non-owner /roger",
+            )
+            await interaction.response.send_message(CANNED_DENY, ephemeral=True)
+            log.info("gate rejected /roger from non-owner %s", user_id)
+            return
+
+        # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
+        await interaction.response.defer(thinking=True)
+        reply = await client._run_admin(
+            request, user_id, interaction.channel_id, interaction.followup.send
         )
-        await interaction.response.send_message(CANNED_DENY, ephemeral=True)
-        log.info("gate rejected /roger from non-owner %s", user_id)
-        return
-
-    # Owner path. defer() up front — model + tool round-trips exceed Discord's 3s ack window.
-    await interaction.response.defer(thinking=True)
-    reply = await client._run_admin(
-        request, user_id, interaction.channel_id, interaction.followup.send
-    )
-    await _send_chunked(interaction.followup.send, reply)
+        await _send_chunked(interaction.followup.send, reply)
 
 
 async def _handle_gigabrain_request(
@@ -1012,17 +1022,22 @@ async def _handle_status(client: RogerClient, interaction: discord.Interaction) 
 async def _handle_chat(
     client: RogerClient, interaction: discord.Interaction, message: str
 ) -> None:
-    # Ambient on demand — open to anyone, no owner gate; ambient has no tools or authority.
-    await interaction.response.defer(thinking=True)
-    reply = await handle_ambient(
-        content=message,
-        user_id=interaction.user.id,
-        channel_id=interaction.channel_id,
-        llm=client.llm,
-        store=client.store,
-        limiter=client.ambient_limiter,
-    )
-    await _send_chunked(interaction.followup.send, reply or "…")
+    with request_context():
+        try:
+            # Ambient on demand — open to anyone, no owner gate; ambient has no tools or authority.
+            await interaction.response.defer(thinking=True)
+            reply = await handle_ambient(
+                content=message,
+                user_id=interaction.user.id,
+                channel_id=interaction.channel_id,
+                llm=client.llm,
+                store=client.store,
+                limiter=client.ambient_limiter,
+            )
+            await _send_chunked(interaction.followup.send, reply or "…")
+        except Exception:
+            log.exception("ambient request failed for user %s", interaction.user.id)
+            raise
 
 
 # --------------------------------------------------------------------------- entrypoint

@@ -1,10 +1,15 @@
 """Dispatch routing — the owner gate and message classification, exercised with fakes."""
 
+import json
+import logging
 from types import SimpleNamespace
 
 import discord
+import pytest
 
-from roger.bot import Route, _missing_permissions, classify_message
+from roger import bot
+from roger.bot import Route, _JsonFormatter, _missing_permissions, classify_message
+from roger.request_context import current_request_id, request_context
 
 BOT = 111
 OWNER = 222
@@ -57,6 +62,99 @@ def test_guild_message_without_mention_is_ignored():
 
 def test_owner_gets_no_special_treatment_in_guild_without_mention():
     assert route(msg(OWNER, "talking in a channel", mentions=[])) is Route.IGNORE
+
+
+def test_request_context_generates_distinct_opaque_ids_and_resets_after_exception():
+    with request_context() as first:
+        assert len(first) == 16 and int(first, 16) >= 0
+    assert current_request_id() is None
+
+    try:
+        with request_context() as second:
+            raise RuntimeError(second)
+    except RuntimeError:
+        pass
+    assert current_request_id() is None
+    assert first != second
+
+
+def test_json_formatter_includes_bound_request_id_only():
+    formatter = _JsonFormatter()
+    record = logging.LogRecord("roger.test", logging.INFO, __file__, 1, "hello", (), None)
+    assert "request_id" not in json.loads(formatter.format(record))
+
+    with request_context() as request_id:
+        assert json.loads(formatter.format(record))["request_id"] == request_id
+
+
+class _JsonLogCapture(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+        self.setFormatter(_JsonFormatter())
+
+    def emit(self, record):
+        self.messages.append(self.format(record))
+
+
+async def test_ambient_message_failure_logs_bound_request_id_and_resets(monkeypatch):
+    async def fail_ambient(**kwargs):
+        raise RuntimeError("ambient failed")
+
+    monkeypatch.setattr(bot, "handle_ambient", fail_ambient)
+    capture = _JsonLogCapture()
+    bot.log.addHandler(capture)
+    client = SimpleNamespace(
+        settings=SimpleNamespace(owner_id=OWNER),
+        user=SimpleNamespace(id=BOT),
+        llm=None,
+        store=None,
+        ambient_limiter=None,
+    )
+    message = msg(OTHER, "hello", guild=None)
+    message.channel = SimpleNamespace(id=12, send=None)
+    try:
+        with pytest.raises(RuntimeError, match="ambient failed"):
+            await bot.RogerClient.on_message(client, message)
+    finally:
+        bot.log.removeHandler(capture)
+
+    assert current_request_id() is None
+    payload = json.loads(capture.messages[-1])
+    assert payload["request_id"]
+    assert "ambient request failed" in payload["msg"]
+
+
+async def test_chat_send_failure_logs_bound_request_id_and_resets(monkeypatch):
+    async def reply_ambient(**kwargs):
+        return "hello"
+
+    async def defer(**kwargs):
+        return None
+
+    async def fail_send(*args, **kwargs):
+        raise RuntimeError("send failed")
+
+    monkeypatch.setattr(bot, "handle_ambient", reply_ambient)
+    capture = _JsonLogCapture()
+    bot.log.addHandler(capture)
+    client = SimpleNamespace(llm=None, store=None, ambient_limiter=None)
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=OTHER),
+        channel_id=12,
+        response=SimpleNamespace(defer=defer),
+        followup=SimpleNamespace(send=fail_send),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="send failed"):
+            await bot._handle_chat(client, interaction, "hello")
+    finally:
+        bot.log.removeHandler(capture)
+
+    assert current_request_id() is None
+    payload = json.loads(capture.messages[-1])
+    assert payload["request_id"]
+    assert "ambient request failed" in payload["msg"]
 
 
 # --------------------------------------------------------------------------- permission check

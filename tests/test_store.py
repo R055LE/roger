@@ -4,6 +4,7 @@ import time
 
 import aiosqlite
 
+from roger.request_context import request_context
 from roger.store import RETENTION_DAYS, AuditStatus, Store
 
 
@@ -23,6 +24,7 @@ async def test_record_audit_persists(tmp_path):
         assert rows[0]["actor_id"] == 42
         assert rows[0]["status"] == "gate_rejected"
         assert "make a channel" in rows[0]["args_json"]
+        assert rows[0]["request_id"] is None
     finally:
         await store.close()
 
@@ -143,6 +145,48 @@ async def test_migration_backfills_cost_column_on_preexisting_db(tmp_path):
         # Reopening an already-current DB must be a harmless no-op (idempotent migration).
         store = await Store(path).open()
         assert abs(await store.cost_today("admin") - 0.005) < 1e-9
+    finally:
+        await store.close()
+
+
+async def test_migration_adds_request_id_to_preexisting_audit_without_losing_rows(tmp_path):
+    path = str(tmp_path / "old.db")
+    raw = await aiosqlite.connect(path)
+    await raw.execute(
+        "CREATE TABLE audit (id INTEGER PRIMARY KEY, ts REAL NOT NULL, actor_id INTEGER, "
+        "brain TEXT, tool TEXT, args_json TEXT, status TEXT NOT NULL, detail TEXT)"
+    )
+    await raw.execute(
+        "INSERT INTO audit (ts, actor_id, status) VALUES (?, ?, ?)", (time.time(), 42, "ok")
+    )
+    await raw.commit()
+    await raw.close()
+
+    store = await Store(path).open()
+    try:
+        rows = await store.fetch_audit()
+        assert len(rows) == 1
+        assert rows[0]["actor_id"] == 42
+        assert rows[0]["request_id"] is None
+        await store.close()
+        store = await Store(path).open()
+        assert (await store.fetch_audit())[0]["request_id"] is None
+    finally:
+        await store.close()
+
+
+async def test_record_audit_uses_bound_request_id(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        with request_context() as request_id:
+            await store.record_audit(
+                actor_id=42,
+                brain="admin",
+                tool=None,
+                args=None,
+                status=AuditStatus.OK,
+            )
+        assert (await store.fetch_audit())[0]["request_id"] == request_id
     finally:
         await store.close()
 
