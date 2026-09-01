@@ -1,11 +1,13 @@
 """Admin tool loop — driven with a scripted fake LLM and a real temp store (no network)."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from roger.brains import admin
 from roger.llm import BudgetExceeded
+from roger.request_context import current_request_id, request_context
 from roger.store import Store
 
 
@@ -92,6 +94,60 @@ async def test_tool_call_then_answer(tmp_path):
         assert "general" in out
         rows = await store.fetch_audit()
         assert any(r["tool"] == "list_structure" and r["status"] == "ok" for r in rows)
+    finally:
+        await store.close()
+
+
+async def test_audit_rows_for_one_multitool_request_share_the_bound_id(tmp_path):
+    store = await _open_store(tmp_path)
+    try:
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("c1", "list_structure")]),
+                _resp(tool_calls=[_tool_call("c2", "server_stats")]),
+                _resp(content="Done."),
+            ]
+        )
+        with request_context() as request_id:
+            assert await admin.handle_admin_request(
+                request="inspect", guild=object(), actor_id=1, llm=llm, store=store
+            ) == "Done."
+        assert {row["request_id"] for row in await store.fetch_audit()} == {request_id}
+    finally:
+        await store.close()
+
+
+async def test_request_context_isolated_between_concurrent_admin_requests(tmp_path):
+    store = await _open_store(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    seen: list[str | None] = []
+
+    class BlockingLLM:
+        async def complete(self, brain, messages, tools=None):
+            seen.append(current_request_id())
+            started.set()
+            await release.wait()
+            seen.append(current_request_id())
+            return _resp(content="Done.")
+
+    async def run(request):
+        with request_context() as request_id:
+            answer = await admin.handle_admin_request(
+                request=request, guild=object(), actor_id=1, llm=BlockingLLM(), store=store
+            )
+            return request_id, answer
+
+    try:
+        first = asyncio.create_task(run("first"))
+        await started.wait()
+        second = asyncio.create_task(run("second"))
+        await asyncio.sleep(0)
+        release.set()
+        request_ids = {request_id for request_id, answer in await asyncio.gather(first, second)}
+        assert len(request_ids) == 2
+        assert set(seen) == request_ids
+        assert {row["request_id"] for row in await store.fetch_audit()} == request_ids
     finally:
         await store.close()
 

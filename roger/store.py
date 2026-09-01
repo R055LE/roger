@@ -15,6 +15,8 @@ from typing import Any
 
 import aiosqlite
 
+from roger.request_context import current_request_id
+
 
 class AuditStatus(StrEnum):
     OK = "ok"
@@ -33,7 +35,8 @@ CREATE TABLE IF NOT EXISTS audit (
     tool      TEXT,
     args_json TEXT,
     status    TEXT    NOT NULL,
-    detail    TEXT
+    detail    TEXT,
+    request_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS seen (
@@ -148,14 +151,15 @@ class Store:
     async def _migrate(self) -> None:
         """Additive, idempotent migrations for columns ``CREATE TABLE IF NOT EXISTS`` can't add.
 
-        A DB provisioned before ``cost_usd`` existed already has the ``usage`` table, so the
-        schema's ``CREATE TABLE IF NOT EXISTS`` skips it and the column must be added by hand. The
-        column check makes a run against a fresh (already-current) DB a no-op.
+        A DB provisioned before a column existed skips the current ``CREATE TABLE IF NOT EXISTS``
+        schema, so additive column checks keep its data intact and make current DBs a no-op.
         """
         if not await self._has_column("usage", "cost_usd"):
             await self._conn.execute(
                 "ALTER TABLE usage ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0"
             )
+        if not await self._has_column("audit", "request_id"):
+            await self._conn.execute("ALTER TABLE audit ADD COLUMN request_id TEXT")
 
     async def _has_column(self, table: str, column: str) -> bool:
         # PRAGMA can't be parameterized; `table` is an internal literal, never user input.
@@ -173,8 +177,8 @@ class Store:
         detail: str | None = None,
     ) -> None:
         await self._conn.execute(
-            "INSERT INTO audit (ts, actor_id, brain, tool, args_json, status, detail) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO audit (ts, actor_id, brain, tool, args_json, status, detail, request_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 time.time(),
                 actor_id,
@@ -183,6 +187,7 @@ class Store:
                 json.dumps(args, default=str) if args is not None else None,
                 str(status),
                 detail,
+                current_request_id(),
             ),
         )
         await self._conn.commit()
