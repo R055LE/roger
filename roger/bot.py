@@ -240,6 +240,17 @@ _CONFIGURED_CHANNELS: tuple[tuple[str, str], ...] = (
     ("spark_channel_id", "spark"),
 )
 
+_DIGEST_CHANNEL_PERMISSIONS: tuple[tuple[str, str], ...] = (
+    ("view_channel", "View Channels"),
+    ("send_messages", "Send Messages"),
+    ("embed_links", "Embed Links"),
+)
+
+_POSTABLE_CHANNEL_PERMISSIONS: tuple[tuple[str, str], ...] = (
+    ("view_channel", "View Channels"),
+    ("send_messages", "Send Messages"),
+)
+
 
 def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
     """Configured channel IDs Roger can't actually see or post in (pure given a live guild+config).
@@ -261,15 +272,58 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
         if not callable(getattr(channel, "send", None)):
             problems.append(f"{label} channel #{channel.name} is not postable")
             continue
-        perms = channel.permissions_for(guild.me)
-        if not perms.view_channel or not perms.send_messages:
-            problems.append(f"{label} channel #{channel.name} not postable (missing view/send)")
+        required = (
+            _DIGEST_CHANNEL_PERMISSIONS if attr == "digest_channel_id"
+            else _POSTABLE_CHANNEL_PERMISSIONS
+        )
+        permissions = channel.permissions_for(guild.me)
+        missing = [name for perm, name in required if not getattr(permissions, perm)]
+        if missing:
+            problems.append(
+                f"{label} channel #{channel.name} not postable (missing {', '.join(missing)})"
+            )
     return problems
 
 
 # --------------------------------------------------------------------------- status & ops
 
 _BRAINS = ("admin", "ambient", "digest", "spark", "gigabrain")
+DIGEST_LAST_ATTEMPT_META_KEY = "digest_last_attempt"
+
+
+def _digest_attempt_result(status: str) -> str:
+    """Sanitize scheduled Digest outcomes before persisting or exposing them."""
+    if status == "posted":
+        return "success"
+    if status == "no new items":
+        return "no new items"
+    return "failure"
+
+
+def _digest_status(
+    *, digest_configured: bool, feeds_count: int, last_attempt: str | None, tz: str
+) -> str:
+    """Digest status safe for boot and /status: config first, then its last scheduled outcome."""
+    if not digest_configured:
+        return "destination unset"
+    if not feeds_count:
+        return "no feeds"
+    if not last_attempt:
+        return "never run"
+    try:
+        attempt = json.loads(last_attempt)
+        result = attempt.get("result")
+        timestamp = attempt.get("timestamp")
+        if result not in {"success", "no new items", "failure"} or not isinstance(
+            timestamp, int | float
+        ):
+            return "unknown"
+        when = datetime.datetime.fromtimestamp(timestamp, ZoneInfo(tz)).strftime(
+            "%Y-%m-%d %H:%M %Z"
+        )
+    except (json.JSONDecodeError, AttributeError, OSError, OverflowError, ValueError):
+        return "unknown"
+    return f"{result}, last {when}"
 
 
 def _daily_caps(settings: Settings) -> dict[str, int]:
@@ -341,6 +395,7 @@ def _format_status(
     spark_configured: bool,
     tz: str,
     usd_caps: dict[str, float] | None = None,
+    digest_result: str = "never run",
 ) -> str:
     """Render the /status readout body (pure). The caller wraps it in a code block."""
     usd_caps = usd_caps or {}
@@ -364,7 +419,11 @@ def _format_status(
             f"  {brain:<10}{usage.get(brain, 0):>8,} / {caps.get(brain, 0):<8,}  {cost_str}"
         )
     lines.append(f"  {'total':<29}  ${total_cost:.4f}")
-    digest = f"{digest_hour:02d}:00 {tz}" if digest_configured else "unconfigured"
+    digest = (
+        f"{digest_hour:02d}:00 {tz} ({digest_result})"
+        if digest_configured
+        else "destination unset"
+    )
     spark = f"{spark_hour:02d}:00 {tz}" if spark_configured else "unconfigured"
     lines.append(f"feeds: {feeds_count}   digest: {digest}   spark: {spark}")
     if recent_audit:
@@ -388,6 +447,7 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
     cost = {brain: await store.cost_today(brain) for brain in _BRAINS}
     caps = _daily_caps(settings)
     usd_caps = _daily_usd_caps(settings)
+    feeds_count = await store.count_feeds()
     return _format_status(
         guild_name=guild_name,
         missing_perms=missing,
@@ -396,13 +456,19 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         caps=caps,
         cost=cost,
         usd_caps=usd_caps,
-        feeds_count=await store.count_feeds(),
+        feeds_count=feeds_count,
         recent_audit=await store.fetch_audit(limit=8),
         digest_hour=settings.digest_hour,
         digest_configured=settings.digest_channel_id is not None,
         spark_hour=settings.spark_hour,
         spark_configured=settings.spark_channel_id is not None,
         tz=settings.tz,
+        digest_result=_digest_status(
+            digest_configured=settings.digest_channel_id is not None,
+            feeds_count=feeds_count,
+            last_attempt=await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY),
+            tz=settings.tz,
+        ),
     )
 
 
@@ -773,10 +839,26 @@ class RogerClient(discord.Client):
 
     @tasks.loop(time=datetime.time(hour=8))
     async def _digest_loop(self) -> None:
-        result = await run_digest_job(
-            client=self, settings=self.settings, llm=self.llm, store=self.store
-        )
-        status = str(result.get("status", ""))
+        await self._run_scheduled_digest()
+
+    async def _run_scheduled_digest(self) -> None:
+        """Run and record one scheduled Digest attempt without letting a job error stop its loop."""
+        try:
+            result = await run_digest_job(
+                client=self, settings=self.settings, llm=self.llm, store=self.store
+            )
+            status = str(result.get("status", ""))
+        except Exception:
+            log.exception("scheduled digest failed unexpectedly")
+            status = "unexpected error"
+        sanitized = _digest_attempt_result(status)
+        try:
+            await self.store.set_meta(
+                DIGEST_LAST_ATTEMPT_META_KEY,
+                json.dumps({"timestamp": time.time(), "result": sanitized}),
+            )
+        except Exception:
+            log.exception("failed to record scheduled digest result")
         log.info("scheduled digest: %s", status)
         problem = _digest_problem(status)
         if problem:
