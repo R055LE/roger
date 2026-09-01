@@ -37,6 +37,10 @@ class ListStructureArgs(ToolArgs):
     """No arguments — returns the full server structure."""
 
 
+class AuditPermissionsArgs(ToolArgs):
+    """No arguments — audits Roger's configured delivery destinations."""
+
+
 class ChannelGrant(ToolArgs):
     role: str  # role name/id or user id, resolved live (prefer read_only/private for @everyone)
     allow: list[PermName] = Field(min_length=1)  # permissions to allow this target at creation
@@ -358,12 +362,25 @@ REGISTRY: dict[str, ToolSpec] = {
         name="set_permissions",
         description=(
             "Set channel permission overwrites on a text, voice, or category channel. Target a "
-            "role, member, @everyone, or 'self' (which means Roger itself). If a change hides a "
-            "channel from @everyone, Roger automatically keeps its own access. The owner must "
-            "confirm the exact change before it is applied."
+            "role, member, @everyone, or 'self' (which means Roger itself). Each target is a "
+            "complete replacement: omitted allow/deny bits are cleared (an empty overwrite "
+            "removes it). The confirmation preview shows live before/after state and every "
+            "cleared bit. If a change hides a channel from @everyone, Roger automatically keeps "
+            "its required access through its dedicated bot role. The owner must confirm the "
+            "exact change before it is applied."
         ),
         args_model=SetPermissionsArgs,
         requires_confirm=True,
+    ),
+    "audit_permissions": ToolSpec(
+        name="audit_permissions",
+        description=(
+            "Audit Roger's configured delivery destinations. Reports required and effective "
+            "capabilities, missing capabilities and their overwrite layer, category sync state, "
+            "dedicated bot-role identification, and a read-only role-based remediation plan. "
+            "It never changes Discord. Run this before proposing a permission change."
+        ),
+        args_model=AuditPermissionsArgs,
     ),
     "edit_channel": ToolSpec(
         name="edit_channel",

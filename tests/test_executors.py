@@ -2,10 +2,12 @@
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
 
+from roger.brains import admin
 from roger.store import Store
 from roger.tools import executors, members, schemas
 from roger.tools.context import ToolContext
@@ -14,6 +16,7 @@ from roger.tools.schemas import (
     AddFeedArgs,
     AddMemberRoleArgs,
     AddPersonalFeedArgs,
+    AuditPermissionsArgs,
     ChannelGrant,
     CreateChannelArgs,
     CreateForumPostArgs,
@@ -49,7 +52,7 @@ def _http_error(kind, status):
 
 
 class FakeRole:
-    def __init__(self, role_id, name, permissions_value=0, *, managed=False):
+    def __init__(self, role_id, name, permissions_value=0, *, managed=False, bot_id=None):
         self.id = role_id
         self.name = name
         # A real discord.Permissions, not a namespace wrapper — it's a lightweight int wrapper
@@ -57,6 +60,7 @@ class FakeRole:
         # real __iter__ behavior (yields (name, bool) pairs).
         self.permissions = discord.Permissions(permissions_value)
         self.managed = managed
+        self.tags = SimpleNamespace(bot_id=bot_id) if bot_id is not None else None
         self.edited = None
         self.deleted = False
 
@@ -81,6 +85,8 @@ class FakeChannel:
         self.moved = None  # kwargs from the last move() call
         self.sent = []
         self.perm_calls = []  # (target, overwrite) from set_permissions
+        self.overwrites = {}
+        self.permissions_synced = False
 
     async def edit(self, **changes):
         self.edited = changes
@@ -95,6 +101,51 @@ class FakeChannel:
 
     async def set_permissions(self, target, *, overwrite):
         self.perm_calls.append((target, overwrite))
+        if overwrite is None:
+            self.overwrites.pop(target, None)
+        else:
+            self.overwrites[target] = overwrite
+
+    def permissions_for(self, member):
+        roles = getattr(member, "roles", ())
+        values = {
+            name: any(getattr(role.permissions, name, False) for role in roles)
+            for name in schemas.PermName.__args__
+        }
+        source = self.category if self.permissions_synced and self.category else self
+        everyone = source.overwrites.get(self.guild.default_role)
+        if everyone is not None:
+            for name, value in everyone:
+                name = {"read_messages": "view_channel"}.get(name, name)
+                if value is not None:
+                    values[name] = value
+        denied = set()
+        allowed = set()
+        for role in roles:
+            overwrite = source.overwrites.get(role)
+            if overwrite is not None:
+                for name, value in overwrite:
+                    name = {"read_messages": "view_channel"}.get(name, name)
+                    if value is False:
+                        denied.add(name)
+                    elif value is True:
+                        allowed.add(name)
+        for name in denied - allowed:
+            values[name] = False
+        for name in allowed:
+            values[name] = True
+        member_overwrite = source.overwrites.get(member)
+        if member_overwrite is not None:
+            for name, value in member_overwrite:
+                name = {"read_messages": "view_channel"}.get(name, name)
+                if value is not None:
+                    values[name] = value
+        if not values["view_channel"]:
+            values = dict.fromkeys(values, False)
+        elif not values["send_messages"]:
+            values["embed_links"] = False
+            values["attach_files"] = False
+        return discord.Permissions(**values)
 
 
 class FakeGuildMember:
@@ -318,9 +369,11 @@ class FakeGuild:
                 return role
         return None
 
-    def add_role(self, name, *, managed=False, permissions_value=0):
-        role = FakeRole(self._id(), name, permissions_value, managed=managed)
+    def add_role(self, name, *, managed=False, permissions_value=0, bot_id=None):
+        role = FakeRole(self._id(), name, permissions_value, managed=managed, bot_id=bot_id)
         self.roles.append(role)
+        if bot_id == self.me.id:
+            self.me.roles = [self.default_role, role]
         return role
 
     async def create_voice_channel(self, *, name, category, overwrites):
@@ -331,6 +384,7 @@ class FakeGuild:
 
     def add_text(self, name, *, category=None, topic=None):
         channel = FakeChannel(self._id(), name, category=category, topic=topic)
+        channel.guild = self
         self.text_channels.append(channel)
         return channel
 
@@ -386,6 +440,7 @@ async def test_confirm_gated_tools_have_a_real_preview():
     names. A future confirm-gated tool added without a preview branch would show the owner just its
     name as the "diff" to approve."""
     guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
     guild.add_role("DJs")
     guild.add_text("general")
     guild.add_fetchable_member(5001, "Alice")
@@ -653,6 +708,7 @@ async def test_role_holders_paginates(monkeypatch):
 
 async def test_create_readonly_text_channel_denies_send_for_everyone():
     guild = FakeGuild()
+    role = guild.add_role("Roger integration", bot_id=guild.me.id)
     result = await executors.create_channel(
         guild, CreateChannelArgs(name="Podcast Room", kind="text", read_only=True)
     )
@@ -662,7 +718,7 @@ async def test_create_readonly_text_channel_denies_send_for_everyone():
     assert isinstance(overwrite, discord.PermissionOverwrite)
     assert overwrite.send_messages is False
     # ...but Roger keeps its own access, or it would lock itself out of the channel it just made.
-    mine = guild.last_overwrites[guild.me]
+    mine = guild.last_overwrites[role]
     assert mine.view_channel is True and mine.send_messages is True
 
 
@@ -682,18 +738,20 @@ async def test_create_category_cannot_be_nested():
 
 async def test_create_private_text_hides_from_everyone_and_keeps_bot_access():
     guild = FakeGuild()
+    role = guild.add_role("Roger integration", bot_id=guild.me.id)
     result = await executors.create_channel(
         guild, CreateChannelArgs(name="staff", kind="text", private=True)
     )
     assert result["private"] is True
     overwrites = guild.last_overwrites
     assert overwrites[guild.default_role].view_channel is False  # hidden from @everyone
-    mine = overwrites[guild.me]
+    mine = overwrites[role]
     assert mine.view_channel is True and mine.send_messages is True  # Roger keeps its own access
 
 
 async def test_create_private_voice_channel_hides_from_everyone():
     guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
     result = await executors.create_channel(
         guild, CreateChannelArgs(name="War Room", kind="voice", private=True)
     )
@@ -703,6 +761,7 @@ async def test_create_private_voice_channel_hides_from_everyone():
 
 async def test_create_channel_grant_allows_a_role_at_creation():
     guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
     djs = guild.add_role("DJs")
     result = await executors.create_channel(
         guild,
@@ -728,17 +787,19 @@ async def test_create_voice_rejects_read_only():
 
 async def test_create_private_category_hides_and_keeps_bot_access():
     guild = FakeGuild()
+    role = guild.add_role("Roger integration", bot_id=guild.me.id)
     result = await executors.create_channel(
         guild, CreateChannelArgs(name="Admin", kind="category", private=True)
     )
     assert result["created"] == "category" and result["private"] is True
     assert guild.last_overwrites[guild.default_role].view_channel is False
-    mine = guild.last_overwrites[guild.me]
+    mine = guild.last_overwrites[role]
     assert mine.view_channel is True and mine.send_messages is True
 
 
 async def test_create_category_with_grants_lets_a_role_in():
     guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
     admins = guild.add_role("Admins")
     result = await executors.create_channel(
         guild,
@@ -768,6 +829,7 @@ def test_overwrite_rejects_allow_deny_overlap():
 
 async def test_set_permissions_can_target_a_category():
     guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
     category = guild.add_category("Admin")
     result = await executors.set_permissions(
         guild,
@@ -777,11 +839,13 @@ async def test_set_permissions_can_target_a_category():
     )
     assert result["channel"] == "Admin"
     targets = [target for target, _ in category.perm_calls]
-    assert guild.default_role in targets and guild.me in targets  # @everyone denied, Roger kept
+    assert guild.default_role in targets
+    assert any(target.name == "Roger integration" for target in targets)
 
 
 async def test_set_permissions_keeps_bot_access_when_hiding_from_everyone():
     guild = FakeGuild()
+    role = guild.add_role("Roger integration", bot_id=guild.me.id)
     channel = guild.add_text("secret")
     result = await executors.set_permissions(
         guild,
@@ -789,9 +853,282 @@ async def test_set_permissions_keeps_bot_access_when_hiding_from_everyone():
             channel="secret", overwrites=[Overwrite(target="everyone", deny=["view_channel"])]
         ),
     )
-    assert any(entry["target"] == "Roger" for entry in result["applied"])
-    me_overwrite = next(ow for target, ow in channel.perm_calls if target is guild.me)
-    assert me_overwrite.view_channel is True and me_overwrite.send_messages is True
+    assert any(entry["target"] == role.name for entry in result["applied"])
+    role_overwrite = next(ow for target, ow in channel.perm_calls if target is role)
+    assert role_overwrite.view_channel is True and role_overwrite.send_messages is True
+
+
+async def test_denied_real_permission_preview_leaves_live_overwrites_unchanged(
+    tmp_path, monkeypatch
+):
+    guild = FakeGuild()
+    guild.add_role(
+        "Roger integration",
+        permissions_value=discord.Permissions(
+            view_channel=True, send_messages=True, embed_links=True
+        ).value,
+        bot_id=guild.me.id,
+    )
+    channel = guild.add_text("digest")
+    channel.overwrites = {
+        guild.default_role: discord.PermissionOverwrite(send_messages=True),
+    }
+    before = {target: tuple(overwrite) for target, overwrite in channel.overwrites.items()}
+    ctx = ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id))
+    calls = [
+        SimpleNamespace(
+            id="a1",
+            type="function",
+            function=SimpleNamespace(name="audit_permissions", arguments="{}"),
+        ),
+        SimpleNamespace(
+            id="p1",
+            type="function",
+            function=SimpleNamespace(
+                name="set_permissions",
+                arguments=(
+                    '{"channel": "digest", "overwrites": '
+                    '[{"target": "@everyone", "deny": ["view_channel"]}]}'
+                ),
+            ),
+        ),
+    ]
+    responses = [
+        SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[calls[0]]))]
+        ),
+        SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=[calls[1]]))]
+        ),
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="Left it unchanged.", tool_calls=None)
+                )
+            ]
+        ),
+    ]
+    llm = SimpleNamespace(complete=AsyncMock(side_effect=responses))
+    previews = []
+
+    async def snapshot(guild, *, detailed=False):
+        return {}
+
+    async def deny(diff):
+        previews.append(diff)
+        return False
+
+    monkeypatch.setattr(admin.executors, "snapshot", snapshot)
+    store = await Store(str(tmp_path / "admin-real-denial.db")).open()
+    try:
+        await admin.handle_admin_request(
+            request="hide the digest channel",
+            guild=guild,
+            actor_id=1,
+            llm=llm,
+            store=store,
+            confirm=deny,
+            ctx=ctx,
+        )
+        rows = await store.fetch_audit()
+    finally:
+        await store.close()
+
+    after = {target: tuple(overwrite) for target, overwrite in channel.overwrites.items()}
+    assert len(previews) == 1
+    assert "complete overwrite replacements" in previews[0]
+    assert "before" in previews[0] and "after" in previews[0]
+    assert channel.perm_calls == []
+    assert after == before
+    assert any(
+        row["tool"] == "set_permissions"
+        and row["status"] == "denied"
+        and row["detail"] == "owner denied"
+        for row in rows
+    )
+
+
+async def test_permission_audit_names_digest_embed_deny_and_role_remediation():
+    guild = FakeGuild()
+    role = guild.add_role(
+        "delivery integration",
+        permissions_value=discord.Permissions(
+            view_channel=True, send_messages=True, embed_links=True
+        ).value,
+        bot_id=guild.me.id,
+    )
+    channel = guild.add_text("digest")
+    # The reported topology: a guild-level role can embed, but this channel's @everyone deny wins.
+    channel.overwrites = {
+        guild.default_role: discord.PermissionOverwrite(embed_links=False),
+        guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    ctx = ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id))
+
+    result = await executors.audit_permissions(guild, AuditPermissionsArgs(), ctx)
+
+    digest = result["destinations"][0]
+    assert digest["missing"] == ["embed_links"]
+    assert digest["missing_causes"] == {"embed_links": "channel @everyone overwrite"}
+    plan = result["remediation"][0]
+    assert plan["role"] == role.name
+    assert plan["scope"] == "channel"
+    assert plan["remove_member_overwrite"] is True
+
+
+async def test_permission_audit_distinguishes_a_synced_category_plan():
+    guild = FakeGuild()
+    role = guild.add_role("delivery integration", bot_id=guild.me.id)
+    category = guild.add_category("automation")
+    category.overwrites = {guild.default_role: discord.PermissionOverwrite(embed_links=False)}
+    channel = guild.add_text("digest", category=category)
+    channel.permissions_synced = True
+    channel.permissions_for = lambda member: discord.Permissions(
+        view_channel=True, send_messages=True, embed_links=False
+    )
+    ctx = ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id))
+
+    result = await executors.audit_permissions(guild, AuditPermissionsArgs(), ctx)
+
+    assert result["destinations"][0]["category_permission_sync"] == "synced"
+    assert result["remediation"][0]["scope"] == "category"
+    assert result["remediation"][0]["target"] == category.name
+    assert result["remediation"][0]["role"] == role.name
+
+
+async def test_preview_set_permissions_lists_live_state_and_cleared_bits():
+    guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
+    channel = guild.add_text("secret")
+    channel.overwrites = {
+        guild.default_role: discord.PermissionOverwrite(send_messages=True, embed_links=False)
+    }
+    diff = await executors.preview(
+        "set_permissions",
+        guild,
+        SetPermissionsArgs(
+            channel="secret", overwrites=[Overwrite(target="@everyone", deny=["view_channel"])]
+        ),
+    )
+    assert "before allow[send_messages] deny[embed_links]" in diff
+    assert "after  allow[—] deny[view_channel]" in diff
+    assert "cleared[embed_links, send_messages]" in diff
+
+
+async def test_hiding_without_a_unique_bot_role_makes_no_mutation():
+    guild = FakeGuild()
+    channel = guild.add_text("secret")
+    args = SetPermissionsArgs(
+        channel="secret", overwrites=[Overwrite(target="@everyone", deny=["view_channel"])]
+    )
+    with pytest.raises(GuardError, match="no unique dedicated bot role"):
+        await executors.set_permissions(guild, args)
+    assert channel.perm_calls == []
+
+
+async def test_ambiguous_tagged_roles_stop_audit_create_preview_and_set_before_mutation():
+    guild = FakeGuild()
+    guild.add_role("Roger one", bot_id=guild.me.id)
+    guild.add_role("Roger two", bot_id=guild.me.id)
+    channel = guild.add_text("secret")
+    args = SetPermissionsArgs(
+        channel="secret", overwrites=[Overwrite(target="@everyone", deny=["view_channel"])]
+    )
+    audit = await executors.audit_permissions(
+        guild,
+        AuditPermissionsArgs(),
+        ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id)),
+    )
+    assert audit["status"] == "no unique dedicated bot role"
+    with pytest.raises(GuardError):
+        await executors.preview("set_permissions", guild, args)
+    with pytest.raises(GuardError):
+        await executors.set_permissions(guild, args)
+    with pytest.raises(GuardError):
+        await executors.create_channel(
+            guild, CreateChannelArgs(name="new", kind="text", private=True)
+        )
+    assert channel.perm_calls == [] and guild.last_overwrites is None
+
+
+async def test_role_overwrite_allow_wins_and_implicit_masks_name_upstream_layer():
+    guild = FakeGuild()
+    role = guild.add_role("Roger integration", bot_id=guild.me.id)
+    other = guild.add_role("Other")
+    guild.me.roles.append(other)
+    channel = guild.add_text("digest")
+    channel.overwrites = {
+        role: discord.PermissionOverwrite(embed_links=False),
+        other: discord.PermissionOverwrite(embed_links=True, send_messages=False),
+    }
+    assert channel.permissions_for(guild.me).embed_links is False
+    result = await executors.audit_permissions(
+        guild,
+        AuditPermissionsArgs(),
+        ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id)),
+    )
+    assert result["destinations"][0]["missing_causes"]["embed_links"] == (
+        "implicit mask from channel role overwrite"
+    )
+
+
+async def test_view_deny_implicitly_masks_send_and_embeds_with_its_cause():
+    guild = FakeGuild()
+    guild.add_role(
+        "Roger integration",
+        permissions_value=discord.Permissions(
+            view_channel=True, send_messages=True, embed_links=True
+        ).value,
+        bot_id=guild.me.id,
+    )
+    channel = guild.add_text("digest")
+    channel.overwrites[guild.default_role] = discord.PermissionOverwrite(view_channel=False)
+    result = await executors.audit_permissions(
+        guild,
+        AuditPermissionsArgs(),
+        ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id)),
+    )
+    causes = result["destinations"][0]["missing_causes"]
+    assert causes["view_channel"] == "channel @everyone overwrite"
+    assert causes["send_messages"] == "implicit mask from channel @everyone overwrite"
+    assert causes["embed_links"] == "implicit mask from channel @everyone overwrite"
+
+
+async def test_synced_category_and_unsynced_child_choose_the_correct_layer():
+    guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
+    category = guild.add_category("automation")
+    category.overwrites[guild.default_role] = discord.PermissionOverwrite(embed_links=False)
+    synced = guild.add_text("digest", category=category)
+    synced.permissions_synced = True
+    unsynced = guild.add_text("spark", category=category)
+    unsynced.overwrites[guild.default_role] = discord.PermissionOverwrite(embed_links=False)
+    result = await executors.audit_permissions(
+        guild,
+        AuditPermissionsArgs(),
+        ToolContext(
+            settings=SimpleNamespace(digest_channel_id=synced.id, spark_channel_id=unsynced.id)
+        ),
+    )
+    assert result["destinations"][0]["missing_causes"]["embed_links"] == (
+        "category @everyone overwrite"
+    )
+    assert result["remediation"][0]["scope"] == "category"
+    assert result["remediation"][1]["scope"] == "channel"
+
+
+async def test_empty_member_replacement_removes_overwrite_and_preview_names_it():
+    guild = FakeGuild()
+    channel = guild.add_text("digest")
+    channel.overwrites[guild.me] = discord.PermissionOverwrite(
+        view_channel=True, send_messages=True
+    )
+    args = SetPermissionsArgs(channel="digest", overwrites=[Overwrite(target="self")])
+    diff = await executors.preview("set_permissions", guild, args)
+    await executors.set_permissions(guild, args)
+    assert "member-specific Roger overwrite removed" in diff
+    assert channel.perm_calls[-1] == (guild.me, None)
+    assert guild.me not in channel.overwrites
 
 
 async def test_set_permissions_self_keyword_resolves_to_the_bot():
@@ -808,6 +1145,7 @@ async def test_set_permissions_self_keyword_resolves_to_the_bot():
 
 async def test_preview_set_permissions_flags_kept_access_when_hiding():
     guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
     guild.add_text("secret")
     diff = await executors.preview(
         "set_permissions",

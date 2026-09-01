@@ -71,9 +71,12 @@ These hold regardless of what any model outputs. They are the load-bearing part 
   rendered diff before it runs. Creation is exempt by default: `create_channel` / `create_role` add new, empty,
   zero-permission objects, and setting a brand-new channel or category's access at creation (`read_only`,
   per-role `grants`) has nil blast radius — no members, no history — so it applies immediately.
-  Whenever an overwrite hides a channel from @everyone — at creation **or** later via
-  `set_permissions` — Roger also grants *itself* view/send, so it can never lock itself out of a
-  space it manages (@everyone includes the bot); the self-grant shows up in the confirm diff. The
+  Whenever an overwrite restricts @everyone — View Channel for private creation, Send Messages
+  for read-only creation, or later via
+  `set_permissions` — Roger grants its tagged dedicated bot role the destination's complete
+  delivery capability set (or the normal view/send management minimum), so it can never lock
+  itself out of a space it manages (@everyone includes the bot); the complete replacement and
+  cleared bits show up in the confirm diff. The
   **one deliberate exception is
   `create_channel(private=True)`**: hiding a channel is still nil-blast-radius, but it is
   confirm-gated anyway — a hidden channel is a surprising side effect, and keeping the confirm ritual
@@ -173,6 +176,7 @@ Registry:
 | Tool | Mutates? | Confirm? |
 |---|---|---|
 | `list_structure` | no | — |
+| `audit_permissions` | no | — |
 | `create_channel` | yes (read_only / private / per-role grants) | only when `private=True` (§2.8) |
 | `create_role` | yes | no (always zero-perm, §2.6) |
 | `edit_role` | yes (rename/color/hoist/mentionable — never permissions) | **yes** (§2.8) |

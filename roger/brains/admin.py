@@ -39,7 +39,9 @@ async def _notify_nothing(_: str) -> None:
 SYSTEM_PROMPT = (
     "You are Roger, a Discord server admin assistant. You may only act through the provided "
     "tools. If a request falls outside them, say so plainly — do not pretend. Keep replies short "
-    "and factual; no personality flourishes. The current server state is provided as JSON."
+    "and factual; no personality flourishes. Before proposing or calling set_permissions, run "
+    "audit_permissions and use its deterministic diagnosis; do not speculate about unrelated "
+    "configuration. The current server state is provided as JSON."
 )
 
 
@@ -55,6 +57,58 @@ async def _remember(
         return
     await store.add_admin(actor_id, channel_id, "user", request)
     await store.add_admin(actor_id, channel_id, "bot", answer)
+
+
+def _permission_audit_summary(result: dict[str, Any] | None) -> str | None:
+    """Render missing-permission evidence without letting the model reinterpret it."""
+    if result is None or result.get("status") != "ok":
+        return None
+
+    remediation = {
+        item.get("destination"): item for item in result.get("remediation", [])
+    }
+    findings = []
+    for destination in result.get("destinations", []):
+        missing = destination.get("missing", [])
+        if not missing:
+            continue
+        label = destination.get("destination", "configured")
+        channel = destination.get("channel")
+        target = f"{label} destination" + (f" (#{channel})" if channel else "")
+        causes = destination.get("missing_causes", {})
+        evidence = ", ".join(
+            f"{capability} ({causes.get(capability, 'cause unavailable')})"
+            for capability in missing
+        )
+        details = [f"missing {evidence}"]
+        if sync := destination.get("category_permission_sync"):
+            details.append(f"category sync: {sync}")
+        if plan := remediation.get(label):
+            details.append(
+                f"remediation target: role {plan['role']} on {plan['scope']} {plan['target']}"
+            )
+        findings.append(f"{target}: {'; '.join(details)}")
+    if not findings:
+        return None
+    return "Permission audit: " + ". ".join(findings) + "."
+
+
+def _permission_mutation_summary(result: dict[str, Any] | None) -> str | None:
+    """Report only the overwrite replacements the executor says it applied."""
+    if result is None or not result.get("channel") or not result.get("applied"):
+        return None
+    replacements = [
+        (
+            f"{item['target']}: allow[{', '.join(item['allow']) or '—'}] "
+            f"deny[{', '.join(item['deny']) or '—'}]"
+        )
+        for item in result["applied"]
+    ]
+    return (
+        f"Permission replacements applied on #{result['channel']}: "
+        + "; ".join(replacements)
+        + ". A follow-up permission audit verifies effective access."
+    )
 
 
 async def handle_admin_request(
@@ -101,6 +155,9 @@ async def handle_admin_request(
     tool_calls_used = 0
     turns = 0
     tool_budget_notified = False
+    permission_audit_ok = False
+    latest_permission_audit: dict[str, Any] | None = None
+    latest_permission_mutation: dict[str, Any] | None = None
     try:
         while True:
             turns += 1
@@ -111,7 +168,11 @@ async def handle_admin_request(
             message = response.choices[0].message
 
             if not getattr(message, "tool_calls", None):
-                answer = message.content or "(no response)"
+                answer = _permission_mutation_summary(latest_permission_mutation)
+                if answer is None:
+                    answer = _permission_audit_summary(latest_permission_audit)
+                if answer is None:
+                    answer = message.content or "(no response)"
                 await _remember(store, actor_id, channel_id, request, answer)
                 return answer
 
@@ -155,7 +216,23 @@ async def handle_admin_request(
                     continue
 
                 tool_calls_used += 1
-                result, status, detail = await _run_tool(call, guild, confirm, ctx)
+                if call.function.name == "set_permissions" and not permission_audit_ok:
+                    result, status, detail = (
+                        {"error": "run audit_permissions successfully before changing permissions"},
+                        AuditStatus.INVALID,
+                        "permission audit required",
+                    )
+                else:
+                    result, status, detail = await _run_tool(call, guild, confirm, ctx)
+                    if (
+                        call.function.name == "audit_permissions"
+                        and status is AuditStatus.OK
+                        and result.get("status") == "ok"
+                    ):
+                        permission_audit_ok = True
+                        latest_permission_audit = result
+                    elif call.function.name == "set_permissions" and status is AuditStatus.OK:
+                        latest_permission_mutation = result
                 await store.record_audit(
                     actor_id=actor_id,
                     brain="admin",
@@ -194,7 +271,7 @@ async def _run_tool(
 
     try:
         if spec.needs_confirm(args):
-            diff = await executors.preview(spec.name, guild, args)
+            diff = await executors.preview(spec.name, guild, args, ctx)
             if not await confirm(diff):
                 return {"status": "denied by owner"}, AuditStatus.DENIED, "owner denied"
         result = await executors.EXECUTORS[spec.name](guild, args, ctx)
