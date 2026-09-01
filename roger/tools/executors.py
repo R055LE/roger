@@ -30,6 +30,7 @@ from roger.tools.schemas import (
     AddMemberRoleArgs,
     AddPersonalFeedArgs,
     AddReactionArgs,
+    AuditPermissionsArgs,
     CreateChannelArgs,
     CreateForumPostArgs,
     CreateRoleArgs,
@@ -134,6 +135,165 @@ async def list_structure(
 ) -> dict[str, Any]:
     # The tool the model calls when it wants the full picture — topics and permission overwrites.
     return await snapshot(guild, detailed=True)
+
+
+_DESTINATIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("digest_channel_id", "digest", ("view_channel", "send_messages", "embed_links")),
+    (
+        "personal_digest_channel_id",
+        "personal digest",
+        ("view_channel", "send_messages", "embed_links"),
+    ),
+    ("spark_channel_id", "spark", ("view_channel", "send_messages", "embed_links")),
+    (
+        "gigabrain_channel_id",
+        "giga brain",
+        ("view_channel", "send_messages", "embed_links", "attach_files"),
+    ),
+    ("ops_channel_id", "ops", ("view_channel", "send_messages")),
+)
+
+
+def _dedicated_bot_role(guild: Any) -> Any | None:
+    """Return Roger's uniquely tagged integration role; never infer one from a display name."""
+    bot_id = getattr(getattr(guild, "me", None), "id", None)
+    matches = []
+    for role in guild.roles:
+        tags = getattr(role, "tags", None)
+        if getattr(tags, "bot_id", None) == bot_id:
+            matches.append(role)
+    return matches[0] if len(matches) == 1 else None
+
+
+def _require_dedicated_bot_role(guild: Any) -> Any:
+    role = _dedicated_bot_role(guild)
+    if role is None:
+        raise GuardError("can't preserve Roger access: no unique dedicated bot role")
+    return role
+
+
+def _overwrite_bits(channel: Any, target: Any) -> tuple[list[str], list[str]]:
+    overwrite = getattr(channel, "overwrites", {}).get(target)
+    if overwrite is None:
+        return [], []
+    names = {"read_messages": "view_channel", "read_message_history": "read_message_history"}
+    return (
+        [names.get(name, name) for name, value in overwrite if value is True],
+        [names.get(name, name) for name, value in overwrite if value is False],
+    )
+
+
+def _permission_cause(channel: Any, guild: Any, role: Any, capability: str) -> str:
+    """Trace Discord's base → everyone → roles → member overwrite order for one missing bit."""
+    category = getattr(channel, "category", None)
+    sources = [("channel", channel)]
+    if category is not None and getattr(channel, "permissions_synced", False):
+        sources = [("category", category)]
+    assigned = getattr(guild.me, "roles", None) or [guild.default_role, role]
+    value = any(getattr(getattr(item, "permissions", None), capability, False) for item in assigned)
+    cause = "implicit (guild role/base permissions)"
+    for label, source in sources:
+        allowed, denied = _overwrite_bits(source, guild.default_role)
+        if capability in denied:
+            value, cause = False, f"{label} @everyone overwrite"
+        elif capability in allowed:
+            value, cause = True, f"{label} @everyone overwrite"
+        role_allow = role_deny = False
+        for assigned_role in assigned:
+            if assigned_role == guild.default_role:
+                continue
+            allowed, denied = _overwrite_bits(source, assigned_role)
+            role_allow |= capability in allowed
+            role_deny |= capability in denied
+        if role_allow:
+            value, cause = True, f"{label} role overwrite"
+        elif role_deny:
+            value, cause = False, f"{label} role overwrite"
+        allowed, denied = _overwrite_bits(source, guild.me)
+        if capability in denied:
+            value, cause = False, f"{label} member overwrite"
+        elif capability in allowed:
+            value, cause = True, f"{label} member overwrite"
+    if not value:
+        return cause
+    if capability != "view_channel":
+        view_cause = _permission_cause(channel, guild, role, "view_channel")
+        if not view_cause.startswith("implicit"):
+            return f"implicit mask from {view_cause}"
+    if capability in ("embed_links", "attach_files"):
+        send_cause = _permission_cause(channel, guild, role, "send_messages")
+        if not send_cause.startswith("implicit"):
+            return f"implicit mask from {send_cause}"
+    return "implicit (guild role/base permissions)"
+
+
+async def audit_permissions(
+    guild: discord.Guild, args: AuditPermissionsArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    """Read configured delivery paths and return a deterministic, non-mutating diagnosis."""
+    settings = getattr(ctx, "settings", None)
+    if settings is None:
+        raise GuardError("permission audit needs configured destinations")
+    role = _dedicated_bot_role(guild)
+    if role is None:
+        return {
+            "status": "no unique dedicated bot role",
+            "destinations": [],
+            "remediation": [],
+            "note": "No member overwrite will be proposed or changed.",
+        }
+    destinations = []
+    remediation = []
+    for attr, label, required in _DESTINATIONS:
+        channel_id = getattr(settings, attr, None)
+        if channel_id is None:
+            continue
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            destinations.append(
+                {"destination": label, "channel_id": channel_id, "missing": ["channel_not_found"]}
+            )
+            continue
+        permissions = channel.permissions_for(guild.me)
+        effective = [name for name in required if getattr(permissions, name, False)]
+        missing = [name for name in required if name not in effective]
+        category = getattr(channel, "category", None)
+        if category is None:
+            sync = "no_category"
+        else:
+            sync = "synced" if getattr(channel, "permissions_synced", False) else "not_synced"
+        causes = {name: _permission_cause(channel, guild, role, name) for name in missing}
+        entry = {
+            "destination": label,
+            "channel": channel.name,
+            "required": list(required),
+            "effective": effective,
+            "missing": missing,
+            "category_permission_sync": sync,
+            "missing_causes": causes,
+        }
+        destinations.append(entry)
+        if missing:
+            target = category if category is not None and sync == "synced" and any(
+                cause.startswith("category ") for cause in causes.values()
+            ) else channel
+            allowed, denied = _overwrite_bits(target, role)
+            proposed_allow = sorted((set(allowed) | set(missing)) - set(denied))
+            proposed_deny = sorted(set(denied) - set(missing))
+            remediation.append({
+                "destination": label,
+                "scope": "category" if target is category else "channel",
+                "target": target.name,
+                "role": role.name,
+                "replacement": {"allow": proposed_allow, "deny": proposed_deny},
+                "remove_member_overwrite": bool(getattr(channel, "overwrites", {}).get(guild.me)),
+            })
+    return {
+        "status": "ok",
+        "dedicated_role": {"id": role.id, "name": role.name},
+        "destinations": destinations,
+        "remediation": remediation,
+    }
 
 
 # --------------------------------------------------------------------------- resolution
@@ -274,7 +434,10 @@ async def _creation_overwrites(
         everyone_bits["send_messages"] = False
     if everyone_bits:
         overwrites[guild.default_role] = discord.PermissionOverwrite(**everyone_bits)
-        overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        if private or read_only:
+            overwrites[_require_dedicated_bot_role(guild)] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True
+            )
     for grant in grants:
         target = await _resolve_target(guild, grant.role)
         overwrites[target] = discord.PermissionOverwrite(**dict.fromkeys(grant.allow, True))
@@ -446,32 +609,56 @@ async def remove_member_role(
 async def set_permissions(
     guild: discord.Guild, args: SetPermissionsArgs, ctx: ToolContext | None = None
 ) -> dict[str, Any]:
-    channel, _ = _resolve_editable_channel(guild, args.channel)  # text, voice, or category
-    applied: list[dict[str, Any]] = []
+    channel, planned = await _permission_plan(guild, args, ctx)
+    applied = []
+    for target, allowed, denied in planned:
+        overwrite = None
+        if allowed or denied:
+            overwrite = discord.PermissionOverwrite(
+                **dict.fromkeys(allowed, True), **dict.fromkeys(denied, False)
+            )
+        await channel.set_permissions(target, overwrite=overwrite)
+        applied.append(
+            {"target": getattr(target, "name", str(target)), "allow": allowed, "deny": denied}
+        )
+    return {"channel": channel.name, "applied": applied}
+
+
+async def _permission_plan(
+    guild: discord.Guild, args: SetPermissionsArgs, ctx: ToolContext | None
+) -> tuple[Any, list[tuple[Any, list[str], list[str]]]]:
+    """Resolve the complete replacement set before either preview or mutation."""
+    channel, _ = _resolve_editable_channel(guild, args.channel)
+    planned: list[tuple[Any, list[str], list[str]]] = []
     hides_from_everyone = False
     for overwrite in args.overwrites:
         target = await _resolve_target(guild, overwrite.target)
-        permission_overwrite = discord.PermissionOverwrite(
-            **dict.fromkeys(overwrite.allow, True),
-            **dict.fromkeys(overwrite.deny, False),
-        )
-        await channel.set_permissions(target, overwrite=permission_overwrite)
-        applied.append(
-            {
-                "target": getattr(target, "name", str(target)),
-                "allow": list(overwrite.allow),
-                "deny": list(overwrite.deny),
-            }
-        )
+        if any(target == existing for existing, _, _ in planned):
+            raise GuardError(f"duplicate overwrite target: {getattr(target, 'name', target)}")
+        planned.append((target, sorted(overwrite.allow), sorted(overwrite.deny)))
         if target == guild.default_role and "view_channel" in overwrite.deny:
             hides_from_everyone = True
     if hides_from_everyone:
-        # @everyone includes the bot — keep Roger's own access or it locks itself out (§2.8).
-        await channel.set_permissions(
-            guild.me, overwrite=discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        )
-        applied.append({"target": "Roger", "allow": ["view_channel", "send_messages"], "deny": []})
-    return {"channel": channel.name, "applied": applied}
+        # @everyone includes the bot. The uniquely tagged role keeps policy explainable.
+        role = _require_dedicated_bot_role(guild)
+        required = {"view_channel", "send_messages"}
+        settings = getattr(ctx, "settings", None)
+        if settings is not None:
+            for attr, _, capabilities in _DESTINATIONS:
+                if getattr(settings, attr, None) == channel.id:
+                    required.update(capabilities)
+                    break
+        for index, (target, allowed, denied) in enumerate(planned):
+            if target == role:
+                planned[index] = (
+                    role,
+                    sorted((set(allowed) | required) - set(denied)),
+                    sorted(set(denied) - required),
+                )
+                break
+        else:
+            planned.append((role, sorted(required), []))
+    return channel, planned
 
 
 async def edit_channel(
@@ -1059,22 +1246,34 @@ async def list_scheduled_events(
 # --------------------------------------------------------------------------- confirm preview
 
 
-async def preview(name: str, guild: discord.Guild, args: Any) -> str:
+def _overwrite_preview(label: str, allow: list[str], deny: list[str], state: str) -> str:
+    return f"  {label}: {state} allow[{', '.join(allow) or '—'}] deny[{', '.join(deny) or '—'}]"
+
+
+async def preview(
+    name: str, guild: discord.Guild, args: Any, ctx: ToolContext | None = None
+) -> str:
     """Human-readable diff for a confirm-gated tool. Resolution errors surface before confirming."""
     if name == "set_permissions":
-        channel, _ = _resolve_editable_channel(guild, args.channel)
-        lines = [f"#{channel.name}:"]
-        hides_from_everyone = False
-        for overwrite in args.overwrites:
-            target = await _resolve_target(guild, overwrite.target)
+        channel, planned = await _permission_plan(guild, args, ctx)
+        lines = [f"#{channel.name}: complete overwrite replacements"]
+        for target, new_allow, new_deny in planned:
             tname = getattr(target, "name", str(target))
-            allow = ", ".join(overwrite.allow) or "—"
-            deny = ", ".join(overwrite.deny) or "—"
-            lines.append(f"  {tname}: allow[{allow}] deny[{deny}]")
-            if target == guild.default_role and "view_channel" in overwrite.deny:
-                hides_from_everyone = True
-        if hides_from_everyone:
-            lines.append("  Roger: allow[view_channel, send_messages]  (kept — not locked out)")
+            old_allow, old_deny = _overwrite_bits(channel, target)
+            cleared = sorted((set(old_allow) | set(old_deny)) - set(new_allow) - set(new_deny))
+            lines.extend(
+                [
+                    _overwrite_preview(tname, old_allow, old_deny, "before"),
+                    _overwrite_preview(tname, new_allow, new_deny, "after "),
+                    f"  {tname}: cleared[{', '.join(cleared) or '—'}]",
+                ]
+            )
+            if target == guild.me and not new_allow and not new_deny and (old_allow or old_deny):
+                lines.append(f"  {tname}: member-specific Roger overwrite removed")
+            if target == _dedicated_bot_role(guild) and target not in [
+                await _resolve_target(guild, overwrite.target) for overwrite in args.overwrites
+            ]:
+                lines.append(f"  {tname}: kept — not locked out")
         return "\n".join(lines)
     if name == "edit_channel":
         channel, kind = _resolve_editable_channel(guild, args.channel)
@@ -1176,6 +1375,7 @@ async def preview(name: str, guild: discord.Guild, args: Any) -> str:
 
 EXECUTORS = {
     "list_structure": list_structure,
+    "audit_permissions": audit_permissions,
     "create_channel": create_channel,
     "create_role": create_role,
     "edit_role": edit_role,

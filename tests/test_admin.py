@@ -221,15 +221,19 @@ _SET_PERMS_ARGS = (
 
 
 def _patch_confirm_tool(monkeypatch, applied):
-    async def fake_preview(name, guild, args):
+    async def fake_preview(name, guild, args, ctx=None):
         return "DIFF"
 
     async def fake_set_perms(guild, args, ctx=None):
         applied["done"] = True
         return {"channel": "general", "applied": []}
 
+    async def fake_audit(guild, args, ctx=None):
+        return {"status": "ok", "destinations": [], "remediation": []}
+
     monkeypatch.setattr(admin.executors, "preview", fake_preview)
     monkeypatch.setitem(admin.executors.EXECUTORS, "set_permissions", fake_set_perms)
+    monkeypatch.setitem(admin.executors.EXECUTORS, "audit_permissions", fake_audit)
 
 
 async def test_set_permissions_executes_when_approved(tmp_path, monkeypatch):
@@ -243,6 +247,7 @@ async def test_set_permissions_executes_when_approved(tmp_path, monkeypatch):
 
         llm = FakeLLM(
             [
+                _resp(tool_calls=[_tool_call("a1", "audit_permissions")]),
                 _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
                 _resp(content="Done."),
             ]
@@ -274,6 +279,7 @@ async def test_set_permissions_skipped_when_denied(tmp_path, monkeypatch):
 
         llm = FakeLLM(
             [
+                _resp(tool_calls=[_tool_call("a1", "audit_permissions")]),
                 _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
                 _resp(content="Left it alone."),
             ]
@@ -296,6 +302,7 @@ async def test_set_permissions_defaults_to_deny_without_confirmer(tmp_path, monk
         _patch_confirm_tool(monkeypatch, applied)
         llm = FakeLLM(
             [
+                _resp(tool_calls=[_tool_call("a1", "audit_permissions")]),
                 _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
                 _resp(content="Couldn't confirm."),
             ]
@@ -306,6 +313,248 @@ async def test_set_permissions_defaults_to_deny_without_confirmer(tmp_path, monk
         )
         assert out == "Couldn't confirm."
         assert "done" not in applied
+    finally:
+        await store.close()
+
+
+async def test_set_permissions_requires_successful_audit_before_preview(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        seen = {"preview": 0, "confirm": 0, "execute": 0}
+
+        async def preview(*args):
+            seen["preview"] += 1
+            return "DIFF"
+
+        async def execute(*args):
+            seen["execute"] += 1
+            return {}
+
+        async def confirm(diff):
+            seen["confirm"] += 1
+            return True
+
+        monkeypatch.setattr(admin.executors, "preview", preview)
+        monkeypatch.setitem(admin.executors.EXECUTORS, "set_permissions", execute)
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
+                _resp(content="Audit first."),
+            ]
+        )
+        assert await admin.handle_admin_request(
+            request="lock", guild=object(), actor_id=1, llm=llm, store=store, confirm=confirm
+        ) == "Audit first."
+        assert seen == {"preview": 0, "confirm": 0, "execute": 0}
+        rows = await store.fetch_audit()
+        assert any(r["detail"] == "permission audit required" for r in rows)
+    finally:
+        await store.close()
+
+
+async def test_no_unique_role_audit_keeps_permission_mutation_blocked(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        seen = {"preview": 0, "confirm": 0, "execute": 0}
+
+        async def audit(*args):
+            return {
+                "status": "no unique dedicated bot role",
+                "destinations": [],
+                "remediation": [],
+            }
+
+        async def preview(*args):
+            seen["preview"] += 1
+            return "DIFF"
+
+        async def execute(*args):
+            seen["execute"] += 1
+            return {}
+
+        async def confirm(diff):
+            seen["confirm"] += 1
+            return True
+
+        monkeypatch.setitem(admin.executors.EXECUTORS, "audit_permissions", audit)
+        monkeypatch.setattr(admin.executors, "preview", preview)
+        monkeypatch.setitem(admin.executors.EXECUTORS, "set_permissions", execute)
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("a1", "audit_permissions")]),
+                _resp(tool_calls=[_tool_call("c1", "set_permissions", _SET_PERMS_ARGS)]),
+                _resp(content="The permission change is blocked."),
+            ]
+        )
+
+        assert await admin.handle_admin_request(
+            request="lock", guild=object(), actor_id=1, llm=llm, store=store, confirm=confirm
+        ) == "The permission change is blocked."
+        assert seen == {"preview": 0, "confirm": 0, "execute": 0}
+        rows = await store.fetch_audit()
+        assert any(
+            row["tool"] == "set_permissions"
+            and row["status"] == "invalid"
+            and row["detail"] == "permission audit required"
+            for row in rows
+        )
+    finally:
+        await store.close()
+
+
+def _missing_permission_audit_result():
+    return {
+        "status": "ok",
+        "dedicated_role": {"id": 12, "name": "Roger integration"},
+        "destinations": [
+            {
+                "destination": "digest",
+                "channel": "daily-digest",
+                "missing": ["embed_links"],
+                "category_permission_sync": "not_synced",
+                "missing_causes": {
+                    "embed_links": "channel @everyone overwrite",
+                },
+            }
+        ],
+        "remediation": [
+            {
+                "destination": "digest",
+                "scope": "channel",
+                "target": "daily-digest",
+                "role": "Roger integration",
+            }
+        ],
+    }
+
+
+async def test_permission_audit_evidence_replaces_speculative_model_text(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        async def audit(*args):
+            return _missing_permission_audit_result()
+
+        monkeypatch.setitem(admin.executors.EXECUTORS, "audit_permissions", audit)
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("a1", "audit_permissions")]),
+                _resp(content="The digest feeds must be missing."),
+            ]
+        )
+
+        answer = await admin.handle_admin_request(
+            request="why is the digest empty?", guild=object(), actor_id=1, llm=llm, store=store
+        )
+
+        assert "feeds" not in answer
+        assert "digest destination (#daily-digest)" in answer
+        assert "embed_links (channel @everyone overwrite)" in answer
+        assert "category sync: not_synced" in answer
+        assert "role Roger integration on channel daily-digest" in answer
+    finally:
+        await store.close()
+
+
+async def test_applied_permissions_replace_stale_audit_response(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        async def audit(*args):
+            return _missing_permission_audit_result()
+
+        async def preview(*args):
+            return "DIFF"
+
+        async def execute(*args):
+            return {
+                "channel": "daily-digest",
+                "applied": [
+                    {"target": "@everyone", "allow": [], "deny": ["embed_links"]},
+                    {
+                        "target": "Roger integration",
+                        "allow": ["view_channel", "send_messages", "embed_links"],
+                        "deny": [],
+                    },
+                ],
+            }
+
+        async def approve(diff):
+            return True
+
+        monkeypatch.setitem(admin.executors.EXECUTORS, "audit_permissions", audit)
+        monkeypatch.setattr(admin.executors, "preview", preview)
+        monkeypatch.setitem(admin.executors.EXECUTORS, "set_permissions", execute)
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("a1", "audit_permissions")]),
+                _resp(tool_calls=[_tool_call("p1", "set_permissions", _SET_PERMS_ARGS)]),
+                _resp(content="The missing feeds are repaired and reachable."),
+            ]
+        )
+
+        answer = await admin.handle_admin_request(
+            request="fix digest access",
+            guild=object(),
+            actor_id=1,
+            llm=llm,
+            store=store,
+            confirm=approve,
+        )
+
+        assert answer == (
+            "Permission replacements applied on #daily-digest: "
+            "@everyone: allow[—] deny[embed_links]; "
+            "Roger integration: allow[view_channel, send_messages, embed_links] deny[—]. "
+            "A follow-up permission audit verifies effective access."
+        )
+        assert "missing" not in answer
+        assert "feeds" not in answer and "repaired" not in answer and "reachable" not in answer
+    finally:
+        await store.close()
+
+
+async def test_denied_permissions_preserve_current_audit_response(tmp_path, monkeypatch):
+    store = await _open_store(tmp_path)
+    try:
+        executed = False
+
+        async def audit(*args):
+            return _missing_permission_audit_result()
+
+        async def preview(*args):
+            return "DIFF"
+
+        async def execute(*args):
+            nonlocal executed
+            executed = True
+            return {"channel": "daily-digest", "applied": []}
+
+        async def deny(diff):
+            return False
+
+        monkeypatch.setitem(admin.executors.EXECUTORS, "audit_permissions", audit)
+        monkeypatch.setattr(admin.executors, "preview", preview)
+        monkeypatch.setitem(admin.executors.EXECUTORS, "set_permissions", execute)
+        llm = FakeLLM(
+            [
+                _resp(tool_calls=[_tool_call("a1", "audit_permissions")]),
+                _resp(tool_calls=[_tool_call("p1", "set_permissions", _SET_PERMS_ARGS)]),
+                _resp(content="Everything was applied."),
+            ]
+        )
+
+        answer = await admin.handle_admin_request(
+            request="fix digest access",
+            guild=object(),
+            actor_id=1,
+            llm=llm,
+            store=store,
+            confirm=deny,
+        )
+
+        assert executed is False
+        assert "missing embed_links (channel @everyone overwrite)" in answer
+        assert "category sync: not_synced" in answer
+        assert "applied" not in answer
     finally:
         await store.close()
 
