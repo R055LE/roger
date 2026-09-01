@@ -99,8 +99,10 @@ async def seed_personal_feeds_if_empty(store: Store, settings: Any) -> int:
 async def run_digest_job(*, client: Any, settings: Any, llm: LLM, store: Store) -> dict[str, Any]:
     feeds = [row["url"] for row in await store.list_feeds()]
     channel_id = settings.digest_channel_id
-    if not feeds or channel_id is None:
-        return {"status": "digest not configured (no feeds, or DIGEST_CHANNEL_ID unset)"}
+    if channel_id is None:
+        return {"status": "digest destination unset"}
+    if not feeds:
+        return {"status": "digest has no feeds"}
 
     entries = await _collect_new(feeds, store)
     if not entries:
@@ -120,7 +122,11 @@ async def run_digest_job(*, client: Any, settings: Any, llm: LLM, store: Store) 
 
     today = datetime.datetime.now(ZoneInfo(settings.tz)).strftime("%Y-%m-%d")
     embed = discord.Embed(title=f"Roger's digest — {today}", description=summary[:4096])
-    await channel.send(embed=embed)
+    try:
+        await channel.send(embed=embed)
+    except discord.DiscordException:
+        log.exception("failed to deliver digest")
+        return {"status": "delivery failed"}
 
     # Mark seen only after a successful post, so a failed post retries the same items.
     await store.mark_seen([(entry["feed_url"], entry["id"]) for entry in entries])

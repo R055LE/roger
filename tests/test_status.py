@@ -4,7 +4,13 @@ from types import SimpleNamespace
 
 import discord
 
-from roger.bot import _boot_header, _format_status, _unreachable_channels, gather_status
+from roger.bot import (
+    DIGEST_LAST_ATTEMPT_META_KEY,
+    _boot_header,
+    _format_status,
+    _unreachable_channels,
+    gather_status,
+)
 from roger.store import AuditStatus, Store
 
 # The invite integer documented in deploy/README.md — grants exactly the required scopes.
@@ -68,6 +74,15 @@ def test_unreachable_channels_flags_a_channel_roger_cant_post_in():
     )
     problems = _unreachable_channels(guild, settings)
     assert "gigabrain check-in channel #checkins not postable" in problems[0]
+
+
+def test_unreachable_digest_channel_names_missing_embed_links():
+    no_embeds = discord.Permissions(view_channel=True, send_messages=True)
+    guild = _fake_guild(channels={42: _FakeChannel(perms=no_embeds)})
+    settings = SimpleNamespace(digest_channel_id=42)
+    assert _unreachable_channels(guild, settings) == [
+        "digest channel #digest not postable (missing Embed Links)"
+    ]
 
 
 def test_unreachable_channels_flags_a_missing_spark_channel():
@@ -139,7 +154,7 @@ def test_format_status_flags_missing_perms_and_unconfigured_digest():
         tz="UTC",
     )
     assert "permissions: MISSING: Manage Roles" in body
-    assert "digest: unconfigured" in body
+    assert "digest: destination unset" in body
     assert "spark: unconfigured" in body
 
 
@@ -249,7 +264,7 @@ async def test_gather_status_without_a_visible_guild(tmp_path):
         assert "roger status — 9" in body  # falls back to the guild id
         assert "permissions: OK" in body  # no guild -> nothing reported missing
         assert "channels: OK" in body  # no guild -> nothing to check either
-        assert "digest: unconfigured" in body
+        assert "digest: destination unset" in body
     finally:
         await store.close()
 
@@ -285,3 +300,70 @@ async def test_gather_status_shows_usd_cap_from_settings(tmp_path):
         assert "$0.2500 / $1.0000" in body
     finally:
         await store.close()
+
+
+async def test_gather_status_shows_digest_configuration_and_last_attempt(tmp_path):
+    store = await Store(str(tmp_path / "s.db")).open()
+    try:
+        guild = _fake_guild(channels={42: _FakeChannel()})
+        assert "digest: 08:00 UTC (no feeds)" in await gather_status(
+            store=store, settings=_settings(), guild=guild
+        )
+
+        await store.add_feed("http://feed.example", "Feed")
+        assert "digest: 08:00 UTC (never run)" in await gather_status(
+            store=store, settings=_settings(), guild=guild
+        )
+
+        await store.set_meta(
+            DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 1, "result": "success"}'
+        )
+        assert "digest: 08:00 UTC (success, last 1970-01-01 00:00 UTC)" in await gather_status(
+            store=store, settings=_settings(), guild=guild
+        )
+
+        await store.set_meta(
+            DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 2, "result": "no new items"}'
+        )
+        assert "digest: 08:00 UTC (no new items, last 1970-01-01 00:00 UTC)" in await gather_status(
+            store=store, settings=_settings(), guild=guild
+        )
+
+        await store.set_meta(
+            DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 3, "result": "failure"}'
+        )
+        assert "digest: 08:00 UTC (failure, last 1970-01-01 00:00 UTC)" in await gather_status(
+            store=store, settings=_settings(), guild=guild
+        )
+
+        await store.set_meta(DIGEST_LAST_ATTEMPT_META_KEY, "invalid")
+        assert "digest: 08:00 UTC (unknown)" in await gather_status(
+            store=store, settings=_settings(), guild=guild
+        )
+
+        assert "digest: destination unset" in await gather_status(
+            store=store, settings=_settings(digest_channel_id=None), guild=guild
+        )
+    finally:
+        await store.close()
+
+
+async def test_gather_status_reads_digest_attempt_after_store_reopens(tmp_path):
+    path = tmp_path / "s.db"
+    store = await Store(str(path)).open()
+    await store.add_feed("http://feed.example", "Feed")
+    await store.set_meta(
+        DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 1, "result": "success"}'
+    )
+    await store.close()
+
+    reopened = await Store(str(path)).open()
+    try:
+        body = await gather_status(
+            store=reopened,
+            settings=_settings(),
+            guild=_fake_guild(channels={42: _FakeChannel()}),
+        )
+        assert "digest: 08:00 UTC (success, last 1970-01-01 00:00 UTC)" in body
+    finally:
+        await reopened.close()

@@ -1,13 +1,20 @@
 """Ops-channel alerting — the dedupe notifier and the pure alert-decision helpers (backlog 1.2)."""
 
+import json
+from types import SimpleNamespace
+
+from roger import bot
 from roger.bot import (
+    DIGEST_LAST_ATTEMPT_META_KEY,
     OpsNotifier,
+    RogerClient,
     _budget_alert,
     _digest_problem,
     _gigabrain_problem,
     _personal_digest_problem,
     _spark_problem,
 )
+from roger.store import Store
 
 
 class _FakeClock:
@@ -129,3 +136,53 @@ def test_spark_problem_flags_failures():
     assert _spark_problem("unparseable response; skipped") is not None
     assert _spark_problem("delivery failed; not posted") is not None
     assert _spark_problem("spark not configured (SPARK_CHANNEL_ID unset)") is not None
+
+
+async def test_scheduled_digest_records_failure_alerts_and_runs_again(tmp_path, monkeypatch):
+    store = await Store(str(tmp_path / "s.db")).open()
+    alerts = []
+
+    class Ops:
+        async def alert(self, *args, **kwargs):
+            alerts.append((args, kwargs))
+
+    results = iter([{"status": "delivery failed"}, {"status": "posted"}])
+
+    async def run_digest_job(**kwargs):
+        return next(results)
+
+    monkeypatch.setattr(bot, "run_digest_job", run_digest_job)
+    client = SimpleNamespace(settings=object(), llm=object(), store=store, _ops=Ops())
+    try:
+        await RogerClient._run_scheduled_digest(client)
+        first = json.loads(await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY))
+        assert set(first) == {"timestamp", "result"}
+        assert first["result"] == "failure" and isinstance(first["timestamp"], float)
+        assert len(alerts) == 1 and "delivery failed" in alerts[0][0][1]
+
+        await RogerClient._run_scheduled_digest(client)
+        assert json.loads(await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY))["result"] == "success"
+    finally:
+        await store.close()
+
+
+async def test_scheduled_digest_contains_unexpected_job_error(tmp_path, monkeypatch, caplog):
+    store = await Store(str(tmp_path / "s.db")).open()
+    alerts = []
+
+    class Ops:
+        async def alert(self, *args, **kwargs):
+            alerts.append((args, kwargs))
+
+    async def run_digest_job(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bot, "run_digest_job", run_digest_job)
+    client = SimpleNamespace(settings=object(), llm=object(), store=store, _ops=Ops())
+    try:
+        await RogerClient._run_scheduled_digest(client)
+        assert json.loads(await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY))["result"] == "failure"
+        assert len(alerts) == 1
+        assert any(record.exc_info for record in caplog.records)
+    finally:
+        await store.close()

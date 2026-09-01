@@ -29,10 +29,13 @@ def _resp(content):
 
 
 class FakeChannel:
-    def __init__(self):
+    def __init__(self, raise_on_send=None):
         self.sent = []
+        self._raise_on_send = raise_on_send
 
     async def send(self, embed=None, content=None):
+        if self._raise_on_send is not None:
+            raise self._raise_on_send
         self.sent.append(embed if embed is not None else content)
 
 
@@ -122,7 +125,7 @@ async def test_not_configured(tmp_path):
             llm=FakeLLM([]),
             store=store,
         )
-        assert "not configured" in out["status"]
+        assert out["status"] == "digest destination unset"
     finally:
         await store.close()
 
@@ -178,6 +181,36 @@ async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
         assert "budget" in out["status"]
         assert channel.sent == []  # nothing posted
         assert len(await _collect_new(["http://f"], store)) == 1  # not marked seen
+    finally:
+        await store.close()
+
+
+async def test_forbidden_send_returns_sanitized_failure_and_stays_retryable(
+    tmp_path, monkeypatch, caplog
+):
+    store = await _store(tmp_path)
+    try:
+        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        channel = FakeChannel(raise_on_send=_http_error(discord.Forbidden, 403))
+        out = await run_digest_job(
+            client=FakeClient(channel),
+            settings=_settings(),
+            llm=FakeLLM([_resp("summary")]),
+            store=store,
+        )
+        assert out["status"] == "delivery failed"
+        assert any(record.exc_info for record in caplog.records)
+        assert len(await _collect_new(["http://f"], store)) == 1
+
+        channel._raise_on_send = None
+        retry = await run_digest_job(
+            client=FakeClient(channel),
+            settings=_settings(),
+            llm=FakeLLM([_resp("summary")]),
+            store=store,
+        )
+        assert retry == {"status": "posted", "count": 1}
+        assert len(await _collect_new(["http://f"], store)) == 0
     finally:
         await store.close()
 
