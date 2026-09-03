@@ -42,7 +42,8 @@ class AuditPermissionsArgs(ToolArgs):
 
 
 class ChannelGrant(ToolArgs):
-    role: str  # role name/id or user id, resolved live (prefer read_only/private for @everyone)
+    # @everyone and Roger's integration role are reserved for private/read_only invariants.
+    role: str  # role name/id or user id, resolved live
     allow: list[PermName] = Field(min_length=1)  # permissions to allow this target at creation
 
 
@@ -299,7 +300,8 @@ REGISTRY: dict[str, ToolSpec] = {
             "under a category, set a text topic, and set access at creation — for ANY type, "
             "categories included: read_only (deny @everyone send; text only), private (hide from "
             "@everyone — use this for an admin-only category, whose child channels inherit it), "
-            "and grants (per-role allow, e.g. let 'Admins' view a private category). Anything "
+            "and grants (per-role allow, excluding @everyone and Roger's own role; e.g. let "
+            "'Admins' view a private category). Anything "
             "private requires owner confirmation; read_only and grants apply immediately."
         ),
         args_model=CreateChannelArgs,

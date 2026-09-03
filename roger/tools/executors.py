@@ -70,8 +70,12 @@ def _overwrite_summary(overwrites: dict[Any, discord.PermissionOverwrite]) -> di
     summary: dict[str, dict] = {}
     for target, overwrite in overwrites.items():
         name = getattr(target, "name", str(target))
-        allow = [perm for perm, value in overwrite if value is True]
-        deny = [perm for perm, value in overwrite if value is False]
+        values = [
+            ("view_channel" if perm == "read_messages" else perm, value)
+            for perm, value in overwrite
+        ]
+        allow = sorted(perm for perm, value in values if value is True)
+        deny = sorted(perm for perm, value in values if value is False)
         summary[name] = {"allow": allow, "deny": deny}
     return summary
 
@@ -438,8 +442,19 @@ async def _creation_overwrites(
             overwrites[_require_dedicated_bot_role(guild)] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True
             )
+    dedicated_role = _dedicated_bot_role(guild)
+    grant_target_ids: set[int] = set()
     for grant in grants:
         target = await _resolve_target(guild, grant.role)
+        if target.id == guild.default_role.id:
+            raise GuardError(
+                "creation grants can't target @everyone; use private or read_only instead"
+            )
+        if dedicated_role is not None and target.id == dedicated_role.id:
+            raise GuardError("creation grants can't target Roger's own role")
+        if target.id in grant_target_ids:
+            raise GuardError(f"duplicate creation grant for {target.name!r}")
+        grant_target_ids.add(target.id)
         overwrites[target] = discord.PermissionOverwrite(**dict.fromkeys(grant.allow, True))
     return overwrites
 
@@ -1367,8 +1382,19 @@ async def preview(
         if flags:
             head += " — " + ", ".join(flags)
         lines = [head]
-        for grant in args.grants:
-            lines.append(f"  {grant.role}: allow[{', '.join(grant.allow)}]")
+        overwrites = await _creation_overwrites(
+            guild,
+            read_only=args.read_only,
+            private=args.private,
+            grants=args.grants,
+        )
+        for target, bits in _overwrite_summary(overwrites).items():
+            changes = []
+            if bits["allow"]:
+                changes.append(f"allow[{', '.join(bits['allow'])}]")
+            if bits["deny"]:
+                changes.append(f"deny[{', '.join(bits['deny'])}]")
+            lines.append(f"  {target}: {', '.join(changes)}")
         return "\n".join(lines)
     return name
 

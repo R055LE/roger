@@ -119,7 +119,7 @@ def _chunk(text: str, limit: int = DISCORD_MAX) -> list[str]:
 async def _send_chunked(send: Callable[..., Awaitable[Any]], text: str) -> None:
     """Send ``text`` as one message, or several in succession if it exceeds Discord's cap."""
     for chunk in _chunk(text):
-        await send(chunk)
+        await send(chunk, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def _send_report(send: Callable[..., Awaitable[Any]], text: str) -> None:
@@ -129,10 +129,14 @@ async def _send_report(send: Callable[..., Awaitable[Any]], text: str) -> None:
     message bubbles — attachments cap far above 2000 chars, so this never truncates either.
     """
     if len(text) <= DISCORD_MAX:
-        await send(text)
+        await send(text, allowed_mentions=discord.AllowedMentions.none())
         return
     file = discord.File(io.BytesIO(text.encode("utf-8")), filename="gigabrain-report.md")
-    await send("That ran long — full analysis attached.", file=file)
+    await send(
+        "That ran long — full analysis attached.",
+        file=file,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 _MENTION_RE = re.compile(r"<@!?\d+>")
@@ -177,7 +181,11 @@ def _make_confirmer(
 ) -> Callable[[str], Awaitable[bool]]:
     async def confirm(diff: str) -> bool:
         view = _ConfirmView(owner_id)
-        await send(content=f"**Confirm this change:**\n```\n{diff}\n```", view=view)
+        await send(
+            content=f"**Confirm this change:**\n```\n{diff}\n```",
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         await view.wait()  # returns on click or timeout
         return bool(view.value)  # None (timeout) -> False
 
@@ -195,7 +203,9 @@ class Route(Enum):
     AMBIENT_MENTION = "ambient_mention"
 
 
-def classify_message(message: discord.Message, *, owner_id: int, bot_user_id: int) -> Route:
+def classify_message(
+    message: discord.Message, *, owner_id: int, bot_user_id: int, guild_id: int
+) -> Route:
     """Pure routing decision — no side effects, so it is unit-testable with fakes.
 
     Because the privileged ``message_content`` intent is OFF, guild messages that neither mention
@@ -207,6 +217,8 @@ def classify_message(message: discord.Message, *, owner_id: int, bot_user_id: in
         return Route.IGNORE
     if message.guild is None:  # DM
         return Route.ADMIN_DM if message.author.id == owner_id else Route.AMBIENT_DM
+    if message.guild.id != guild_id:
+        return Route.IGNORE
     if any(user.id == bot_user_id for user in message.mentions):
         # Owner @mentions reach the admin brain; everyone else gets ambient.
         return Route.ADMIN_MENTION if message.author.id == owner_id else Route.AMBIENT_MENTION
@@ -754,7 +766,10 @@ class RogerClient(discord.Client):
 
     async def on_message(self, message: discord.Message) -> None:
         route = classify_message(
-            message, owner_id=self.settings.owner_id, bot_user_id=self.user.id
+            message,
+            owner_id=self.settings.owner_id,
+            bot_user_id=self.user.id,
+            guild_id=self.settings.guild_id,
         )
         if route in (Route.ADMIN_DM, Route.ADMIN_MENTION):
             with request_context():
