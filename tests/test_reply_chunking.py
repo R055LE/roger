@@ -2,6 +2,7 @@
 
 import discord
 
+import roger.bot as bot
 from roger.bot import _chunk, _send_chunked, _send_report
 
 
@@ -34,24 +35,29 @@ def test_chunk_never_exceeds_the_limit_and_drops_no_non_newline_content():
 async def test_send_chunked_sends_one_message_when_short():
     sent = []
 
-    async def fake_send(content):
-        sent.append(content)
+    async def fake_send(content, **kwargs):
+        sent.append((content, kwargs))
 
     await _send_chunked(fake_send, "hello")
-    assert sent == ["hello"]
+    assert sent[0][0] == "hello"
+    allowed_mentions = sent[0][1]["allowed_mentions"]
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.users is False
 
 
 async def test_send_chunked_sends_multiple_messages_in_order_when_long():
     sent = []
 
-    async def fake_send(content):
-        sent.append(content)
+    async def fake_send(content, **kwargs):
+        sent.append((content, kwargs))
 
     text = "x" * 4500
     await _send_chunked(fake_send, text)
     assert len(sent) == 3
-    assert all(len(chunk) <= 2000 for chunk in sent)
-    assert "".join(sent) == text
+    assert all(len(chunk) <= 2000 for chunk, _ in sent)
+    assert "".join(chunk for chunk, _ in sent) == text
+    assert all(kwargs["allowed_mentions"].everyone is False for _, kwargs in sent)
 
 
 async def test_send_report_sends_plain_text_when_short():
@@ -61,7 +67,11 @@ async def test_send_report_sends_plain_text_when_short():
         calls.append((content, kwargs))
 
     await _send_report(fake_send, "short analysis")
-    assert calls == [("short analysis", {})]
+    assert calls[0][0] == "short analysis"
+    allowed_mentions = calls[0][1]["allowed_mentions"]
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.users is False
 
 
 async def test_send_report_attaches_a_file_when_long():
@@ -79,3 +89,33 @@ async def test_send_report_attaches_a_file_when_long():
     assert isinstance(file, discord.File)
     assert file.filename == "gigabrain-report.md"
     assert file.fp.read().decode("utf-8") == text
+    allowed_mentions = kwargs["allowed_mentions"]
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.users is False
+
+
+async def test_confirmation_preview_suppresses_mentions(monkeypatch):
+    class FakeView:
+        def __init__(self, owner_id):
+            self.owner_id = owner_id
+            self.value = False
+
+        async def wait(self):
+            return None
+
+    calls = []
+
+    async def fake_send(*, content, **kwargs):
+        calls.append((content, kwargs))
+
+    monkeypatch.setattr(bot, "_ConfirmView", FakeView)
+
+    confirmer = bot._make_confirmer(fake_send, owner_id=222)
+    assert await confirmer("@everyone review this") is False
+
+    assert "@everyone review this" in calls[0][0]
+    allowed_mentions = calls[0][1]["allowed_mentions"]
+    assert allowed_mentions.everyone is False
+    assert allowed_mentions.roles is False
+    assert allowed_mentions.users is False

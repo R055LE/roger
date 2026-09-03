@@ -28,7 +28,12 @@ def msg(author_id, content, *, guild=_IN_GUILD, mentions=()):
 
 
 def route(message):
-    return classify_message(message, owner_id=OWNER, bot_user_id=BOT)
+    return classify_message(
+        message,
+        owner_id=OWNER,
+        bot_user_id=BOT,
+        guild_id=_IN_GUILD.id,
+    )
 
 
 def test_ignores_own_messages():
@@ -54,6 +59,19 @@ def test_nonowner_guild_mention_goes_to_ambient():
 
 def test_owner_guild_mention_goes_to_admin():
     assert route(msg(OWNER, "roger make a channel", mentions=[BOT])) is Route.ADMIN_MENTION
+
+
+def test_owner_mention_in_another_guild_is_ignored():
+    assert (
+        route(msg(OWNER, "roger make a channel", guild=SimpleNamespace(id=10), mentions=[BOT]))
+        is Route.IGNORE
+    )
+
+
+def test_nonowner_mention_in_another_guild_is_ignored():
+    assert (
+        route(msg(OTHER, "hey roger", guild=SimpleNamespace(id=10), mentions=[BOT])) is Route.IGNORE
+    )
 
 
 def test_guild_message_without_mention_is_ignored():
@@ -105,7 +123,7 @@ async def test_ambient_message_failure_logs_bound_request_id_and_resets(monkeypa
     capture = _JsonLogCapture()
     bot.log.addHandler(capture)
     client = SimpleNamespace(
-        settings=SimpleNamespace(owner_id=OWNER),
+        settings=SimpleNamespace(owner_id=OWNER, guild_id=_IN_GUILD.id),
         user=SimpleNamespace(id=BOT),
         llm=None,
         store=None,

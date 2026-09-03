@@ -814,6 +814,57 @@ async def test_create_category_with_grants_lets_a_role_in():
     assert guild.last_overwrites[admins].view_channel is True
 
 
+async def test_create_channel_rejects_everyone_creation_grant():
+    guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
+
+    with pytest.raises(GuardError, match="@everyone"):
+        await executors.create_channel(
+            guild,
+            CreateChannelArgs(
+                name="private-room",
+                kind="text",
+                private=True,
+                grants=[ChannelGrant(role="@everyone", allow=["view_channel"])],
+            ),
+        )
+
+
+async def test_create_channel_rejects_roger_role_creation_grant():
+    guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
+
+    with pytest.raises(GuardError, match="Roger's own role"):
+        await executors.create_channel(
+            guild,
+            CreateChannelArgs(
+                name="private-room",
+                kind="text",
+                private=True,
+                grants=[ChannelGrant(role="Roger integration", allow=["view_channel"])],
+            ),
+        )
+
+
+async def test_create_channel_rejects_duplicate_creation_grants():
+    guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
+    djs = guild.add_role("DJs")
+
+    with pytest.raises(GuardError, match="duplicate creation grant"):
+        await executors.create_channel(
+            guild,
+            CreateChannelArgs(
+                name="music",
+                kind="text",
+                grants=[
+                    ChannelGrant(role="DJs", allow=["view_channel"]),
+                    ChannelGrant(role=str(djs.id), allow=["send_messages"]),
+                ],
+            ),
+        )
+
+
 async def test_create_category_rejects_read_only():
     guild = FakeGuild()
     with pytest.raises(GuardError):
@@ -1166,6 +1217,8 @@ async def test_create_channel_confirms_only_when_private():
 
 async def test_preview_create_channel_shows_private_and_grants():
     guild = FakeGuild()
+    guild.add_role("Roger integration", bot_id=guild.me.id)
+    guild.add_role("DJs")
     diff = await executors.preview(
         "create_channel",
         guild,
@@ -1179,7 +1232,10 @@ async def test_preview_create_channel_shows_private_and_grants():
         ),
     )
     assert "create text channel: podcast" in diff and "under Media" in diff
-    assert "private" in diff and "DJs: allow[send_messages]" in diff
+    assert "private" in diff
+    assert "@everyone: deny[send_messages, view_channel]" in diff
+    assert "Roger integration: allow[send_messages, view_channel]" in diff
+    assert "DJs: allow[send_messages]" in diff
 
 
 # --------------------------------------------------------------------------- edit_channel / post
