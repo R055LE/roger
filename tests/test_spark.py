@@ -21,6 +21,13 @@ def _feed(entries):
     return SimpleNamespace(entries=entries)
 
 
+def _set_feed(monkeypatch, parse):
+    async def fetch(url):
+        return parse(url)
+
+    monkeypatch.setattr(digest_module, "fetch_feed", fetch)
+
+
 def _choice_text(index, blurb="A short blurb.", question="What do you think?"):
     return f"ITEM: {index}\nBLURB: {blurb}\nQUESTION: {question}"
 
@@ -142,7 +149,7 @@ async def test_not_configured(tmp_path):
 async def test_no_new_items_skips(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest_module.feedparser, "parse", lambda url: _feed([]))
+        _set_feed(monkeypatch, lambda url: _feed([]))
         out = await run_spark_job(
             client=FakeClient(FakeChannel()), settings=_settings(), llm=FakeLLM([]), store=store
         )
@@ -154,9 +161,8 @@ async def test_no_new_items_skips(tmp_path, monkeypatch):
 async def test_posts_embed_and_marks_only_the_chosen_item_seen(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(
-            digest_module.feedparser,
-            "parse",
+        _set_feed(
+            monkeypatch,
             lambda url: _feed([_entry("n1", title="First"), _entry("n2", title="Second")]),
         )
         channel = FakeChannel()
@@ -186,7 +192,7 @@ async def test_posts_embed_and_marks_only_the_chosen_item_seen(tmp_path, monkeyp
 async def test_unparseable_response_skips_cleanly(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest_module.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         channel = FakeChannel()
         out = await run_spark_job(
             client=FakeClient(channel),
@@ -205,9 +211,8 @@ async def test_unparseable_response_skips_cleanly(tmp_path, monkeypatch):
 async def test_public_output_is_bounded_and_does_not_link_unsafe_urls(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(
-            digest_module.feedparser,
-            "parse",
+        _set_feed(
+            monkeypatch,
             lambda url: _feed(
                 [_entry("n1", title="@everyone " + "t" * 400, link="javascript:alert(1)")]
             ),
@@ -233,7 +238,7 @@ async def test_public_output_is_bounded_and_does_not_link_unsafe_urls(tmp_path, 
 async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest_module.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         channel = FakeChannel()
         out = await run_spark_job(
             client=FakeClient(channel),
@@ -252,7 +257,7 @@ async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
 async def test_llm_not_configured(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest_module.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         out = await run_spark_job(
             client=FakeClient(FakeChannel()),
             settings=_settings(),
@@ -267,7 +272,7 @@ async def test_llm_not_configured(tmp_path, monkeypatch):
 async def test_channel_not_found(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest_module.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         llm = FakeLLM([_resp(_choice_text(1))])
         out = await run_spark_job(
             client=FakeClient(channel=None),
@@ -300,7 +305,7 @@ async def test_channel_without_send_is_rejected_before_model_call(tmp_path):
 async def test_send_failure_is_reported(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest_module.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         channel = FakeChannel(raise_on_send=_http_error(discord.HTTPException, 500))
         out = await run_spark_job(
             client=FakeClient(channel),

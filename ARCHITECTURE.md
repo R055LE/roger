@@ -266,6 +266,13 @@ external and untrusted.
   `remove_feed`, and the env var only acts as the default set that returns if the list is ever fully
   cleared. `suggest_feeds` and `add_feed` fetch each candidate and confirm it parses as a live feed
   before recommending/storing it — the model proposes, the tool grounds it in reality.
+- **Feed fetching has one network boundary.** Scheduled Digest/Spark collection and public/personal
+  feed validation accept only credential-free HTTP(S) URLs, resolve and reject any destination with
+  a non-public address, and connect to that validated resolution. Every redirect repeats those
+  checks within a fixed redirect limit. Connect and whole-request deadlines plus declared,
+  on-wire (including chunk framing), and decompressed body-size limits bound each attempt;
+  `feedparser` receives bytes plus the final validated URL for relative-link resolution and never
+  fetches a URL itself.
 - **Robust collection.** One dead feed never kills a run. Entries cap at `MAX_ITEMS` (15), summaries
   are truncated to 500 chars before the model sees them.
 - **Exactly-once posting.** Items are marked **seen** (`seen` table) only *after* a successful post,

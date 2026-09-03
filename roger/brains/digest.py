@@ -7,7 +7,6 @@ only after a successful post, so a failed post retries the same items next time.
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import logging
 import time
@@ -15,8 +14,8 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import discord
-import feedparser
 
+from roger.feed_fetch import FeedFetchError, fetch_feed
 from roger.llm import LLM, BudgetExceeded, LLMConfigError
 from roger.store import Store
 
@@ -36,9 +35,12 @@ async def _collect_new(feeds: list[str], store: Store) -> list[dict[str, Any]]:
     collected: list[dict[str, Any]] = []
     for url in feeds:
         try:
-            parsed = await asyncio.to_thread(feedparser.parse, url)
+            parsed = await fetch_feed(url)
+        except FeedFetchError as exc:
+            log.warning("feed fetch failed: %s", exc)
+            continue
         except Exception:
-            log.exception("feed fetch failed: %s", url)
+            log.exception("unexpected feed fetch failure")
             continue
 
         items: list[dict[str, Any]] = []

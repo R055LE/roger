@@ -8,6 +8,7 @@ import discord
 import pytest
 
 from roger.brains import admin
+from roger.feed_fetch import FeedFetchError
 from roger.store import Store
 from roger.tools import executors, members, schemas
 from roger.tools.context import ToolContext
@@ -1555,17 +1556,17 @@ def _good_feed(title="Example", n=3, status=200):
 
 @pytest.fixture
 async def feeds(monkeypatch, tmp_path):
-    """A patched feedparser plus a real temp store wired into a ToolContext."""
+    """A patched feed fetcher plus a real temp store wired into a ToolContext."""
     responses: dict = {}
 
-    def fake_parse(url):
+    async def fake_parse(url):
         item = responses.get(url)
         if isinstance(item, Exception):
             raise item
         # Unknown URLs parse to something with no version — i.e. "not a recognized feed".
         return item if item is not None else _FakeParsed(version="", status=200, entries=[])
 
-    monkeypatch.setattr(executors.feedparser, "parse", fake_parse)
+    monkeypatch.setattr(executors, "fetch_feed", fake_parse)
     store = await Store(str(tmp_path / "feeds.db")).open()
     try:
         yield SimpleNamespace(responses=responses, store=store, ctx=ToolContext(store=store))
@@ -1591,7 +1592,7 @@ async def test_add_feed_rejects_non_feed(feeds):
 
 
 async def test_add_feed_reports_http_error(feeds):
-    feeds.responses["http://dead"] = _good_feed(status=503)
+    feeds.responses["http://dead"] = FeedFetchError("HTTP 503")
     out = await executors.add_feed(None, AddFeedArgs(url="http://dead"), feeds.ctx)
     assert out["added"] is False
     assert "503" in out["error"]

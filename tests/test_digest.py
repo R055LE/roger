@@ -21,6 +21,13 @@ def _feed(entries):
     return SimpleNamespace(entries=entries)
 
 
+def _set_feed(monkeypatch, parse):
+    async def fetch(url):
+        return parse(url)
+
+    monkeypatch.setattr(digest, "fetch_feed", fetch)
+
+
 def _resp(content):
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
@@ -74,7 +81,7 @@ async def test_collect_new_filters_seen_and_caps(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
         entries = [_entry(f"e{i}", published=time.gmtime(i)) for i in range(20)]
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed(entries))
+        _set_feed(monkeypatch, lambda url: _feed(entries))
         await store.mark_seen([("http://f", f"e{i}") for i in range(5)])
         got = await _collect_new(["http://f"], store)
         ids = {g["id"] for g in got}
@@ -92,7 +99,7 @@ async def test_collect_new_survives_a_dead_feed(tmp_path, monkeypatch):
                 raise RuntimeError("dead feed")
             return _feed([_entry("ok1")])
 
-        monkeypatch.setattr(digest.feedparser, "parse", parse)
+        _set_feed(monkeypatch, parse)
         got = await _collect_new(["bad", "good"], store)
         assert [g["id"] for g in got] == ["ok1"]
     finally:
@@ -133,7 +140,7 @@ async def test_not_configured(tmp_path):
 async def test_no_new_items_skips(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([]))
+        _set_feed(monkeypatch, lambda url: _feed([]))
         out = await run_digest_job(
             client=FakeClient(FakeChannel()), settings=_settings(), llm=FakeLLM([]), store=store
         )
@@ -145,9 +152,7 @@ async def test_no_new_items_skips(tmp_path, monkeypatch):
 async def test_posts_embed_and_dedupes_next_run(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(
-            digest.feedparser, "parse", lambda url: _feed([_entry("n1"), _entry("n2")])
-        )
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1"), _entry("n2")]))
         channel = FakeChannel()
         out = await run_digest_job(
             client=FakeClient(channel),
@@ -170,7 +175,7 @@ async def test_posts_embed_and_dedupes_next_run(tmp_path, monkeypatch):
 async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         channel = FakeChannel()
         out = await run_digest_job(
             client=FakeClient(channel),
@@ -190,7 +195,7 @@ async def test_forbidden_send_returns_sanitized_failure_and_stays_retryable(
 ):
     store = await _store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         channel = FakeChannel(raise_on_send=_http_error(discord.Forbidden, 403))
         out = await run_digest_job(
             client=FakeClient(channel),
@@ -305,7 +310,7 @@ async def test_personal_not_configured_when_no_feeds(tmp_path):
 async def test_personal_no_new_items_skips(tmp_path, monkeypatch):
     store = await _personal_store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([]))
+        _set_feed(monkeypatch, lambda url: _feed([]))
         out = await digest.run_personal_digest_job(
             client=FakePersonalClient(user=FakeUser()),
             settings=_personal_settings(),
@@ -320,7 +325,7 @@ async def test_personal_no_new_items_skips(tmp_path, monkeypatch):
 async def test_personal_posts_via_dm_when_no_channel_configured(tmp_path, monkeypatch):
     store = await _personal_store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         user = FakeUser()
         out = await digest.run_personal_digest_job(
             client=FakePersonalClient(user=user),
@@ -346,7 +351,7 @@ async def test_personal_posts_via_dm_when_no_channel_configured(tmp_path, monkey
 async def test_personal_posts_to_channel_when_configured(tmp_path, monkeypatch):
     store = await _personal_store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         channel = FakeChannel()
         out = await digest.run_personal_digest_job(
             client=FakePersonalClient(user=FakeUser(), channel=channel),
@@ -363,7 +368,7 @@ async def test_personal_posts_to_channel_when_configured(tmp_path, monkeypatch):
 async def test_personal_dm_creation_failure_is_reported(tmp_path, monkeypatch):
     store = await _personal_store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         user = FakeUser(raise_on_create_dm=_http_error(discord.Forbidden, 403))
         out = await digest.run_personal_digest_job(
             client=FakePersonalClient(user=user),
@@ -379,7 +384,7 @@ async def test_personal_dm_creation_failure_is_reported(tmp_path, monkeypatch):
 async def test_personal_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
     store = await _personal_store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         user = FakeUser()
         out = await digest.run_personal_digest_job(
             client=FakePersonalClient(user=user),
@@ -397,7 +402,7 @@ async def test_personal_budget_skips_post_and_stays_retryable(tmp_path, monkeypa
 async def test_personal_send_failure_is_reported(tmp_path, monkeypatch):
     store = await _personal_store(tmp_path)
     try:
-        monkeypatch.setattr(digest.feedparser, "parse", lambda url: _feed([_entry("n1")]))
+        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
         user = FakeUser(raise_on_send=_http_error(discord.HTTPException, 500))
         out = await digest.run_personal_digest_job(
             client=FakePersonalClient(user=user),
