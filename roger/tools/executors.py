@@ -13,8 +13,8 @@ import re
 from typing import Any
 
 import discord
-import feedparser
 
+from roger.feed_fetch import FeedFetchError, fetch_feed
 from roger.tools import members
 from roger.tools.context import ToolContext
 from roger.tools.guard import (
@@ -834,12 +834,11 @@ async def run_spark(
 async def validate_feed(url: str) -> dict[str, Any]:
     """Fetch a URL and confirm it parses as a live RSS/Atom feed. Never raises."""
     try:
-        parsed = await asyncio.to_thread(feedparser.parse, url)
-    except Exception as exc:  # DNS failure, bad URL, etc.
+        parsed = await fetch_feed(url)
+    except FeedFetchError as exc:
         return {"url": url, "ok": False, "error": f"fetch failed: {exc}"}
-    status = parsed.get("status")
-    if status is not None and status >= 400:
-        return {"url": url, "ok": False, "error": f"HTTP {status}"}
+    except Exception:
+        return {"url": url, "ok": False, "error": "fetch failed: unexpected error"}
     # feedparser sets a non-empty ``version`` (e.g. "rss20", "atom10") only for a recognized feed.
     if not parsed.get("version"):
         return {"url": url, "ok": False, "error": "not a recognized RSS/Atom feed"}
