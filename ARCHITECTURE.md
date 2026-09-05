@@ -220,12 +220,14 @@ The last five are read-only lookups against Discord's own data, added to close C
 existing tools rather than copying a general-purpose bot's feature list wholesale (most of that —
 leveling, economy, music — is off-shape for a single-guild admin assistant). `list_role_members`
 reuses the same on-demand, uncached lookup `delete_role`'s confirm preview already used
-(`roger/tools/members.py`, §2.1, ADR-0008) — no new intent. `list_audit_log`, `list_invites`, and
-`list_webhooks` need new permissions on Roger's role (View Audit Log, Manage Guild, Manage Webhooks
-respectively — see `deploy/README.md`); `list_scheduled_events` needs none, since scheduled events
-aren't privileged data. Deliberately **not** built alongside these: `delete_channel` (channels carry
-message history — content-bearing, stays under the blanket no-delete rule per ADR-0007, unlike the
-zero-permission roles that rule was narrowed for) and anything that mutates or removes a *member*
+(`roger/tools/members.py`, §2.1, ADR-0008) — no new intent. `list_invites` returns metadata but omits
+invite codes and URLs so an active access capability never reaches the model. `list_audit_log`,
+`list_invites`, and `list_webhooks` need new permissions on Roger's role (View Audit Log, Manage Guild,
+Manage Webhooks respectively — see `deploy/README.md`); `list_scheduled_events` needs none, since
+scheduled events aren't privileged data. Deliberately **not** built alongside these: `delete_channel`
+(channels carry message history — content-bearing, stays under the blanket no-delete rule per
+ADR-0007, unlike the zero-permission roles that rule was narrowed for) and anything that mutates or
+removes a *member*
 (timeout, kick, ban) — those reopen the no-destructive-tools invariant on a person rather than an
 inert object and need their own ADR-0007-style discussion before any code, not a silent add.
 

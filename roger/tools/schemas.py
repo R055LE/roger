@@ -261,7 +261,7 @@ class ListAuditLogArgs(ToolArgs):
 
 
 class ListInvitesArgs(ToolArgs):
-    """No arguments — returns all active invite links."""
+    """No arguments — returns safe metadata for all active invites."""
 
 
 class ListWebhooksArgs(ToolArgs):
@@ -585,8 +585,9 @@ REGISTRY: dict[str, ToolSpec] = {
     "list_invites": ToolSpec(
         name="list_invites",
         description=(
-            "List all active invite links: code, target channel, inviter, use count, and "
-            "expiry. Read-only. Requires the 'Manage Guild' permission on Roger's role."
+            "List safe metadata for all active invites: target channel, inviter, use count, and "
+            "expiry. Invite codes and URLs are omitted so they never reach the model. Read-only. "
+            "Requires the 'Manage Guild' permission on Roger's role."
         ),
         args_model=ListInvitesArgs,
     ),
