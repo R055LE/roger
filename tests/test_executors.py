@@ -1751,18 +1751,52 @@ async def test_list_audit_log_forbidden_names_the_permission():
         await executors.list_audit_log(guild, ListAuditLogArgs(limit=20))
 
 
-async def test_list_invites_reports_current_invites():
+async def test_list_invites_reports_safe_metadata_without_capabilities():
     guild = FakeGuild()
-    channel = guild.add_text("general")
+    general = guild.add_text("general")
+    announcements = guild.add_text("announcements")
     when = datetime(2026, 6, 1, tzinfo=UTC)
+    sentinel = "invite-capability-must-not-leave-discord"
     guild.invite_list = [
-        FakeInvite("abc123", channel, SimpleNamespace(display_name="Ross"), 3, 10, when)
+        FakeInvite(
+            f"{sentinel}-general",
+            general,
+            SimpleNamespace(display_name="Ross"),
+            3,
+            10,
+            when,
+        ),
+        FakeInvite(f"{sentinel}-announcements", announcements, None, 0, 0, None),
     ]
+
     out = await executors.list_invites(guild, ListInvitesArgs())
-    assert out["count"] == 1
-    assert out["invites"][0]["code"] == "abc123"
-    assert out["invites"][0]["channel"] == "general"
-    assert out["invites"][0]["uses"] == 3
+
+    assert out == {
+        "invites": [
+            {
+                "channel": "announcements",
+                "inviter": None,
+                "uses": 0,
+                "max_uses": None,
+                "expires_at": None,
+            },
+            {
+                "channel": "general",
+                "inviter": "Ross",
+                "uses": 3,
+                "max_uses": 10,
+                "expires_at": when.isoformat(),
+            },
+        ],
+        "count": 2,
+    }
+    assert sentinel not in admin._tool_message("invite-call", out)["content"]
+
+
+async def test_list_invites_returns_clean_empty_inventory():
+    out = await executors.list_invites(FakeGuild(), ListInvitesArgs())
+
+    assert out == {"invites": [], "count": 0}
 
 
 async def test_list_invites_forbidden_names_the_permission():

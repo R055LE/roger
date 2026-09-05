@@ -1208,19 +1208,28 @@ async def list_invites(
         invites = await guild.invites()
     except discord.Forbidden as exc:
         raise GuardError("I need 'Manage Guild' (see deploy/README.md)") from exc
+    entries = [
+        {
+            "channel": getattr(inv.channel, "name", None),
+            "inviter": getattr(inv.inviter, "display_name", None) if inv.inviter else None,
+            "uses": inv.uses,
+            "max_uses": inv.max_uses or None,
+            "expires_at": inv.expires_at.isoformat() if inv.expires_at else None,
+        }
+        for inv in invites
+    ]
+    entries.sort(
+        key=lambda entry: (
+            entry["channel"] or "",
+            entry["inviter"] or "",
+            entry["expires_at"] or "",
+            entry["uses"],
+            entry["max_uses"] or 0,
+        )
+    )
     return {
-        "invites": [
-            {
-                "code": inv.code,
-                "channel": getattr(inv.channel, "name", None),
-                "inviter": getattr(inv.inviter, "display_name", None) if inv.inviter else None,
-                "uses": inv.uses,
-                "max_uses": inv.max_uses or None,
-                "expires_at": inv.expires_at.isoformat() if inv.expires_at else None,
-            }
-            for inv in invites
-        ],
-        "count": len(invites),
+        "invites": entries,
+        "count": len(entries),
     }
 
 
