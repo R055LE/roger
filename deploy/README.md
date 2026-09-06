@@ -142,6 +142,20 @@ read-only container can write the SQLite DB into the bind mount.
   check plus token spend. On-demand only, not part of CI or the deploy timer; see the module
   docstring for exactly what it does and deliberately doesn't cover.
 
+## Metrics exposure
+
+Compose publishes Roger's unauthenticated Prometheus endpoint on `127.0.0.1:9108` by default. A
+Prometheus process on the Docker host can scrape `localhost:9108` without exposing operational
+metrics to the LAN. `METRICS_HOST_PORT` changes the host-side port.
+
+If Prometheus runs on another host, set `METRICS_BIND_ADDRESS` in `roger.env` to one trusted private
+host interface and point the scrape target at it. Do not use `0.0.0.0` or expose this port to an
+untrusted network: the endpoint has no authentication or TLS and includes build, spend, feed and
+audit-tally information.
+
+`METRICS_PORT=0` disables Roger's metrics server. Compose keeps a valid loopback mapping to the fixed
+container port, but no process listens behind it.
+
 ## Notes
 
 - **Pinning vs. tracking.** Third-party deps (base image, Python packages, sops) are pinned.

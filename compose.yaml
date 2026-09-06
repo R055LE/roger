@@ -11,8 +11,10 @@ services:
     volumes:
       - ./data:/data
     ports:
-      # Prometheus /metrics (backlog 3.1). Drop this mapping if METRICS_PORT=0 (endpoint disabled).
-      - "${METRICS_PORT:-9108}:${METRICS_PORT:-9108}"
+      # Prometheus has no auth or TLS. Keep it host-local unless an operator explicitly names a
+      # trusted private interface. The fixed container target keeps METRICS_PORT=0 valid: Roger
+      # starts no server, so the published host socket has nothing listening behind it.
+      - "${METRICS_BIND_ADDRESS:-127.0.0.1}:${METRICS_HOST_PORT:-9108}:9108"
     environment:
       # Secrets are injected from the process env by `sops exec-env` — never hard-coded here.
       DISCORD_TOKEN: ${DISCORD_TOKEN:?set via sops exec-env}
