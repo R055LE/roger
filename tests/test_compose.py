@@ -37,6 +37,25 @@ def _compose_env_keys() -> set[str]:
     return keys
 
 
+def _compose_port_bindings() -> list[str]:
+    bindings: list[str] = []
+    ports_indent: int | None = None
+    for line in _COMPOSE.read_text().splitlines():
+        stripped = line.strip()
+        if ports_indent is None:
+            if stripped == "ports:":
+                ports_indent = len(line) - len(line.lstrip())
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        if len(line) - len(line.lstrip()) <= ports_indent:
+            break
+        if stripped.startswith("- "):
+            bindings.append(stripped.removeprefix("- ").strip('"'))
+    assert ports_indent is not None, "no ports: block found in compose.yaml"
+    return bindings
+
+
 def test_every_setting_is_forwarded_by_compose():
     expected = {name.upper() for name in Settings.model_fields}
     missing = expected - _compose_env_keys()
@@ -53,3 +72,9 @@ def test_compose_forwards_nothing_the_app_ignores():
         f"compose.yaml forwards env vars with no matching Settings field: {sorted(dangling)} "
         "— remove them, or add the field to roger.config.Settings"
     )
+
+
+def test_metrics_publish_defaults_to_loopback_with_a_fixed_container_target():
+    assert _compose_port_bindings() == [
+        "${METRICS_BIND_ADDRESS:-127.0.0.1}:${METRICS_HOST_PORT:-9108}:9108"
+    ]

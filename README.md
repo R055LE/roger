@@ -77,10 +77,15 @@ sops exec-env roger.env 'docker compose up -d'        # pulls the published imag
 
 ## Observability
 
-Roger exposes Prometheus metrics on `:${METRICS_PORT}/metrics` (default `9108`; set `METRICS_PORT=0`
-to disable). Event counters — LLM requests, errors, and budget rejections — are incremented in
-process; state gauges — token/dollar spend, caps, feed count, and audit tallies — are refreshed from
-SQLite so they survive restarts. Key series:
+Roger exposes Prometheus metrics on port `9108` inside the container by default; set
+`METRICS_PORT=0` to disable the server. Compose publishes it as
+`127.0.0.1:${METRICS_HOST_PORT:-9108}` by default. Set `METRICS_BIND_ADDRESS` only when a scraper on a
+trusted private interface needs remote access. The endpoint has no authentication or TLS and must
+not be exposed to an untrusted network.
+
+Event counters — LLM requests, errors, and budget rejections — are incremented in process; state
+gauges — token/dollar spend, caps, feed count, and audit tallies — are refreshed from SQLite so they
+survive restarts. Key series:
 
 | Metric | Type | Labels |
 |---|---|---|

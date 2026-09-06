@@ -1,12 +1,13 @@
 # Prometheus scrape job for Roger's /metrics endpoint (backlog 3.1).
 #
-# Merge this job into your Prometheus config. Point it at the host:port where the container's
-# METRICS_PORT (default 9108) is published — see compose.yaml's `ports:` mapping. Replace the
-# placeholder target with your own host; the public repo carries no real hostnames.
+# Merge this job into your Prometheus config. Compose publishes the endpoint on host loopback port
+# 9108 by default. If Prometheus runs elsewhere, set METRICS_BIND_ADDRESS to a trusted private host
+# interface and replace the target below. The endpoint has no authentication or TLS; never bind it
+# to an untrusted network. The public repo carries no real hostnames.
 scrape_configs:
   - job_name: roger
     scrape_interval: 30s
     static_configs:
-      - targets: ["localhost:9108"] # e.g. the Docker host publishing METRICS_PORT
+      - targets: ["localhost:9108"] # Docker host; match METRICS_HOST_PORT if overridden
         labels:
           app: roger
