@@ -18,10 +18,6 @@ def _entry(entry_id, title="t", link="l", summary="s", published=None):
     )
 
 
-def _feed(entries):
-    return SimpleNamespace(entries=entries)
-
-
 def _choice_text(index, blurb="A short blurb.", question="What do you think?"):
     return f"ITEM: {index}\nBLURB: {blurb}\nQUESTION: {question}"
 

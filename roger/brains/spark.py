@@ -1,10 +1,10 @@
 """Spark brain: one grounded item + a discussion question, posted to a public channel (roadmap
 item 2 -- see docs/superpowers/specs/2026-08-19-spark-design.md).
 
-No Discord message input enters this path. Feed content is external and untrusted. Runs on a daily
-``discord.ext.tasks`` loop and is also triggerable via the ``run_spark`` tool. Reuses the same feed
-list and collection logic as the digest; the only new step is asking the model to *choose* one item
-and write a question about it, instead of summarizing everything.
+No Discord message input enters this path. Item content is external and untrusted. Runs on a daily
+``discord.ext.tasks`` loop and is also triggerable via the ``run_spark`` tool. Reuses the same Scout
+source and collection logic as the digest; the only new step is asking the model to *choose* one
+item and write a question about it, instead of summarizing everything.
 """
 
 from __future__ import annotations

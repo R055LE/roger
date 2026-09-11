@@ -28,8 +28,7 @@ from roger.tools.guard import GuardError
 
 log = logging.getLogger("roger.gigabrain")
 
-# Read-only tools only — server structure/state, not digest's content-curation domain
-# (list_feeds/suggest_feeds are deliberately excluded, that's digest's own concern).
+# Read-only tools only — server structure/state, not content curation.
 GIGABRAIN_TOOLS: tuple[str, ...] = (
     "list_structure",
     "server_stats",

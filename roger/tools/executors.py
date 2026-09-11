@@ -7,14 +7,12 @@ would make, so the owner approves against a real diff — not the model's paraph
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from typing import Any
 
 import discord
 
-from roger.feed_fetch import FeedFetchError, fetch_feed
 from roger.tools import members
 from roger.tools.context import ToolContext
 from roger.tools.guard import (
@@ -26,9 +24,7 @@ from roger.tools.guard import (
     sanitize_display_name,
 )
 from roger.tools.schemas import (
-    AddFeedArgs,
     AddMemberRoleArgs,
-    AddPersonalFeedArgs,
     AddReactionArgs,
     AuditPermissionsArgs,
     CreateChannelArgs,
@@ -38,19 +34,15 @@ from roger.tools.schemas import (
     EditChannelArgs,
     EditRoleArgs,
     ListAuditLogArgs,
-    ListFeedsArgs,
     ListForumPostsArgs,
     ListInvitesArgs,
-    ListPersonalFeedsArgs,
     ListRoleMembersArgs,
     ListScheduledEventsArgs,
     ListStructureArgs,
     ListWebhooksArgs,
     MoveChannelArgs,
     PostMessageArgs,
-    RemoveFeedArgs,
     RemoveMemberRoleArgs,
-    RemovePersonalFeedArgs,
     RemoveReactionArgs,
     ReplyToForumPostArgs,
     RunDigestArgs,
@@ -59,8 +51,6 @@ from roger.tools.schemas import (
     SetNicknameArgs,
     SetPermissionsArgs,
     SetPresenceArgs,
-    SuggestFeedsArgs,
-    SuggestPersonalFeedsArgs,
 )
 
 # --------------------------------------------------------------------------- snapshot
@@ -843,130 +833,6 @@ async def run_spark(
     )
 
 
-# --------------------------------------------------------------------------- digest feeds
-
-
-async def validate_feed(url: str) -> dict[str, Any]:
-    """Fetch a URL and confirm it parses as a live RSS/Atom feed. Never raises."""
-    try:
-        parsed = await fetch_feed(url)
-    except FeedFetchError as exc:
-        return {"url": url, "ok": False, "error": f"fetch failed: {exc}"}
-    except Exception:
-        return {"url": url, "ok": False, "error": "fetch failed: unexpected error"}
-    # feedparser sets a non-empty ``version`` (e.g. "rss20", "atom10") only for a recognized feed.
-    if not parsed.get("version"):
-        return {"url": url, "ok": False, "error": "not a recognized RSS/Atom feed"}
-    title = parsed.feed.get("title") if parsed.get("feed") else None
-    return {"url": url, "ok": True, "title": title, "entries": len(parsed.entries)}
-
-
-def _need_store(ctx: ToolContext | None) -> Any:
-    if ctx is None or ctx.store is None:
-        raise GuardError("the feed store is unavailable in this context")
-    return ctx.store
-
-
-async def suggest_feeds(
-    guild: discord.Guild, args: SuggestFeedsArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    # Vet candidate URLs against the live web without committing. The model proposes; this grounds.
-    candidates = await asyncio.gather(*(validate_feed(url) for url in args.urls))
-    return {"candidates": list(candidates)}
-
-
-async def add_feed(
-    guild: discord.Guild, args: AddFeedArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    store = _need_store(ctx)
-    checked = await validate_feed(args.url)
-    if not checked["ok"]:
-        return {"added": False, "url": args.url, "error": checked["error"]}
-    added = await store.add_feed(args.url, checked.get("title"))
-    return {
-        "added": added,
-        "url": args.url,
-        "title": checked.get("title"),
-        "entries": checked.get("entries"),
-        "note": None if added else "already in the feed list",
-    }
-
-
-async def remove_feed(
-    guild: discord.Guild, args: RemoveFeedArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    store = _need_store(ctx)
-    removed = await store.remove_feed(args.url)
-    return {
-        "removed": removed,
-        "url": args.url,
-        "note": None if removed else "no feed with that exact URL (call list_feeds first)",
-    }
-
-
-async def list_feeds(
-    guild: discord.Guild, args: ListFeedsArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    store = _need_store(ctx)
-    rows = await store.list_feeds()
-    return {
-        "feeds": [{"url": r["url"], "title": r["title"]} for r in rows],
-        "count": len(rows),
-    }
-
-
-# --------------------------------------------------------------------------- personal digest feeds
-
-
-async def suggest_personal_feeds(
-    guild: discord.Guild, args: SuggestPersonalFeedsArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    candidates = await asyncio.gather(*(validate_feed(url) for url in args.urls))
-    return {"candidates": list(candidates)}
-
-
-async def add_personal_feed(
-    guild: discord.Guild, args: AddPersonalFeedArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    store = _need_store(ctx)
-    checked = await validate_feed(args.url)
-    if not checked["ok"]:
-        return {"added": False, "url": args.url, "error": checked["error"]}
-    added = await store.add_personal_feed(args.url, checked.get("title"))
-    return {
-        "added": added,
-        "url": args.url,
-        "title": checked.get("title"),
-        "entries": checked.get("entries"),
-        "note": None if added else "already in the personal feed list",
-    }
-
-
-async def remove_personal_feed(
-    guild: discord.Guild, args: RemovePersonalFeedArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    store = _need_store(ctx)
-    removed = await store.remove_personal_feed(args.url)
-    return {
-        "removed": removed,
-        "url": args.url,
-        "note": None
-        if removed
-        else "no feed with that exact URL (call list_personal_feeds first)",
-    }
-
-
-async def list_personal_feeds(
-    guild: discord.Guild, args: ListPersonalFeedsArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    store = _need_store(ctx)
-    rows = await store.list_personal_feeds()
-    return {
-        "feeds": [{"url": r["url"], "title": r["title"]} for r in rows],
-        "count": len(rows),
-    }
-
-
 # --------------------------------------------------------------------------- toys (self / read)
 
 # Where the persisted presence "outfit" lives in the meta table. bot.py reads this key on boot to
@@ -1425,14 +1291,6 @@ EXECUTORS = {
     "move_channel": move_channel,
     "run_digest": run_digest,
     "run_spark": run_spark,
-    "suggest_feeds": suggest_feeds,
-    "add_feed": add_feed,
-    "remove_feed": remove_feed,
-    "list_feeds": list_feeds,
-    "suggest_personal_feeds": suggest_personal_feeds,
-    "add_personal_feed": add_personal_feed,
-    "remove_personal_feed": remove_personal_feed,
-    "list_personal_feeds": list_personal_feeds,
     "set_presence": set_presence,
     "set_nickname": set_nickname,
     "server_stats": server_stats,

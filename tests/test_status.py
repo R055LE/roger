@@ -111,7 +111,7 @@ def test_unreachable_channels_empty_when_nothing_configured_or_everything_reacha
     assert _unreachable_channels(guild, settings) == []
 
 
-def test_format_status_renders_perms_usage_feeds_and_actions():
+def test_format_status_renders_perms_usage_and_actions():
     body = _format_status(
         guild_name="Test Guild",
         missing_perms=[],
@@ -119,7 +119,6 @@ def test_format_status_renders_perms_usage_feeds_and_actions():
         usage={"admin": 12345, "ambient": 0, "digest": 200},
         caps={"admin": 150000, "ambient": 40000, "digest": 30000},
         cost={"admin": 0.0123, "ambient": 0.0, "digest": 0.002},
-        feeds_count=3,
         recent_audit=[{"ts": 0, "tool": "create_channel", "status": "ok", "detail": None}],
         digest_hour=8,
         digest_configured=True,
@@ -132,7 +131,7 @@ def test_format_status_renders_perms_usage_feeds_and_actions():
     assert "12,345 / 150,000" in body
     assert "$0.0123" in body  # per-brain cost
     assert "total" in body and "$0.0143" in body  # summed across brains
-    assert "feeds: 3" in body and "digest: 08:00 UTC" in body
+    assert "digest: 08:00 UTC" in body
     assert "spark: 07:00 UTC" in body
     assert "00:00  create_channel" in body  # epoch ts rendered in the given tz
 
@@ -145,7 +144,6 @@ def test_format_status_flags_missing_perms_and_unconfigured_digest():
         usage={},
         caps={},
         cost={},
-        feeds_count=0,
         recent_audit=[],
         digest_hour=8,
         digest_configured=False,
@@ -166,7 +164,6 @@ def test_format_status_flags_channel_problems():
         usage={},
         caps={},
         cost={},
-        feeds_count=0,
         recent_audit=[],
         digest_hour=8,
         digest_configured=True,
@@ -185,7 +182,6 @@ def test_format_status_includes_audit_detail_when_present():
         usage={},
         caps={},
         cost={},
-        feeds_count=0,
         recent_audit=[
             {"ts": 0, "tool": "set_permissions", "status": "denied", "detail": "owner denied"}
         ],
@@ -226,7 +222,6 @@ async def test_gather_status_reads_live_store(tmp_path):
     try:
         await store.add_usage("admin", 100, 50, cost_usd=0.0075)  # 150 in+out
         await store.add_usage("spark", 20, 10, cost_usd=0.001)
-        await store.add_feed("http://a", "A")
         await store.record_audit(
             actor_id=1, brain="admin", tool="create_channel", args=None,
             status=AuditStatus.OK, detail=None,
@@ -239,7 +234,6 @@ async def test_gather_status_reads_live_store(tmp_path):
         assert "150 / 150,000" in body
         assert "$0.0075" in body  # OpenRouter-reported cost surfaced from the live store
         assert "spark" in body and "30 / 30,000" in body
-        assert "feeds: 1" in body
         assert "create_channel" in body
     finally:
         await store.close()
@@ -278,7 +272,6 @@ def test_format_status_shows_usd_cap_when_configured():
         caps={"admin": 150000},
         cost={"admin": 0.5},
         usd_caps={"admin": 2.0},
-        feeds_count=0,
         recent_audit=[],
         digest_hour=8,
         digest_configured=True,
@@ -306,11 +299,6 @@ async def test_gather_status_shows_digest_configuration_and_last_attempt(tmp_pat
     store = await Store(str(tmp_path / "s.db")).open()
     try:
         guild = _fake_guild(channels={42: _FakeChannel()})
-        assert "digest: 08:00 UTC (no feeds)" in await gather_status(
-            store=store, settings=_settings(), guild=guild
-        )
-
-        await store.add_feed("http://feed.example", "Feed")
         assert "digest: 08:00 UTC (never run)" in await gather_status(
             store=store, settings=_settings(), guild=guild
         )
@@ -351,7 +339,6 @@ async def test_gather_status_shows_digest_configuration_and_last_attempt(tmp_pat
 async def test_gather_status_reads_digest_attempt_after_store_reopens(tmp_path):
     path = tmp_path / "s.db"
     store = await Store(str(path)).open()
-    await store.add_feed("http://feed.example", "Feed")
     await store.set_meta(
         DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 1, "result": "success"}'
     )
