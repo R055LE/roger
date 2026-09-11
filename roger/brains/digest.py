@@ -1,8 +1,12 @@
-"""Digest brain: a scheduled RSS/Atom summary posted to one channel (§9).
+"""Digest brain: a scheduled summary of Scout's picks, posted to one channel (§9).
 
 No user input anywhere in this path. Runs on a daily ``discord.ext.tasks`` loop and is also
-triggerable via the ``run_digest`` tool. One dead feed never kills the run; entries are marked seen
-only after a successful post, so a failed post retries the same items next time.
+triggerable via the ``run_digest`` tool. Entries are marked seen only after a successful post, so a
+failed post retries the same items next time.
+
+Items come from Scout (``roger.scout_source``), not from feeds fetched here. Scout scores against an
+explicit watchlist and says why each item matched, so the model summarizes a short explained
+shortlist instead of compressing whatever a feed happened to publish. See ADR-0012.
 """
 
 from __future__ import annotations
@@ -15,8 +19,8 @@ from zoneinfo import ZoneInfo
 
 import discord
 
-from roger.feed_fetch import FeedFetchError, fetch_feed
 from roger.llm import LLM, BudgetExceeded, LLMConfigError
+from roger.scout_source import collect_from_scout
 from roger.store import Store
 
 log = logging.getLogger("roger.digest")
@@ -31,43 +35,24 @@ DIGEST_SYSTEM = (
 )
 
 
-async def _collect_new(feeds: list[str], store: Store) -> list[dict[str, Any]]:
-    collected: list[dict[str, Any]] = []
-    for url in feeds:
-        try:
-            parsed = await fetch_feed(url)
-        except FeedFetchError as exc:
-            log.warning("feed fetch failed: %s", exc)
-            continue
-        except Exception:
-            log.exception("unexpected feed fetch failure")
-            continue
+def _render_entry(entry: dict[str, Any]) -> str:
+    """One item, with the reason Scout surfaced it.
 
-        items: list[dict[str, Any]] = []
-        for entry in parsed.entries:
-            entry_id = getattr(entry, "id", None) or getattr(entry, "link", None)
-            if not entry_id:
-                continue
-            items.append(
-                {
-                    "feed_url": url,
-                    "id": entry_id,
-                    "title": getattr(entry, "title", "(untitled)"),
-                    "link": getattr(entry, "link", ""),
-                    "summary": (getattr(entry, "summary", "") or "")[:_SUMMARY_CAP],
-                    "published": getattr(entry, "published_parsed", None),
-                }
-            )
-
-        unseen = await store.filter_unseen(url, [item["id"] for item in items])
-        collected.extend(item for item in items if item["id"] in unseen)
-
-    collected.sort(key=lambda item: item["published"] or _EPOCH, reverse=True)
-    return collected[:MAX_ITEMS]
+    The reason is given to the model on purpose: it is the difference between
+    summarizing a feed and summarizing a selection, and it lets the model weight
+    an item that matched three topics over one that scraped past on a keyword.
+    """
+    why = ", ".join(
+        f"{m.get('topic')}:{m.get('term')}" for m in (entry.get("matched") or [])
+    )
+    head = f"- {entry['title']} ({entry['link']})"
+    if why:
+        head += f"\n  [relevance {entry.get('relevance', 0)} via {why}]"
+    return f"{head}\n  {entry['summary']}"
 
 
 async def _summarize(entries: list[dict[str, Any]], llm: LLM) -> str:
-    body = "\n".join(f"- {e['title']} ({e['link']})\n  {e['summary']}" for e in entries)
+    body = "\n".join(_render_entry(e) for e in entries)
     messages = [
         {"role": "system", "content": DIGEST_SYSTEM},
         {"role": "user", "content": f"Summarize these feed items:\n\n{body}"},
@@ -76,37 +61,22 @@ async def _summarize(entries: list[dict[str, Any]], llm: LLM) -> str:
     return response.choices[0].message.content or "(no summary)"
 
 
-async def seed_feeds_if_empty(store: Store, settings: Any) -> int:
-    """One-time bootstrap: import DIGEST_FEEDS the first time the feed table is empty.
-
-    After the initial seed the store is authoritative — Roger adds and removes feeds at runtime,
-    and DIGEST_FEEDS acts only as the default set that returns if the list is ever fully cleared.
-    """
-    if await store.count_feeds() > 0:
-        return 0
-    return await store.seed_feeds(settings.feeds)
-
-
-async def seed_personal_feeds_if_empty(store: Store, settings: Any) -> int:
-    """One-time bootstrap: import PERSONAL_DIGEST_FEEDS the first time the table is empty.
-
-    Same one-shot rule as ``seed_feeds_if_empty`` — after the initial seed the store is
-    authoritative.
-    """
-    if await store.count_personal_feeds() > 0:
-        return 0
-    return await store.seed_personal_feeds(settings.personal_feeds)
-
-
 async def run_digest_job(*, client: Any, settings: Any, llm: LLM, store: Store) -> dict[str, Any]:
-    feeds = [row["url"] for row in await store.list_feeds()]
     channel_id = settings.digest_channel_id
     if channel_id is None:
         return {"status": "digest destination unset"}
-    if not feeds:
-        return {"status": "digest has no feeds"}
 
-    entries = await _collect_new(feeds, store)
+    batch = await collect_from_scout(
+        settings.scout_digest_path,
+        store,
+        max_age_hours=settings.scout_max_age_hours,
+        limit=MAX_ITEMS,
+    )
+    if batch.status:
+        # Scout is a hard dependency. Surface a broken producer rather than
+        # reporting "no new items", which reads as a quiet day.
+        return {"status": batch.status}
+    entries = batch.entries
     if not entries:
         return {"status": "no new items"}
 
@@ -145,11 +115,15 @@ async def run_personal_digest_job(
     "configured" — "not configured" here means "no feeds," since a DM destination is always
     reachable in principle.
     """
-    feeds = [row["url"] for row in await store.list_personal_feeds()]
-    if not feeds:
-        return {"status": "personal digest not configured (no feeds)"}
-
-    entries = await _collect_new(feeds, store)
+    batch = await collect_from_scout(
+        settings.scout_digest_path,
+        store,
+        max_age_hours=settings.scout_max_age_hours,
+        limit=MAX_ITEMS,
+    )
+    if batch.status:
+        return {"status": batch.status}
+    entries = batch.entries
     if not entries:
         return {"status": "no new items"}
 

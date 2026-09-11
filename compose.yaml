@@ -10,6 +10,13 @@ services:
       - /tmp
     volumes:
       - ./data:/data
+      # Scout's output, read-only. Roger consumes digests; it never influences
+      # what Scout collects, and :ro means the container cannot leave anything
+      # behind in host state either.
+      # Scout runs on this host as its own compose service and writes here.
+      # Read-only: Roger consumes digests and never influences what Scout
+      # collects, and :ro means the container cannot litter host state either.
+      - ${SCOUT_HOST_DIGEST_DIR:-/opt/scout/data/digests}:/scout/digests:ro
     ports:
       # Prometheus has no auth or TLS. Keep it host-local unless an operator explicitly names a
       # trusted private interface. The fixed container target keeps METRICS_PORT=0 valid: Roger
@@ -22,6 +29,10 @@ services:
       OWNER_ID: ${OWNER_ID:?}
       GUILD_ID: ${GUILD_ID:?}
       # Non-secret config: safe defaults, overridable from roger.env.
+      # Path *inside* the container. The host side of the mount is
+      # SCOUT_HOST_DIGEST_DIR above; they are deliberately different names.
+      SCOUT_DIGEST_DIR: ${SCOUT_DIGEST_DIR:-/scout/digests}
+      SCOUT_MAX_AGE_HOURS: ${SCOUT_MAX_AGE_HOURS:-36}
       OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       MODEL_ADMIN: ${MODEL_ADMIN:-}
       MODEL_AMBIENT: ${MODEL_AMBIENT:-}
@@ -49,10 +60,8 @@ services:
       AMBIENT_RATE_PER_USER: ${AMBIENT_RATE_PER_USER:-5}
       AMBIENT_RATE_WINDOW_S: ${AMBIENT_RATE_WINDOW_S:-600}
       AMBIENT_GLOBAL_HOURLY: ${AMBIENT_GLOBAL_HOURLY:-30}
-      DIGEST_FEEDS: ${DIGEST_FEEDS:-}
       DIGEST_CHANNEL_ID: ${DIGEST_CHANNEL_ID:-}
       DIGEST_HOUR: ${DIGEST_HOUR:-8}
-      PERSONAL_DIGEST_FEEDS: ${PERSONAL_DIGEST_FEEDS:-}
       PERSONAL_DIGEST_CHANNEL_ID: ${PERSONAL_DIGEST_CHANNEL_ID:-}
       PERSONAL_DIGEST_HOUR: ${PERSONAL_DIGEST_HOUR:-7}
       SPARK_CHANNEL_ID: ${SPARK_CHANNEL_ID:-}

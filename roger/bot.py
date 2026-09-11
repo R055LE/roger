@@ -32,8 +32,6 @@ from roger.brains.ambient import AmbientLimiter, handle_ambient
 from roger.brains.digest import (
     run_digest_job,
     run_personal_digest_job,
-    seed_feeds_if_empty,
-    seed_personal_feeds_if_empty,
 )
 from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
 from roger.brains.spark import run_spark_job
@@ -627,15 +625,6 @@ class RogerClient(discord.Client):
         _register_commands(self)
         # Guild-scoped sync is instant and never leaks the command to other servers.
         await self.tree.sync(guild=self._guild)
-        # Bootstrap the curated feed list from DIGEST_FEEDS on first run; then the store owns it.
-        seeded = await seed_feeds_if_empty(self.store, self.settings)
-        if seeded:
-            log.info("seeded %d feed(s) from DIGEST_FEEDS into the store", seeded)
-        personal_seeded = await seed_personal_feeds_if_empty(self.store, self.settings)
-        if personal_seeded:
-            log.info(
-                "seeded %d feed(s) from PERSONAL_DIGEST_FEEDS into the store", personal_seeded
-            )
         await self._maybe_prune()  # tidy expired rows on boot; the watchdog repeats it daily
         self._heartbeat.start()  # liveness for the Dockerfile HEALTHCHECK (always on)
         if self.settings.metrics_port:
