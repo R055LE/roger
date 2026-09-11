@@ -6,6 +6,7 @@ Nothing is read from a committed file — see the security posture in the README
 
 from __future__ import annotations
 
+import pathlib
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, field_validator
@@ -79,18 +80,23 @@ class Settings(BaseSettings):
     ambient_rate_window_s: int = Field(default=600, gt=0)
     ambient_global_hourly: int = Field(default=30, gt=0)
 
+    # --- scout (the item source for every scheduled brain; see ADR-0012) ---
+    # Read-only mount of agent-platform's ~/.local/state/scout/digests.
+    scout_digest_dir: str = "/scout/digests"
+    # Older than this and the brains report a broken producer rather than a quiet
+    # day, so the ops alerting sees a Scout that stopped running.
+    scout_max_age_hours: int = 36
+
     # --- digest ---
-    digest_feeds: str = ""
     digest_channel_id: int | None = Field(default=None, gt=0)
     digest_hour: int = Field(default=8, ge=0, le=23)
 
     # --- personal digest (owner-only, DM by default) ---
-    personal_digest_feeds: str = ""
     # unset = DM the owner directly; set = post there instead (same shape as digest_channel_id).
     personal_digest_channel_id: int | None = Field(default=None, gt=0)
     personal_digest_hour: int = Field(default=7, ge=0, le=23)
 
-    # --- spark (no feed list of its own — reuses digest_feeds). Required channel, no DM
+    # --- spark (no source of its own — shares Scout's output). Required channel, no DM
     # fallback: a discussion prompt needs an audience. ---
     spark_channel_id: int | None = Field(default=None, gt=0)
     spark_hour: int = Field(default=7, ge=0, le=23)
@@ -160,12 +166,8 @@ class Settings(BaseSettings):
         return _split_csv(self.model_spark)
 
     @property
-    def feeds(self) -> list[str]:
-        return _split_csv(self.digest_feeds)
-
-    @property
-    def personal_feeds(self) -> list[str]:
-        return _split_csv(self.personal_digest_feeds)
+    def scout_digest_path(self) -> pathlib.Path:
+        return pathlib.Path(self.scout_digest_dir)
 
 
 def load_settings() -> Settings:

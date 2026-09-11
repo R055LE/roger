@@ -103,16 +103,10 @@ def test_empty_optional_channel_id_becomes_none(monkeypatch, setting):
 def test_personal_digest_defaults(monkeypatch):
     _set_required(monkeypatch)
     settings = Settings()
-    assert settings.personal_digest_feeds == ""
-    assert settings.personal_feeds == []
     assert settings.personal_digest_channel_id is None
     assert settings.personal_digest_hour == 7
 
 
-def test_personal_feeds_is_parsed_to_list(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.setenv("PERSONAL_DIGEST_FEEDS", "http://a, http://b ,http://c")
-    assert Settings().personal_feeds == ["http://a", "http://b", "http://c"]
 
 
 def test_missing_required_field_raises(monkeypatch):

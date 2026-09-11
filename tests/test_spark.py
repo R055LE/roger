@@ -4,10 +4,11 @@ from types import SimpleNamespace
 
 import discord
 import pytest
+from conftest import write_digest as _write_digest
 
-from roger.brains import digest as digest_module
 from roger.brains.spark import SparkParseError, _format_candidates, _parse_choice, run_spark_job
 from roger.llm import BudgetExceeded, LLMConfigError
+from roger.scout_source import collect_from_scout
 from roger.store import Store
 
 
@@ -19,13 +20,6 @@ def _entry(entry_id, title="t", link="l", summary="s", published=None):
 
 def _feed(entries):
     return SimpleNamespace(entries=entries)
-
-
-def _set_feed(monkeypatch, parse):
-    async def fetch(url):
-        return parse(url)
-
-    monkeypatch.setattr(digest_module, "fetch_feed", fetch)
 
 
 def _choice_text(index, blurb="A short blurb.", question="What do you think?"):
@@ -121,15 +115,16 @@ def _http_error(kind, status):
     return kind(response, "boom")
 
 
-def _settings(channel_id=42, tz="America/Detroit"):
-    return SimpleNamespace(spark_channel_id=channel_id, tz=tz)
+def _settings(channel_id=42, tz="America/Detroit", tmp_path=None, max_age_hours=36):
+    return SimpleNamespace(
+        spark_channel_id=channel_id, tz=tz,
+        scout_digest_path=(tmp_path / "digests") if tmp_path else None,
+        scout_max_age_hours=max_age_hours,
+    )
 
 
-async def _store(tmp_path, feeds=("http://f",)):
-    store = await Store(str(tmp_path / "spk.db")).open()
-    for url in feeds:
-        await store.add_feed(url, None)
-    return store
+async def _store(tmp_path):
+    return await Store(str(tmp_path / "spk.db")).open()
 
 
 async def test_not_configured(tmp_path):
@@ -137,7 +132,7 @@ async def test_not_configured(tmp_path):
     try:
         out = await run_spark_job(
             client=FakeClient(),
-            settings=_settings(channel_id=None),
+            settings=_settings(channel_id=None, tmp_path=tmp_path),
             llm=FakeLLM([]),
             store=store,
         )
@@ -149,9 +144,12 @@ async def test_not_configured(tmp_path):
 async def test_no_new_items_skips(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(monkeypatch, lambda url: _feed([]))
+        _write_digest(tmp_path, [])
         out = await run_spark_job(
-            client=FakeClient(FakeChannel()), settings=_settings(), llm=FakeLLM([]), store=store
+            client=FakeClient(FakeChannel()),
+            settings=_settings(tmp_path=tmp_path),
+            llm=FakeLLM([]),
+            store=store,
         )
         assert out["status"] == "no new items"
     finally:
@@ -161,14 +159,11 @@ async def test_no_new_items_skips(tmp_path, monkeypatch):
 async def test_posts_embed_and_marks_only_the_chosen_item_seen(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(
-            monkeypatch,
-            lambda url: _feed([_entry("n1", title="First"), _entry("n2", title="Second")]),
-        )
+        _write_digest(tmp_path, [_entry("n1", title="First"), _entry("n2", title="Second")])
         channel = FakeChannel()
         out = await run_spark_job(
             client=FakeClient(channel),
-            settings=_settings(),
+            settings=_settings(tmp_path=tmp_path),
             llm=FakeLLM([_resp(_choice_text(2, question="Thoughts?"))]),
             store=store,
         )
@@ -183,7 +178,11 @@ async def test_posts_embed_and_marks_only_the_chosen_item_seen(tmp_path, monkeyp
         assert allowed_mentions.users is False
 
         # The passed-over item ("n1") must still be collectible -- only "n2" was marked seen.
-        remaining = await digest_module._collect_new(["http://f"], store)
+        remaining = (
+            await collect_from_scout(
+                tmp_path / "digests", store, max_age_hours=36, limit=50
+            )
+        ).entries
         assert [e["id"] for e in remaining] == ["n1"]
     finally:
         await store.close()
@@ -192,17 +191,21 @@ async def test_posts_embed_and_marks_only_the_chosen_item_seen(tmp_path, monkeyp
 async def test_unparseable_response_skips_cleanly(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
+        _write_digest(tmp_path, [_entry("n1")])
         channel = FakeChannel()
         out = await run_spark_job(
             client=FakeClient(channel),
-            settings=_settings(),
+            settings=_settings(tmp_path=tmp_path),
             llm=FakeLLM([_resp("not the right format at all")]),
             store=store,
         )
         assert out["status"] == "unparseable response; skipped"
         assert channel.sent == []
-        remaining = await digest_module._collect_new(["http://f"], store)
+        remaining = (
+            await collect_from_scout(
+                tmp_path / "digests", store, max_age_hours=36, limit=50
+            )
+        ).entries
         assert len(remaining) == 1  # not marked seen -- retryable
     finally:
         await store.close()
@@ -211,16 +214,13 @@ async def test_unparseable_response_skips_cleanly(tmp_path, monkeypatch):
 async def test_public_output_is_bounded_and_does_not_link_unsafe_urls(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(
-            monkeypatch,
-            lambda url: _feed(
-                [_entry("n1", title="@everyone " + "t" * 400, link="javascript:alert(1)")]
-            ),
+        _write_digest(
+            tmp_path, [_entry("n1", title="@everyone " + "t" * 400, link="javascript:alert(1)")]
         )
         channel = FakeChannel()
         out = await run_spark_job(
             client=FakeClient(channel),
-            settings=_settings(),
+            settings=_settings(tmp_path=tmp_path),
             llm=FakeLLM([_resp(_choice_text(1, blurb="@here", question="@everyone?"))]),
             store=store,
         )
@@ -238,17 +238,21 @@ async def test_public_output_is_bounded_and_does_not_link_unsafe_urls(tmp_path, 
 async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
+        _write_digest(tmp_path, [_entry("n1")])
         channel = FakeChannel()
         out = await run_spark_job(
             client=FakeClient(channel),
-            settings=_settings(),
+            settings=_settings(tmp_path=tmp_path),
             llm=FakeLLM([BudgetExceeded("spark", 100, 50)]),
             store=store,
         )
         assert "budget" in out["status"]
         assert channel.sent == []
-        remaining = await digest_module._collect_new(["http://f"], store)
+        remaining = (
+            await collect_from_scout(
+                tmp_path / "digests", store, max_age_hours=36, limit=50
+            )
+        ).entries
         assert len(remaining) == 1
     finally:
         await store.close()
@@ -257,10 +261,10 @@ async def test_budget_skips_post_and_stays_retryable(tmp_path, monkeypatch):
 async def test_llm_not_configured(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
+        _write_digest(tmp_path, [_entry("n1")])
         out = await run_spark_job(
             client=FakeClient(FakeChannel()),
-            settings=_settings(),
+            settings=_settings(tmp_path=tmp_path),
             llm=FakeLLM([LLMConfigError("no models configured for spark")]),
             store=store,
         )
@@ -272,11 +276,11 @@ async def test_llm_not_configured(tmp_path, monkeypatch):
 async def test_channel_not_found(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
+        _write_digest(tmp_path, [_entry("n1")])
         llm = FakeLLM([_resp(_choice_text(1))])
         out = await run_spark_job(
             client=FakeClient(channel=None),
-            settings=_settings(channel_id=99),
+            settings=_settings(channel_id=99, tmp_path=tmp_path),
             llm=llm,
             store=store,
         )
@@ -292,7 +296,7 @@ async def test_channel_without_send_is_rejected_before_model_call(tmp_path):
         llm = FakeLLM([_resp(_choice_text(1))])
         out = await run_spark_job(
             client=FakeClient(SimpleNamespace()),
-            settings=_settings(channel_id=99),
+            settings=_settings(channel_id=99, tmp_path=tmp_path),
             llm=llm,
             store=store,
         )
@@ -305,16 +309,20 @@ async def test_channel_without_send_is_rejected_before_model_call(tmp_path):
 async def test_send_failure_is_reported(tmp_path, monkeypatch):
     store = await _store(tmp_path)
     try:
-        _set_feed(monkeypatch, lambda url: _feed([_entry("n1")]))
+        _write_digest(tmp_path, [_entry("n1")])
         channel = FakeChannel(raise_on_send=_http_error(discord.HTTPException, 500))
         out = await run_spark_job(
             client=FakeClient(channel),
-            settings=_settings(),
+            settings=_settings(tmp_path=tmp_path),
             llm=FakeLLM([_resp(_choice_text(1))]),
             store=store,
         )
         assert out["status"] == "delivery failed; not posted"
-        remaining = await digest_module._collect_new(["http://f"], store)
+        remaining = (
+            await collect_from_scout(
+                tmp_path / "digests", store, max_age_hours=36, limit=50
+            )
+        ).entries
         assert len(remaining) == 1  # not marked seen -- retryable
     finally:
         await store.close()
