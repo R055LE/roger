@@ -30,7 +30,7 @@ _SUMMARY_CAP = 500  # per-entry summary chars fed to the model
 _EPOCH = time.gmtime(0)
 
 DIGEST_SYSTEM = (
-    "You are Roger. Summarize these RSS/Atom items into a few short, grouped sections with terse "
+    "You are Roger. Summarize these items into a few short, grouped sections with terse "
     "bullets. No preamble, no sign-off, no filler. Keep the whole thing under ~300 words."
 )
 
@@ -55,7 +55,7 @@ async def _summarize(entries: list[dict[str, Any]], llm: LLM) -> str:
     body = "\n".join(_render_entry(e) for e in entries)
     messages = [
         {"role": "system", "content": DIGEST_SYSTEM},
-        {"role": "user", "content": f"Summarize these feed items:\n\n{body}"},
+        {"role": "user", "content": f"Summarize these items:\n\n{body}"},
     ]
     response = await llm.complete("digest", messages)
     return response.choices[0].message.content or "(no summary)"
@@ -108,12 +108,11 @@ async def run_digest_job(*, client: Any, settings: Any, llm: LLM, store: Store) 
 async def run_personal_digest_job(
     *, client: Any, settings: Any, llm: LLM, store: Store
 ) -> dict[str, Any]:
-    """Like ``run_digest_job``, but sourced from the personal feed list and delivered privately.
+    """Like ``run_digest_job``, but delivered privately.
 
     Delivery copies ``run_gigabrain_suggestion``'s DM-or-channel pattern: the configured channel
     if set, else a DM to the owner. Unlike the public digest, no channel is required to be
-    "configured" — "not configured" here means "no feeds," since a DM destination is always
-    reachable in principle.
+    "configured," since a DM destination is always reachable in principle.
     """
     batch = await collect_from_scout(
         settings.scout_digest_path,

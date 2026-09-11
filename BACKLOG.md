@@ -1,7 +1,7 @@
 # Backlog
 
 Roger is feature-complete for its stated scope (see [`README.md`](README.md) → Status): five brains,
-the bounded admin tool loop, feed curation, `/status`, and the boot self-report all ship and are
+the bounded admin tool loop, `/status`, and the boot self-report all ship and are
 tested. This backlog is therefore **not** a feature wishlist — it's the production-hardening layer
 that separates "runs on my homelab" from "portfolio-grade LLM service," ordered by value-for-effort.
 
@@ -208,9 +208,8 @@ rows for that request, so a single interaction is greppable end-to-end across th
 ### 4.1 Runtime settings table — **M**
 A `settings` table so operational values (`ops_channel_id`, `digest_hour`, `digest_channel_id`, per-
 brain caps) can change at runtime — via an owner-only `/config` tool — without a `sops` edit + redeploy
-cycle. Env stays the seed/default; the store owns the live value once set (the same "seed once, store
-owns it" pattern the feed list already uses). Keeps secrets in env; only non-secret operational knobs
-move to the store.
+cycle. Env stays the seed/default; the store owns the live value once set. Keeps secrets in env; only
+non-secret operational knobs move to the store.
 
 ### 4.2 Config preflight at boot — **S** — *shipped*
 Two distinct gaps under one label. **Channel reachability** (which configured channel IDs —
@@ -224,11 +223,6 @@ Folded into the boot header the same way, but boot-only, not on the watchdog or 
 Discord channel, `OPENROUTER_API_KEY`/`MODEL_*` are env-sourced and frozen for the process's life, so
 re-polling them on a timer can't catch anything new, and `/status` is documented as a deterministic,
 no-spend readout that shouldn't start depending on OpenRouter's API being reachable at query time.
-
-### 4.3 Periodic feed-health check — **S**
-`suggest_feeds` / `add_feed` validate a feed *at add time*, but a feed can go dead later and silently
-contribute nothing. A weekly health pass that reports newly-dead feeds to the ops channel keeps the
-curated list honest.
 
 ### 4.4 `/data` backup runbook — **S**
 The SQLite DB is the only stateful thing and has no documented backup. Add a host-side runbook entry
