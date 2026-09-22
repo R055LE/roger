@@ -197,9 +197,10 @@ from a background thread; an async 30s loop refreshes the SQLite-sourced gauges 
 production observability" artifact in the portfolio. Note: publishing the port on the host is a
 deliberate, confirm-first step (see deploy notes); the repo change alone doesn't expose it.
 
-### 3.2 Correlation IDs through logs + audit — **S**
-Thread a short request ID from each admin/ambient entry point through the log records and the `audit`
-rows for that request, so a single interaction is greppable end-to-end across the JSON logs.
+### 3.2 Correlation IDs through logs + audit — **S** — *shipped*
+Each admin/ambient entry point binds an opaque, task-local request ID. The JSON formatter adds it to
+logs emitted within that request, and `Store.record_audit` adds the same ID to every corresponding
+audit row. Context is restored after the request and isolated across concurrent tasks. *(44595f8)*
 
 ---
 
