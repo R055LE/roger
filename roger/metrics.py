@@ -4,7 +4,7 @@ Two kinds of series, modelled the way Prometheus wants them:
 
 - **Event counters** (LLM requests / errors / budget rejections) are incremented at the call site,
   resetting on restart — ordinary monotonic counters; `rate()` handles the resets.
-- **State gauges** (today's token/dollar spend, caps, feed count, audit tallies, build info) are
+- **State gauges** (today's token/dollar spend, caps, audit tallies, build info) are
   sourced from SQLite and refreshed on a timer, so they survive restarts and mirror the store.
 
 ``prometheus_client`` serves both from a background WSGI thread; nothing here runs on the asyncio
@@ -39,7 +39,6 @@ TOKENS_TODAY = Gauge("roger_tokens_today", "Tokens spent today", ["brain"])
 TOKENS_CAP = Gauge("roger_tokens_cap", "Daily token cap", ["brain"])
 COST_USD_TODAY = Gauge("roger_cost_usd_today", "USD spent today (OpenRouter-reported)", ["brain"])
 COST_USD_CAP = Gauge("roger_cost_usd_cap", "Daily USD cap (0 = disabled)", ["brain"])
-FEEDS = Gauge("roger_feeds", "Curated digest feeds")
 AUDIT_EVENTS = Gauge("roger_audit_events", "Audit rows in the retention window", ["tool", "status"])
 BUILD_INFO = Gauge("roger_build_info", "Deployed build; value is always 1", ["version"])
 
@@ -65,7 +64,6 @@ async def refresh(store: Any, settings: Any, version: str) -> None:
         COST_USD_TODAY.labels(brain).set(await store.cost_today(brain))
         TOKENS_CAP.labels(brain).set(caps[brain])
         COST_USD_CAP.labels(brain).set(usd_caps[brain])
-    FEEDS.set(await store.count_feeds())
     # Rebuild the audit series from scratch so a (tool, status) combo that drops to zero after a
     # prune doesn't linger as a stale sample.
     AUDIT_EVENTS.clear()

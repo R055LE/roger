@@ -104,7 +104,6 @@ def test_digest_problem_flags_failures():
 def test_personal_digest_problem_none_for_success_statuses():
     assert _personal_digest_problem("posted") is None
     assert _personal_digest_problem("no new items") is None
-    assert _personal_digest_problem("personal digest not configured (no feeds)") is None
 
 
 def test_personal_digest_problem_flags_failures():

@@ -31,7 +31,6 @@ async def test_refresh_populates_gauges_from_the_store(tmp_path):
     store = await Store(str(tmp_path / "m.db")).open()
     try:
         await store.add_usage("admin", 100, 50, cost_usd=0.0123)
-        await store.add_feed("http://a", "A")
         await store.record_audit(
             actor_id=1, brain="admin", tool="create_channel", args=None,
             status=AuditStatus.OK, detail=None,
@@ -45,7 +44,6 @@ async def test_refresh_populates_gauges_from_the_store(tmp_path):
         assert get("roger_tokens_cap", {"brain": "admin"}) == 150_000
         assert get("roger_tokens_cap", {"brain": "spark"}) == 30_000
         assert get("roger_tokens_cap", {"brain": "gigabrain"}) == 100_000
-        assert get("roger_feeds") == 1
         assert get("roger_audit_events", {"tool": "create_channel", "status": "ok"}) == 1
         assert get("roger_build_info", {"version": "sha-test"}) == 1
 

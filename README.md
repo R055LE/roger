@@ -12,9 +12,10 @@ Roger is a single-guild, owner-gated Discord assistant with five separate "brain
   per-channel conversation memory so follow-ups have context. No agent framework.
 - **Ambient** — a deadpan chat persona (via `/chat`, or any non-owner @mention/DM). No tools, no
   authority.
-- **Digest** — a scheduled RSS/Atom summary posted to a channel.
-- **Spark** — a scheduled public spotlight: one bounded feed item, a short blurb, and a discussion
-  question. It has no tools and its own model budget.
+- **Digest** — a scheduled summary of [Scout](https://github.com/R055LE/scout)'s picks, posted to a
+  channel.
+- **Spark** — a scheduled public spotlight: one bounded item from Scout, a short blurb, and a
+  discussion question. It has no tools and its own model budget.
 - **Giga Brain** — an owner-only, read-only strategic-analysis mode, reachable by `/gigabrain`. It
   reviews live server state and reasons about it — never acts. Optionally also checks in on its
   own on a configurable interval, DMing the owner unprompted suggestions.
@@ -34,8 +35,9 @@ Security is structural, not prompt-deep:
   access is granted through channel overwrites. No delete, kick, ban, or purge tools exist — Roger
   creates and adjusts, never destroys, and every change to existing state is owner-confirmed.
 - **Budgeted.** Per-brain daily token caps and a hard cap on tool calls per request.
-- **Untrusted feed output is bounded.** Spark treats feed fields as quoted data, strictly parses the
-  model response, accepts only HTTP(S) item links, and suppresses Discord mentions on delivery.
+- **Untrusted item output is bounded.** Spark treats Scout item fields as quoted data, strictly
+  parses the model response, accepts only HTTP(S) item links, and suppresses Discord mentions on
+  delivery.
 - **No secrets in git — ever, not even encrypted.** Secrets live in a `sops`+`age`-encrypted
   `roger.env` on the host; the repo carries only `.sops.yaml` and `roger.env.example`.
 - **Signed, scanned supply chain.** CI audits deps (`pip-audit`) and scans the image (Trivy, build →
@@ -45,7 +47,7 @@ Security is structural, not prompt-deep:
 ## Stack
 
 Python 3.12 · [discord.py](https://github.com/Rapptz/discord.py) · the OpenAI SDK pointed at
-OpenRouter · `pydantic` · `aiosqlite` · `feedparser`. Runs as a non-root, read-only-rootfs
+OpenRouter · `pydantic` · `aiosqlite`. Runs as a non-root, read-only-rootfs
 container. `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host is an env
 change rather than a rewrite. That was tested and shelved on cost and hardware grounds, so hosted is
 the only supported setup today: see
@@ -84,7 +86,7 @@ trusted private interface needs remote access. The endpoint has no authenticatio
 not be exposed to an untrusted network.
 
 Event counters — LLM requests, errors, and budget rejections — are incremented in process; state
-gauges — token/dollar spend, caps, feed count, and audit tallies — are refreshed from SQLite so they
+gauges — token/dollar spend, caps, and audit tallies — are refreshed from SQLite so they
 survive restarts. Key series:
 
 | Metric | Type | Labels |
@@ -94,7 +96,7 @@ survive restarts. Key series:
 | `roger_llm_requests_total` / `roger_llm_errors_total` | counter | `brain` (`type`) |
 | `roger_llm_budget_exceeded_total` | counter | `brain`, `reason` |
 | `roger_audit_events` | gauge | `tool`, `status` |
-| `roger_feeds`, `roger_build_info` | gauge | — (`version`) |
+| `roger_build_info` | gauge | — (`version`) |
 
 A ready-to-merge Prometheus scrape job and an importable Grafana dashboard live in
 [`deploy/observability/`](deploy/observability/) — the bridge to the
@@ -114,23 +116,21 @@ ruff check .
 Feature-complete across the planned phases:
 
 - **Admin** — owner-gated via `/roger`, DM, or @mention, with short per-channel conversation
-  memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`,
-  confirm-gated `set_permissions` / `edit_channel` / `post_message` / `move_channel`, and feed
-  curation (`suggest_feeds`, `add_feed`, `remove_feed`, `list_feeds`); per-request tool and daily
-  token budgets; a full SQLite audit trail.
+  memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`, and
+  confirm-gated `set_permissions` / `edit_channel` / `post_message` / `move_channel`; per-request
+  tool and daily token budgets; a full SQLite audit trail.
 - **Ambient** — deadpan chat via `/chat` or any non-owner @mention/DM, rate-limited per user +
   globally, with a short own-thread memory. No tools, ever.
-- **Digest** — a scheduled daily RSS/Atom summary (also triggerable via `/roger run the digest
-  now`), deduped so nothing posts twice. Roger curates its own feed list: `DIGEST_FEEDS` seeds it
-  once, then Roger validates candidates against the live web and adds or drops them on request.
-  A second, privately-curated feed list can also be DM'd to the owner only
-  (`PERSONAL_DIGEST_FEEDS`), on its own schedule. Spark spotlights one item from the public feed
-  list each day with a discussion question instead of a roundup (`SPARK_CHANNEL_ID`, also
-  triggerable via `/roger run spark now`).
+- **Digest** — a scheduled daily summary of items [Scout](https://github.com/R055LE/scout) scored
+  and picked (also triggerable via `/roger run the digest now`), deduped so nothing posts twice. A
+  second, privately delivered digest of the same source can also be DM'd to the owner only, on its
+  own schedule. Spark spotlights one item from Scout's output each day with a discussion question
+  instead of a roundup (`SPARK_CHANNEL_ID`, also triggerable via `/roger run spark now`). See
+  [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md).
 
 Runs as a non-root, read-only-rootfs container. More than 300 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder
-tools), the rate limiter, and the digest and feed-curation paths.
+tools), the rate limiter, and the digest path.
 
 ## License
 

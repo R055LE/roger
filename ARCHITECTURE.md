@@ -16,9 +16,9 @@ It runs as one process with five independent **brains**, chosen entirely by *who
 
 | Brain | Purpose | Tools | Who |
 |---|---|---|---|
-| **Admin** (§6) | Server concierge — creates channels/roles, sets permissions, curates feeds | Yes | Owner only |
+| **Admin** (§6) | Server concierge — creates channels/roles, sets permissions | Yes | Owner only |
 | **Ambient** (§8) | Deadpan chat persona | None | Anyone |
-| **Digest** (§9) | Scheduled RSS/Atom summary | n/a (scheduled) | — |
+| **Digest** (§9) | Scheduled summary of Scout's picks | n/a (scheduled) | — |
 | **Spark** (§9) | Scheduled grounded item spotlight and discussion question | None | n/a |
 | **Giga Brain** (§12) | Deep, occasional strategic analysis — reviews server state, proposes ideas, never acts | Read-only subset | Owner only |
 
@@ -102,7 +102,7 @@ at runtime by `sops exec-env`. Nothing is read from a committed file. Notable sh
   chains**. The primary comes first, followed by OpenRouter fallbacks. Every model in the admin
   chain must support tool calling.
 - `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host is an env change.
-- `DIGEST_FEEDS` seeds the feed list **once** (§9); after that the store owns it.
+- `SCOUT_DIGEST_DIR` / `SCOUT_MAX_AGE_HOURS` point at Scout's read-only digest mount (§9).
 
 ## §4 Runtime & process model
 
@@ -192,14 +192,6 @@ Registry:
 | `move_channel` | yes (reorder a channel/category — position only) | **yes** (§2.8) |
 | `run_digest` | side effect | no |
 | `run_spark` | side effect | no |
-| `list_feeds` | no | — |
-| `suggest_feeds` | no (validates only) | — |
-| `add_feed` | yes | no |
-| `remove_feed` | yes | no |
-| `list_personal_feeds` | no | — |
-| `suggest_personal_feeds` | no (validates only) | — |
-| `add_personal_feed` | yes | no |
-| `remove_personal_feed` | yes | no |
 | `set_presence` | self only (own status/activity, persisted) | no |
 | `set_nickname` | self only (own guild nickname) | no |
 | `server_stats` | no | — |
@@ -259,47 +251,47 @@ Roger's emerging character (and where a future personality pass would steer it) 
 
 ## §9 Digest and Spark brains
 
-A scheduled RSS/Atom summary, on a daily `tasks.loop` fired at `DIGEST_HOUR` in `TZ`, also
-triggerable via the `run_digest` tool. No Discord message input enters this path. Feed content is
-external and untrusted.
+A scheduled summary of items [Scout](https://github.com/R055LE/scout) already scored, on a daily
+`tasks.loop` fired at `DIGEST_HOUR` in `TZ`, also triggerable via the `run_digest` tool. No Discord
+message input enters this path. Scout item content is external and untrusted. See ADR-0012 for why
+this replaced Roger fetching feeds itself.
 
-- **Feed list is store-owned.** `DIGEST_FEEDS` seeds the `feeds` table **once** on first run
-  (`seed_feeds_if_empty`); after that Roger curates it live via `suggest_feeds` / `add_feed` /
-  `remove_feed`, and the env var only acts as the default set that returns if the list is ever fully
-  cleared. `suggest_feeds` and `add_feed` fetch each candidate and confirm it parses as a live feed
-  before recommending/storing it — the model proposes, the tool grounds it in reality.
-- **Feed fetching has one network boundary.** Scheduled Digest/Spark collection and public/personal
-  feed validation accept only credential-free HTTP(S) URLs, resolve and reject any destination with
-  a non-public address, and connect to that validated resolution. Every redirect repeats those
-  checks within a fixed redirect limit. Connect and whole-request deadlines plus declared,
-  on-wire (including chunk framing), and decompressed body-size limits bound each attempt;
-  `feedparser` receives bytes plus the final validated URL for relative-link resolution and never
-  fetches a URL itself.
-- **Robust collection.** One dead feed never kills a run. Entries cap at `MAX_ITEMS` (15), summaries
-  are truncated to 500 chars before the model sees them.
-- **Exactly-once posting.** Items are marked **seen** (`seen` table) only *after* a successful post,
-  so a failed post retries the same items next time rather than dropping them.
-- **A personal, DM'd sibling.** `run_personal_digest_job` is the same mechanism — fetch, dedupe,
-  summarize — pointed at a second, separately-curated `personal_feeds` list, delivered to
-  `PERSONAL_DIGEST_CHANNEL_ID` if set, else DMed directly to the owner — same fallback shape and
-  the same "deploy owner's choice of destination and privacy, not Roger's" reasoning as Giga
-  Brain's periodic check-in (§12). It shares the `digest` brain's model and daily budget; it's a
-  second job, not a second brain. Curated the same way — `suggest_personal_feeds` /
-  `add_personal_feed` / `remove_personal_feed` / `list_personal_feeds` mirror the public digest's
-  four curation tools exactly. Scheduled unconditionally, same as Giga Brain's interval check —
-  the job itself decides "not configured" (no feeds) rather than the caller gating on whether a
-  seed env var happens to still be set, so feeds curated live via chat are actually delivered.
-- **One caveat: `seen` is shared.** Dedup is keyed on `(feed_url, entry_id)` globally, not per
-  list — a URL curated into *both* `feeds` and `personal_feeds` is only ever delivered by
-  whichever job runs first that day (personal digest defaults to `PERSONAL_DIGEST_HOUR=7`, before
-  the public digest's `DIGEST_HOUR=8`). Don't add the same feed to both lists if you want it in
-  both digests.
-- **Spark posts one grounded item.** `run_spark_job` reuses the public `feeds` list and
-  `_collect_new`, then asks its own tool-free model identity to pick one item and write a short
-  blurb and question. Candidate titles and summaries are bounded and encoded as JSON data. The
-  response must match `ITEM:` / `BLURB:` / `QUESTION:` exactly. Public output is length-bounded,
-  mentions are suppressed, and only HTTP(S) item links without embedded credentials are accepted.
-  A malformed response or failed delivery posts nothing and leaves the item eligible for retry.
+- **Scout is the source, not a tool call.** `roger.scout_source.collect_from_scout` reads
+  `digests/<run_id>.json` files Scout writes to a read-only bind mount (`SCOUT_DIGEST_DIR`), co-located
+  as its own Compose service on the same host. Roger never fetches a feed and holds no credential for
+  this path; Scout owns the watchlist, the scoring, and the outbound HTTP.
+- **A rolling window, not just the newest file.** Scout never re-reports an item once it's written it
+  to a digest, so reading only the latest run would permanently lose anything from a run Roger missed
+  (a restart, a failed post, a brain that didn't fire). `collect_from_scout` reads recent digests
+  within `WINDOW_HOURS` (72) and dedupes by item id across overlapping runs, keeping the higher
+  relevance score if the same id appears twice.
+- **A broken producer is a distinct status, not a quiet day.** A missing digest directory, no digests
+  at all, or a newest run older than `SCOUT_MAX_AGE_HOURS` (default 36) each return their own job
+  status rather than "no new items" — the existing ops alerting keys off job status, so a stopped
+  Scout is visible instead of reading as nothing happened.
+- **Robust collection.** Entries cap at `MAX_ITEMS` (15), summaries are truncated to 500 chars before
+  the model sees them. The reason Scout matched an item (`relevance`, `matched` topics/terms) is
+  passed to the model too, so it can weight a three-topic match over one that scraped past on a
+  keyword instead of treating every item as equal-weight.
+- **Exactly-once posting.** Items are marked **seen** (`seen` table, keyed the same as before) only
+  *after* a successful post, so a failed post retries the same items next time rather than dropping
+  them.
+- **A personal, DM'd sibling.** `run_personal_digest_job` is the same mechanism — collect from Scout,
+  dedupe, summarize — delivered to `PERSONAL_DIGEST_CHANNEL_ID` if set, else DMed directly to the
+  owner — same fallback shape and the same "deploy owner's choice of destination and privacy, not
+  Roger's" reasoning as Giga Brain's periodic check-in (§12). It shares the `digest` brain's model and
+  daily budget; it's a second job reading the same Scout source, not a second brain or a separate
+  curated list. Scheduled unconditionally, same as Giga Brain's interval check — the job itself
+  decides "no new items" rather than the caller gating on any config.
+- **The public and personal digests can overlap.** Both read the same Scout output, so an item can
+  appear in whichever job runs first that day (personal digest defaults to `PERSONAL_DIGEST_HOUR=7`,
+  before the public digest's `DIGEST_HOUR=8`) and is then seen for the other.
+- **Spark posts one grounded item.** `run_spark_job` reuses the same `collect_from_scout` source as
+  the digest, then asks its own tool-free model identity to pick one item and write a short blurb and
+  question. Candidate titles and summaries are bounded and encoded as JSON data. The response must
+  match `ITEM:` / `BLURB:` / `QUESTION:` exactly. Public output is length-bounded, mentions are
+  suppressed, and only HTTP(S) item links without embedded credentials are accepted. A malformed
+  response or failed delivery posts nothing and leaves the item eligible for retry.
 - **Spark runs before the roundup.** Its chosen item is marked seen only after a successful post.
   `SPARK_HOUR=7` defaults before `DIGEST_HOUR=8`, so the later roundup does not repeat the item.
   Other candidates remain unseen. An unset `SPARK_CHANNEL_ID` disables the loop; there is no DM
@@ -314,12 +306,10 @@ behaviour adds rows, not migrations.
 |---|---|
 | `audit` | Every admin action + gate rejection — the tamper-evident trail |
 | `usage` | Daily token spend per brain — drives the budget gate (§11) |
-| `seen` | `(feed_url, entry_id)` dedupe keys for Digest and Spark (§9) |
+| `seen` | `(feed_url, entry_id)` dedupe keys for Digest and Spark (§9) — `feed_url` holds Scout's feed id, not a URL |
 | `ambient_log` | Ambient own-thread memory, per user+channel (§8) |
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |
-| `feeds` | The curated digest feed list (§9) |
-| `personal_feeds` | The owner's personal digest feed list, curated separately from `feeds` (§9) |
 | `meta` | Small key/value bot state (persisted presence outfit, gigabrain's last-run date) — never pruned |
 
 ## §11 LLM layer & budgets
@@ -369,8 +359,7 @@ no confirm flow anywhere in the module, because neither is ever needed:
   prompted" philosophy as §2.6/§2.7, applied to a whole brain instead of one field. `_run_tool`
   additionally refuses at execution time if a model ever calls a tool name outside that allowlist,
   or one that (contrary to how the allowlist was chosen) turns out to need confirmation — belt and
-  suspenders, not just "the schema doesn't offer it." `list_feeds`/`suggest_feeds` are deliberately
-  excluded: that's digest's content-curation domain, not server-structure strategy.
+  suspenders, not just "the schema doesn't offer it."
 - **Owner-only, single-guild** (§2.2/§2.3) — the `/gigabrain` command gate mirrors `/roger`'s
   exactly (`CANNED_DENY`, `AuditStatus.GATE_REJECTED`, zero tokens spent on a non-owner).
 - **Its own model chain and budget** (`MODEL_GIGABRAIN`, `DAILY_TOKENS_GIGABRAIN`), tuned for depth

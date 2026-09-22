@@ -32,8 +32,6 @@ from roger.brains.ambient import AmbientLimiter, handle_ambient
 from roger.brains.digest import (
     run_digest_job,
     run_personal_digest_job,
-    seed_feeds_if_empty,
-    seed_personal_feeds_if_empty,
 )
 from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
 from roger.brains.spark import run_spark_job
@@ -312,14 +310,10 @@ def _digest_attempt_result(status: str) -> str:
     return "failure"
 
 
-def _digest_status(
-    *, digest_configured: bool, feeds_count: int, last_attempt: str | None, tz: str
-) -> str:
+def _digest_status(*, digest_configured: bool, last_attempt: str | None, tz: str) -> str:
     """Digest status safe for boot and /status: config first, then its last scheduled outcome."""
     if not digest_configured:
         return "destination unset"
-    if not feeds_count:
-        return "no feeds"
     if not last_attempt:
         return "never run"
     try:
@@ -399,7 +393,6 @@ def _format_status(
     usage: dict[str, int],
     caps: dict[str, int],
     cost: dict[str, float],
-    feeds_count: int,
     recent_audit: list[dict[str, Any]],
     digest_hour: int,
     digest_configured: bool,
@@ -437,7 +430,7 @@ def _format_status(
         else "destination unset"
     )
     spark = f"{spark_hour:02d}:00 {tz}" if spark_configured else "unconfigured"
-    lines.append(f"feeds: {feeds_count}   digest: {digest}   spark: {spark}")
+    lines.append(f"digest: {digest}   spark: {spark}")
     if recent_audit:
         lines.append("recent actions:")
         for row in recent_audit:
@@ -459,7 +452,6 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
     cost = {brain: await store.cost_today(brain) for brain in _BRAINS}
     caps = _daily_caps(settings)
     usd_caps = _daily_usd_caps(settings)
-    feeds_count = await store.count_feeds()
     return _format_status(
         guild_name=guild_name,
         missing_perms=missing,
@@ -468,7 +460,6 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         caps=caps,
         cost=cost,
         usd_caps=usd_caps,
-        feeds_count=feeds_count,
         recent_audit=await store.fetch_audit(limit=8),
         digest_hour=settings.digest_hour,
         digest_configured=settings.digest_channel_id is not None,
@@ -477,7 +468,6 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         tz=settings.tz,
         digest_result=_digest_status(
             digest_configured=settings.digest_channel_id is not None,
-            feeds_count=feeds_count,
             last_attempt=await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY),
             tz=settings.tz,
         ),
@@ -573,7 +563,7 @@ def _spark_problem(status: str) -> str | None:
 
 # Personal digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops
 # ping — same OK-prefix shape as the public digest.
-_PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items", "personal digest not configured")
+_PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items")
 
 
 def _personal_digest_problem(status: str) -> str | None:
@@ -627,22 +617,13 @@ class RogerClient(discord.Client):
         _register_commands(self)
         # Guild-scoped sync is instant and never leaks the command to other servers.
         await self.tree.sync(guild=self._guild)
-        # Bootstrap the curated feed list from DIGEST_FEEDS on first run; then the store owns it.
-        seeded = await seed_feeds_if_empty(self.store, self.settings)
-        if seeded:
-            log.info("seeded %d feed(s) from DIGEST_FEEDS into the store", seeded)
-        personal_seeded = await seed_personal_feeds_if_empty(self.store, self.settings)
-        if personal_seeded:
-            log.info(
-                "seeded %d feed(s) from PERSONAL_DIGEST_FEEDS into the store", personal_seeded
-            )
         await self._maybe_prune()  # tidy expired rows on boot; the watchdog repeats it daily
         self._heartbeat.start()  # liveness for the Dockerfile HEALTHCHECK (always on)
         if self.settings.metrics_port:
             self._metrics_server = metrics.start_server(self.settings.metrics_port)
             await metrics.refresh(self.store, self.settings, ROGER_VERSION)
             self._metrics_refresh.start()
-        # Start the daily loop whenever a channel is configured — Roger can curate feeds at runtime.
+        # Start the daily loop whenever a channel is configured.
         if self.settings.digest_channel_id is not None:
             self._digest_loop.change_interval(
                 time=datetime.time(
@@ -663,11 +644,9 @@ class RogerClient(discord.Client):
             log.info(
                 "spark scheduled daily at %02d:00 %s", self.settings.spark_hour, self.settings.tz
             )
-        # Always scheduled, unconditionally — DM delivery needs no channel or feeds pre-configured.
-        # run_personal_digest_job self-gates on "no feeds" the same way run_gigabrain_suggestion
-        # self-gates on its interval (§12): the job decides, not the caller. This also means feeds
-        # curated live via the admin tools (with PERSONAL_DIGEST_FEEDS left unset) actually get
-        # scheduled, not just seeded into a table nothing reads from.
+        # Always scheduled, unconditionally — DM delivery needs no channel pre-configured.
+        # run_personal_digest_job self-gates on "no new items" the same way run_gigabrain_suggestion
+        # self-gates on its interval (§12): the job decides, not the caller.
         self._personal_digest_loop.change_interval(
             time=datetime.time(
                 hour=self.settings.personal_digest_hour, tzinfo=ZoneInfo(self.settings.tz)
