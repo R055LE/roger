@@ -17,6 +17,7 @@ _OPTIONAL_CHANNEL_IDS = [
     "GIGABRAIN_CHANNEL_ID",
     "PERSONAL_DIGEST_CHANNEL_ID",
     "SPARK_CHANNEL_ID",
+    "CURATED_CHANNEL_ID",
 ]
 _POSITIVE_SETTINGS = [
     "OWNER_ID",
@@ -27,6 +28,7 @@ _POSITIVE_SETTINGS = [
     "DAILY_TOKENS_DIGEST",
     "DAILY_TOKENS_GIGABRAIN",
     "DAILY_TOKENS_SPARK",
+    "DAILY_TOKENS_CURATED",
     "ADMIN_MAX_TOOL_CALLS",
     "ADMIN_MAX_TURNS",
     "GIGABRAIN_MAX_TOOL_CALLS",
@@ -41,11 +43,13 @@ _USD_CAPS = [
     "DAILY_USD_DIGEST",
     "DAILY_USD_GIGABRAIN",
     "DAILY_USD_SPARK",
+    "DAILY_USD_CURATED",
 ]
 _SCHEDULED_HOURS = [
     "DIGEST_HOUR",
     "PERSONAL_DIGEST_HOUR",
     "SPARK_HOUR",
+    "CURATED_HOUR",
     "GIGABRAIN_HOUR",
 ]
 
@@ -168,6 +172,16 @@ def test_spark_defaults(monkeypatch):
     assert settings.spark_models == []
     assert settings.daily_tokens_spark == 30_000
     assert settings.daily_usd_spark == 0.0
+
+
+def test_curated_defaults(monkeypatch):
+    _set_required(monkeypatch)
+    settings = Settings()
+    assert settings.curated_channel_id is None
+    assert settings.curated_hour == 7
+    assert settings.curated_models == []
+    assert settings.daily_tokens_curated == 30_000
+    assert settings.daily_usd_curated == 0.0
 
 
 def test_spark_model_chain_is_parsed_to_list(monkeypatch):

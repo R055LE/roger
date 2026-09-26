@@ -97,7 +97,7 @@ async def test_untrusted_source_is_bounded_json_data_not_an_instruction():
     llm = FakeLLM('{"decision":"skip"}')
     assert await draft([entry], llm) is None
     brain, messages = llm.calls[0]
-    assert brain == "spark"
+    assert brain == "curated"
     assert len(messages) == 2
     assert messages[0]["role"] == "system"
     data = json.loads(messages[1]["content"])
