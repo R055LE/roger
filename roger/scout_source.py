@@ -145,6 +145,7 @@ async def collect_from_scout(
     max_age_hours: int,
     limit: int,
     now: datetime.datetime | None = None,
+    include_seen: bool = False,
 ) -> ScoutBatch:
     """Collect unseen Scout items, newest and highest-scoring first.
 
@@ -182,15 +183,18 @@ async def collect_from_scout(
         elif current["article"].get("status") != "ok" and entry["article"].get("status") == "ok":
             current["article"] = entry["article"]
 
-    by_feed: dict[str, list[str]] = {}
-    for entry in best.values():
-        by_feed.setdefault(entry["feed_url"], []).append(entry["id"])
+    if include_seen:
+        entries = list(best.values())
+    else:
+        by_feed: dict[str, list[str]] = {}
+        for entry in best.values():
+            by_feed.setdefault(entry["feed_url"], []).append(entry["id"])
 
-    unseen: set[str] = set()
-    for feed_url, ids in by_feed.items():
-        unseen.update(await store.filter_unseen(feed_url, ids))
+        unseen: set[str] = set()
+        for feed_url, ids in by_feed.items():
+            unseen.update(await store.filter_unseen(feed_url, ids))
 
-    entries = [e for e in best.values() if e["id"] in unseen]
+        entries = [e for e in best.values() if e["id"] in unseen]
     entries.sort(
         key=lambda e: (e["relevance"], e["published"] or time.gmtime(0)), reverse=True
     )

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from conftest import write_digest
 
-from roger.brains.curated import run_curated_job
+from roger.brains.curated import preview_curated_job, run_curated_job
 from roger.scout_source import collect_from_scout
 from roger.store import Store
 
@@ -136,5 +136,26 @@ async def test_unreadable_source_is_a_quiet_day_without_model_spend(tmp_path):
         assert result["status"] == "no post-worthy items"
         assert llm.calls == 0
         assert channel.sent == []
+    finally:
+        await store.close()
+
+
+async def test_preview_keeps_seen_state_and_shows_supporting_quotes(tmp_path):
+    _digest(tmp_path)
+    llm = LLM()
+    store = await Store(str(tmp_path / "roger.db")).open()
+    settings = _settings(tmp_path)
+    try:
+        result = await preview_curated_job(settings=settings, llm=llm, store=store)
+        assert result["status"] == "draft"
+        assert result["source_url"] == "https://example.org/release"
+        assert result["evidence"] == [QUOTE_A, QUOTE_B]
+        assert len((await collect_from_scout(
+            settings.scout_digest_path, store, max_age_hours=36, limit=25
+        )).entries) == 1
+
+        await store.mark_seen([("scout:f", "story")])
+        again = await preview_curated_job(settings=settings, llm=llm, store=store)
+        assert again["status"] == "draft", "preview should inspect even previously seen items"
     finally:
         await store.close()

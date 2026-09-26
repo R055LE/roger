@@ -46,6 +46,7 @@ class DraftError(ValueError):
 class Draft:
     entry: dict[str, Any]
     facts: tuple[str, ...]
+    evidence: tuple[str, ...]
     why: str
     take: str
     question: str
@@ -131,6 +132,7 @@ def _parse(text: str, entries: list[dict[str, Any]]) -> Draft | None:
         raise DraftError("expected 2-4 facts")
     source = entry["article"]["text"][:SOURCE_TEXT_CAP]
     lines = []
+    quotes = []
     for fact in facts:
         if not isinstance(fact, dict) or set(fact) != {"text", "evidence"}:
             raise DraftError("invalid fact")
@@ -139,9 +141,11 @@ def _parse(text: str, entries: list[dict[str, Any]]) -> Draft | None:
         if len(quote) < 40 or quote not in source:
             raise DraftError("fact evidence is not in the source excerpt")
         lines.append(line)
+        quotes.append(quote)
     return Draft(
         entry=entry,
         facts=tuple(lines),
+        evidence=tuple(quotes),
         why=_short(data.get("why"), "why", 280),
         take=_short(data.get("take", ""), "take", 200, required=False),
         question=_short(data.get("question", ""), "question", 160, required=False),
@@ -235,3 +239,33 @@ async def run_curated_job(
         log.exception("curated delivery outcome uncertain")
         return {"status": "delivery uncertain; manual check required"}
     return {"status": "posted", "title": entry["title"]}
+
+
+async def preview_curated_job(*, settings: Any, llm: LLM, store: Store) -> dict[str, Any]:
+    """Spend a curated model call but leave delivery and seen state untouched."""
+    batch = await collect_from_scout(
+        settings.scout_digest_path, store,
+        max_age_hours=settings.scout_max_age_hours, limit=25, include_seen=True,
+    )
+    if batch.status:
+        return {"status": batch.status}
+    try:
+        post = await draft(batch.entries, llm)
+    except BudgetExceeded:
+        return {"status": "budget exceeded; skipped"}
+    except LLMConfigError:
+        return {"status": "curated brain not configured"}
+    except OpenAIError:
+        log.exception("curated preview model request failed")
+        return {"status": "model request failed; skipped"}
+    except DraftError as exc:
+        log.warning("curated preview response rejected: %s", exc)
+        return {"status": "unusable model response; skipped"}
+    if post is None:
+        return {"status": "no post-worthy items", "run_id": batch.newest_run_id}
+    return {
+        "status": "draft", "run_id": batch.newest_run_id,
+        "title": post.entry["title"], "source_url": post.entry["article"]["url"],
+        "facts": list(post.facts), "evidence": list(post.evidence),
+        "why": post.why, "take": post.take, "question": post.question,
+    }

@@ -141,6 +141,10 @@ read-only container can write the SQLite DB into the bind mount.
   roger.smoke_test` — runs real requests against the real Discord API and prints pass/fail per
   check plus token spend. On-demand only, not part of CI or the deploy timer; see the module
   docstring for exactly what it does and deliberately doesn't cover.
+- **Preview a curated story:** as the owner, ask `/roger preview the curated post`. The
+  `preview_curated` tool returns a draft with its exact supporting source excerpts, or a
+  no-post result. It uses the curated model budget but does not send to the news channel
+  or mark any Scout item seen. Leave `CURATED_CHANNEL_ID` blank during preview review.
 
 ## Metrics exposure
 

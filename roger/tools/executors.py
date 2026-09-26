@@ -42,6 +42,7 @@ from roger.tools.schemas import (
     ListWebhooksArgs,
     MoveChannelArgs,
     PostMessageArgs,
+    PreviewCuratedArgs,
     RemoveMemberRoleArgs,
     RemoveReactionArgs,
     ReplyToForumPostArgs,
@@ -833,6 +834,16 @@ async def run_spark(
     )
 
 
+async def preview_curated(
+    guild: discord.Guild, args: PreviewCuratedArgs, ctx: ToolContext | None = None
+) -> dict[str, Any]:
+    if ctx is None or ctx.settings is None:
+        return {"status": "curated preview unavailable in this context"}
+    from roger.brains.curated import preview_curated_job
+
+    return await preview_curated_job(settings=ctx.settings, llm=ctx.llm, store=ctx.store)
+
+
 # --------------------------------------------------------------------------- toys (self / read)
 
 # Where the persisted presence "outfit" lives in the meta table. bot.py reads this key on boot to
@@ -1291,6 +1302,7 @@ EXECUTORS = {
     "move_channel": move_channel,
     "run_digest": run_digest,
     "run_spark": run_spark,
+    "preview_curated": preview_curated,
     "set_presence": set_presence,
     "set_nickname": set_nickname,
     "server_stats": server_stats,

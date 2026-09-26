@@ -170,6 +170,10 @@ class RunSparkArgs(ToolArgs):
     """No arguments — triggers the spark job immediately."""
 
 
+class PreviewCuratedArgs(ToolArgs):
+    """No arguments — drafts a curated story without posting or marking it seen."""
+
+
 # --------------------------------------------------------------------------- toys (self / read)
 
 StatusName = Literal["online", "idle", "dnd", "invisible"]
@@ -423,6 +427,14 @@ REGISTRY: dict[str, ToolSpec] = {
             "immediately."
         ),
         args_model=RunSparkArgs,
+    ),
+    "preview_curated": ToolSpec(
+        name="preview_curated",
+        description=(
+            "Preview Roger's next curated Scout story or a no-post decision. Uses the curated "
+            "model budget but does not post to a channel or mark an item seen. Owner only."
+        ),
+        args_model=PreviewCuratedArgs,
     ),
     "set_presence": ToolSpec(
         name="set_presence",
