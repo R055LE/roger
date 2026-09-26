@@ -4,7 +4,7 @@ An [OpenRouter](https://openrouter.ai)-backed Discord bot — the spiritual succ
 [`roger-bot`](https://github.com/R055LE/roger-bot), my first-ever programming project. Same
 character, rebuilt from scratch on hosted models and modern tooling.
 
-Roger is a single-guild, owner-gated Discord assistant with five separate "brains":
+Roger is a single-guild, owner-gated Discord assistant with four separate "brains":
 
 - **Admin** — an owner-only server concierge, reachable by `/roger`, a DM, or an @mention. Ask in
   plain language ("a read-only podcast channel under Media that DJs can post in") and it creates
@@ -12,10 +12,9 @@ Roger is a single-guild, owner-gated Discord assistant with five separate "brain
   per-channel conversation memory so follow-ups have context. No agent framework.
 - **Ambient** — a deadpan chat persona (via `/chat`, or any non-owner @mention/DM). No tools, no
   authority.
-- **Digest** — a scheduled summary of [Scout](https://github.com/R055LE/scout)'s picks, posted to a
-  channel.
-- **Spark** — a scheduled public spotlight: one bounded item from Scout, a short blurb, and a
-  discussion question. It has no tools and its own model budget.
+- **Curated** — a daily check of [Scout](https://github.com/R055LE/scout)'s picks. It posts one
+  source-grounded story when there is something worth sharing, and skips quiet days. Public posting
+  stays off until `CURATED_CHANNEL_ID` is set. The owner can preview a draft through `/roger`.
 - **Giga Brain** — an owner-only, read-only strategic-analysis mode, reachable by `/gigabrain`. It
   reviews live server state and reasons about it — never acts. Optionally also checks in on its
   own on a configurable interval, DMing the owner unprompted suggestions.
@@ -35,9 +34,8 @@ Security is structural, not prompt-deep:
   access is granted through channel overwrites. No delete, kick, ban, or purge tools exist — Roger
   creates and adjusts, never destroys, and every change to existing state is owner-confirmed.
 - **Budgeted.** Per-brain daily token caps and a hard cap on tool calls per request.
-- **Untrusted item output is bounded.** Spark treats Scout item fields as quoted data, strictly
-  parses the model response, accepts only HTTP(S) item links, and suppresses Discord mentions on
-  delivery.
+- **Untrusted item output is bounded.** Curated drafts use bounded Scout article evidence, require
+  supporting excerpts, accept only HTTP(S) item links, and suppress Discord mentions on delivery.
 - **No secrets in git — ever, not even encrypted.** Secrets live in a `sops`+`age`-encrypted
   `roger.env` on the host; the repo carries only `.sops.yaml` and `roger.env.example`.
 - **Signed, scanned supply chain.** CI audits deps (`pip-audit`) and scans the image (Trivy, build →
@@ -121,16 +119,15 @@ Feature-complete across the planned phases:
   tool and daily token budgets; a full SQLite audit trail.
 - **Ambient** — deadpan chat via `/chat` or any non-owner @mention/DM, rate-limited per user +
   globally, with a short own-thread memory. No tools, ever.
-- **Digest** — a scheduled daily summary of items [Scout](https://github.com/R055LE/scout) scored
-  and picked (also triggerable via `/roger run the digest now`), deduped so nothing posts twice. A
-  second, privately delivered digest of the same source can also be DM'd to the owner only, on its
-  own schedule. Spark spotlights one item from Scout's output each day with a discussion question
-  instead of a roundup (`SPARK_CHANNEL_ID`, also triggerable via `/roger run spark now`). See
-  [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md).
+- **Curated** — checks Scout's output at 07:00 local time and may post one useful story with source
+  detail and a light take. There is no posting quota. The owner can preview the next decision with
+  `/roger preview the curated post`; that spends from the curated model budget but does not post or
+  mark the story seen. Set `CURATED_CHANNEL_ID` only after reviewing preview quality. See
+  [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md) for the Scout boundary.
 
 Runs as a non-root, read-only-rootfs container. More than 300 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder
-tools), the rate limiter, and the digest path.
+tools), the rate limiter, and the Scout ingestion path.
 
 ## License
 

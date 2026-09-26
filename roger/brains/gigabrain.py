@@ -188,11 +188,10 @@ async def run_gigabrain_suggestion(
 
     Self-gated on ``gigabrain_interval_days`` via a last-run date persisted in ``meta`` (survives
     restarts, unlike an in-memory guard), so a naive daily tick that just calls this unconditionally
-    is safe — mirrors how ``run_digest_job`` decides "no new items" itself rather than the caller
-    precomputing it. Delivered to ``gigabrain_channel_id`` if set, else DMed to the owner directly
-    (same fallback shape as ``digest_channel_id``). Either way the destination's id is used as
-    ``channel_id`` (not ``None``): unlike the digest, this *should* have continuity — each check-in
-    can see what it told the owner last time via the same ``recent_gigabrain`` memory an interactive
+    is safe because this job decides whether it is due. Delivered to ``gigabrain_channel_id`` if
+    set, else DMed to the owner directly. Either way the destination's id is used as
+    ``channel_id`` (not ``None``): each check-in should have continuity and
+    see what it told the owner last time via the same ``recent_gigabrain`` memory an interactive
     conversation uses, instead of starting cold and risking the same advice verbatim every run.
     """
     if settings.gigabrain_interval_days <= 0:

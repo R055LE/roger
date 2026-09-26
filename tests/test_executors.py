@@ -917,7 +917,7 @@ async def test_denied_real_permission_preview_leaves_live_overwrites_unchanged(
         guild.default_role: discord.PermissionOverwrite(send_messages=True),
     }
     before = {target: tuple(overwrite) for target, overwrite in channel.overwrites.items()}
-    ctx = ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id))
+    ctx = ToolContext(settings=SimpleNamespace(curated_channel_id=channel.id))
     calls = [
         SimpleNamespace(
             id="a1",
@@ -1006,7 +1006,7 @@ async def test_permission_audit_names_digest_embed_deny_and_role_remediation():
         guild.default_role: discord.PermissionOverwrite(embed_links=False),
         guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
-    ctx = ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id))
+    ctx = ToolContext(settings=SimpleNamespace(curated_channel_id=channel.id))
 
     result = await executors.audit_permissions(guild, AuditPermissionsArgs(), ctx)
 
@@ -1029,7 +1029,7 @@ async def test_permission_audit_distinguishes_a_synced_category_plan():
     channel.permissions_for = lambda member: discord.Permissions(
         view_channel=True, send_messages=True, embed_links=False
     )
-    ctx = ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id))
+    ctx = ToolContext(settings=SimpleNamespace(curated_channel_id=channel.id))
 
     result = await executors.audit_permissions(guild, AuditPermissionsArgs(), ctx)
 
@@ -1080,7 +1080,7 @@ async def test_ambiguous_tagged_roles_stop_audit_create_preview_and_set_before_m
     audit = await executors.audit_permissions(
         guild,
         AuditPermissionsArgs(),
-        ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id)),
+        ToolContext(settings=SimpleNamespace(curated_channel_id=channel.id)),
     )
     assert audit["status"] == "no unique dedicated bot role"
     with pytest.raises(GuardError):
@@ -1108,7 +1108,7 @@ async def test_role_overwrite_allow_wins_and_implicit_masks_name_upstream_layer(
     result = await executors.audit_permissions(
         guild,
         AuditPermissionsArgs(),
-        ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id)),
+        ToolContext(settings=SimpleNamespace(curated_channel_id=channel.id)),
     )
     assert result["destinations"][0]["missing_causes"]["embed_links"] == (
         "implicit mask from channel role overwrite"
@@ -1129,7 +1129,7 @@ async def test_view_deny_implicitly_masks_send_and_embeds_with_its_cause():
     result = await executors.audit_permissions(
         guild,
         AuditPermissionsArgs(),
-        ToolContext(settings=SimpleNamespace(digest_channel_id=channel.id)),
+        ToolContext(settings=SimpleNamespace(curated_channel_id=channel.id)),
     )
     causes = result["destinations"][0]["missing_causes"]
     assert causes["view_channel"] == "channel @everyone overwrite"
@@ -1150,7 +1150,7 @@ async def test_synced_category_and_unsynced_child_choose_the_correct_layer():
         guild,
         AuditPermissionsArgs(),
         ToolContext(
-            settings=SimpleNamespace(digest_channel_id=synced.id, spark_channel_id=unsynced.id)
+            settings=SimpleNamespace(curated_channel_id=synced.id, gigabrain_channel_id=unsynced.id)
         ),
     )
     assert result["destinations"][0]["missing_causes"]["embed_links"] == (
@@ -1650,31 +1650,6 @@ async def test_list_scheduled_events_reports_current_events():
     assert out["events"][0]["name"] == "Movie Night"
     assert out["events"][0]["location"] == "stage"
     assert out["events"][0]["status"] == "scheduled"
-
-
-async def test_run_spark_without_context_reports_unavailable():
-    from roger.tools.executors import RunSparkArgs, run_spark
-
-    result = await run_spark(guild=None, args=RunSparkArgs(), ctx=None)
-    assert result["status"] == "spark unavailable in this context"
-
-
-async def test_run_spark_delegates_to_run_spark_job(monkeypatch):
-    from roger.tools.context import ToolContext
-    from roger.tools.executors import RunSparkArgs, run_spark
-
-    captured = {}
-
-    async def fake_run_spark_job(*, client, settings, llm, store):
-        captured["called"] = True
-        return {"status": "posted", "title": "x"}
-
-    monkeypatch.setattr("roger.brains.spark.run_spark_job", fake_run_spark_job)
-
-    ctx = ToolContext(llm="llm", store="store", settings="settings", client="client")
-    result = await run_spark(guild=None, args=RunSparkArgs(), ctx=ctx)
-    assert captured["called"] is True
-    assert result == {"status": "posted", "title": "x"}
 
 
 async def test_curated_preview_tool_delegates_without_a_client(monkeypatch):

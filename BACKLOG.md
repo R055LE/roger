@@ -1,6 +1,6 @@
 # Backlog
 
-Roger is feature-complete for its stated scope (see [`README.md`](README.md) → Status): five brains,
+Roger is feature-complete for its stated scope (see [`README.md`](README.md) → Status): four brains,
 the bounded admin tool loop, `/status`, and the boot self-report all ship and are
 tested. This backlog is therefore **not** a feature wishlist — it's the production-hardening layer
 that separates "runs on my homelab" from "portfolio-grade LLM service," ordered by value-for-effort.
@@ -190,7 +190,7 @@ from a background thread; an async 30s loop refreshes the SQLite-sourced gauges 
 - [x] LLM requests, errors by type, and budget rejections — in-process counters in `llm.py`.
 - [x] Feed count and `roger_build_info{version}`.
 - [x] Example Prometheus scrape job + importable Grafana dashboard in `deploy/observability/`.
-- [ ] Not yet wired: digest run and ambient rate-limit counters (both are cheap follow-ups at their
+- [ ] Not yet wired: curated post and ambient rate-limit counters (both are cheap follow-ups at their
       call sites). The audit table already covers the admin/tool surface.
 
 *Why:* turns Roger into a live exhibit for the SRE lab's dashboards — the clearest single "LLM app +
@@ -207,14 +207,14 @@ audit row. Context is restored after the request and isolated across concurrent 
 ## Tier 4 — Runtime config & smaller niceties
 
 ### 4.1 Runtime settings table — **M**
-A `settings` table so operational values (`ops_channel_id`, `digest_hour`, `digest_channel_id`, per-
+A `settings` table so operational values (`ops_channel_id`, `curated_hour`, `curated_channel_id`, per-
 brain caps) can change at runtime — via an owner-only `/config` tool — without a `sops` edit + redeploy
 cycle. Env stays the seed/default; the store owns the live value once set. Keeps secrets in env; only
 non-secret operational knobs move to the store.
 
 ### 4.2 Config preflight at boot — **S** — *shipped*
 Two distinct gaps under one label. **Channel reachability** (which configured channel IDs —
-`digest_channel_id`, `ops_channel_id`, `gigabrain_channel_id` — Roger can actually see and post in,
+`curated_channel_id`, `ops_channel_id`, `gigabrain_channel_id` — Roger can actually see and post in,
 not just whether the guild-level role permission is granted) is shipped: `_unreachable_channels`
 runs at boot (folded into the boot self-report) and every watchdog tick, the same treatment
 `_missing_permissions` already got. **OpenRouter key + model IDs** is shipped too: `LLM.preflight()`

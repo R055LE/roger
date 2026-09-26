@@ -46,8 +46,6 @@ from roger.tools.schemas import (
     RemoveMemberRoleArgs,
     RemoveReactionArgs,
     ReplyToForumPostArgs,
-    RunDigestArgs,
-    RunSparkArgs,
     ServerStatsArgs,
     SetNicknameArgs,
     SetPermissionsArgs,
@@ -133,13 +131,7 @@ async def list_structure(
 
 
 _DESTINATIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("digest_channel_id", "digest", ("view_channel", "send_messages", "embed_links")),
-    (
-        "personal_digest_channel_id",
-        "personal digest",
-        ("view_channel", "send_messages", "embed_links"),
-    ),
-    ("spark_channel_id", "spark", ("view_channel", "send_messages", "embed_links")),
+    ("curated_channel_id", "curated", ("view_channel", "send_messages", "embed_links")),
     (
         "gigabrain_channel_id",
         "giga brain",
@@ -810,30 +802,6 @@ async def move_channel(
     return {"moved": channel.name, "kind": kind, "position": anchor}
 
 
-async def run_digest(
-    guild: discord.Guild, args: RunDigestArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    if ctx is None or ctx.settings is None:
-        return {"status": "digest unavailable in this context"}
-    from roger.brains.digest import run_digest_job
-
-    return await run_digest_job(
-        client=ctx.client, settings=ctx.settings, llm=ctx.llm, store=ctx.store
-    )
-
-
-async def run_spark(
-    guild: discord.Guild, args: RunSparkArgs, ctx: ToolContext | None = None
-) -> dict[str, Any]:
-    if ctx is None or ctx.settings is None:
-        return {"status": "spark unavailable in this context"}
-    from roger.brains.spark import run_spark_job
-
-    return await run_spark_job(
-        client=ctx.client, settings=ctx.settings, llm=ctx.llm, store=ctx.store
-    )
-
-
 async def preview_curated(
     guild: discord.Guild, args: PreviewCuratedArgs, ctx: ToolContext | None = None
 ) -> dict[str, Any]:
@@ -1300,8 +1268,6 @@ EXECUTORS = {
     "create_forum_post": create_forum_post,
     "reply_to_forum_post": reply_to_forum_post,
     "move_channel": move_channel,
-    "run_digest": run_digest,
-    "run_spark": run_spark,
     "preview_curated": preview_curated,
     "set_presence": set_presence,
     "set_nickname": set_nickname,

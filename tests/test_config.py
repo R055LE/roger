@@ -12,11 +12,8 @@ _REQUIRED = {
     "GUILD_ID": "2",
 }
 _OPTIONAL_CHANNEL_IDS = [
-    "DIGEST_CHANNEL_ID",
     "OPS_CHANNEL_ID",
     "GIGABRAIN_CHANNEL_ID",
-    "PERSONAL_DIGEST_CHANNEL_ID",
-    "SPARK_CHANNEL_ID",
     "CURATED_CHANNEL_ID",
 ]
 _POSITIVE_SETTINGS = [
@@ -25,9 +22,7 @@ _POSITIVE_SETTINGS = [
     *_OPTIONAL_CHANNEL_IDS,
     "DAILY_TOKENS_ADMIN",
     "DAILY_TOKENS_AMBIENT",
-    "DAILY_TOKENS_DIGEST",
     "DAILY_TOKENS_GIGABRAIN",
-    "DAILY_TOKENS_SPARK",
     "DAILY_TOKENS_CURATED",
     "ADMIN_MAX_TOOL_CALLS",
     "ADMIN_MAX_TURNS",
@@ -40,15 +35,10 @@ _POSITIVE_SETTINGS = [
 _USD_CAPS = [
     "DAILY_USD_ADMIN",
     "DAILY_USD_AMBIENT",
-    "DAILY_USD_DIGEST",
     "DAILY_USD_GIGABRAIN",
-    "DAILY_USD_SPARK",
     "DAILY_USD_CURATED",
 ]
 _SCHEDULED_HOURS = [
-    "DIGEST_HOUR",
-    "PERSONAL_DIGEST_HOUR",
-    "SPARK_HOUR",
     "CURATED_HOUR",
     "GIGABRAIN_HOUR",
 ]
@@ -104,15 +94,6 @@ def test_empty_optional_channel_id_becomes_none(monkeypatch, setting):
     assert getattr(Settings(), setting.lower()) is None
 
 
-def test_personal_digest_defaults(monkeypatch):
-    _set_required(monkeypatch)
-    settings = Settings()
-    assert settings.personal_digest_channel_id is None
-    assert settings.personal_digest_hour == 7
-
-
-
-
 def test_missing_required_field_raises(monkeypatch):
     for key in _REQUIRED:
         monkeypatch.delenv(key, raising=False)
@@ -153,7 +134,6 @@ def test_daily_usd_defaults_to_disabled(monkeypatch):
     settings = Settings()
     assert settings.daily_usd_admin == 0.0
     assert settings.daily_usd_ambient == 0.0
-    assert settings.daily_usd_digest == 0.0
     assert settings.daily_usd_gigabrain == 0.0
 
 
@@ -161,17 +141,6 @@ def test_daily_usd_parses_from_env(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("DAILY_USD_ADMIN", "2.5")
     assert Settings().daily_usd_admin == 2.5
-
-
-def test_spark_defaults(monkeypatch):
-    _set_required(monkeypatch)
-    settings = Settings()
-    assert settings.spark_channel_id is None
-    assert settings.spark_hour == 7
-    assert settings.model_spark == ""
-    assert settings.spark_models == []
-    assert settings.daily_tokens_spark == 30_000
-    assert settings.daily_usd_spark == 0.0
 
 
 def test_curated_defaults(monkeypatch):
@@ -182,12 +151,6 @@ def test_curated_defaults(monkeypatch):
     assert settings.curated_models == []
     assert settings.daily_tokens_curated == 30_000
     assert settings.daily_usd_curated == 0.0
-
-
-def test_spark_model_chain_is_parsed_to_list(monkeypatch):
-    _set_required(monkeypatch)
-    monkeypatch.setenv("MODEL_SPARK", "a/b, c/d")
-    assert Settings().spark_models == ["a/b", "c/d"]
 
 
 @pytest.mark.parametrize("setting", _POSITIVE_SETTINGS)

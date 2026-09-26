@@ -162,14 +162,6 @@ class MoveChannelArgs(ToolArgs):
         return self
 
 
-class RunDigestArgs(ToolArgs):
-    """No arguments — triggers the digest job immediately."""
-
-
-class RunSparkArgs(ToolArgs):
-    """No arguments — triggers the spark job immediately."""
-
-
 class PreviewCuratedArgs(ToolArgs):
     """No arguments — drafts a curated story without posting or marking it seen."""
 
@@ -414,19 +406,6 @@ REGISTRY: dict[str, ToolSpec] = {
         ),
         args_model=MoveChannelArgs,
         requires_confirm=True,
-    ),
-    "run_digest": ToolSpec(
-        name="run_digest",
-        description="Trigger the digest job immediately.",
-        args_model=RunDigestArgs,
-    ),
-    "run_spark": ToolSpec(
-        name="run_spark",
-        description=(
-            "Trigger the spark job (spotlight one item from Scout + a discussion question) "
-            "immediately."
-        ),
-        args_model=RunSparkArgs,
     ),
     "preview_curated": ToolSpec(
         name="preview_curated",

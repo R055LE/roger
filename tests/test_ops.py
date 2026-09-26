@@ -1,21 +1,18 @@
 """Ops-channel alerting — the dedupe notifier and the pure alert-decision helpers (backlog 1.2)."""
 
-import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from roger import bot
 from roger.bot import (
-    DIGEST_LAST_ATTEMPT_META_KEY,
     OpsNotifier,
     RogerClient,
     _budget_alert,
     _curated_problem,
-    _digest_problem,
     _gigabrain_problem,
-    _personal_digest_problem,
-    _spark_problem,
 )
-from roger.store import Store
+from roger.config import Settings
+from roger.tools.schemas import REGISTRY
 
 
 class _FakeClock:
@@ -26,6 +23,34 @@ class _FakeClock:
 
     def __call__(self) -> float:
         return self.t
+
+
+def test_legacy_news_triggers_are_retired():
+    assert not any(
+        hasattr(RogerClient, name)
+        for name in ("_digest_loop", "_spark_loop", "_personal_digest_loop")
+    )
+    assert "run_digest" not in REGISTRY and "run_spark" not in REGISTRY
+    assert "preview_curated" in REGISTRY
+
+
+async def test_curated_schedule_stays_off_without_a_channel(monkeypatch):
+    for key, value in {
+        "DISCORD_TOKEN": "x", "OPENROUTER_API_KEY": "y", "OWNER_ID": "1", "GUILD_ID": "2",
+        "METRICS_PORT": "0", "GIGABRAIN_INTERVAL_DAYS": "0",
+    }.items():
+        monkeypatch.setenv(key, value)
+    settings = Settings()
+    assert settings.curated_channel_id is None
+    client = RogerClient(settings, store=object(), llm=object())
+    monkeypatch.setattr(bot, "_register_commands", lambda _: None)
+    monkeypatch.setattr(client.tree, "sync", AsyncMock())
+    monkeypatch.setattr(client, "_maybe_prune", AsyncMock())
+    monkeypatch.setattr(client._heartbeat, "start", Mock())
+
+    await client.setup_hook()
+
+    assert not client._curated_loop.is_running()
 
 
 async def test_notifier_dedupes_within_cooldown():
@@ -91,27 +116,6 @@ def test_budget_alert_silent_when_both_caps_disabled():
     assert _budget_alert("admin", 1_000_000, 0, 999.0, usd_cap=0.0) is None
 
 
-def test_digest_problem_none_for_success_statuses():
-    assert _digest_problem("posted") is None
-    assert _digest_problem("no new items") is None
-
-
-def test_digest_problem_flags_failures():
-    assert _digest_problem("budget exceeded; skipped") == "budget exceeded; skipped"
-    assert _digest_problem("digest channel 42 not found") is not None
-    assert _digest_problem("digest brain not configured (no models)") is not None
-
-
-def test_personal_digest_problem_none_for_success_statuses():
-    assert _personal_digest_problem("posted") is None
-    assert _personal_digest_problem("no new items") is None
-
-
-def test_personal_digest_problem_flags_failures():
-    assert _personal_digest_problem("DM failed; digest not delivered") is not None
-    assert _personal_digest_problem("budget exceeded; skipped") is not None
-
-
 def test_gigabrain_problem_none_for_success_and_self_gated_statuses():
     assert _gigabrain_problem("delivered") is None
     assert _gigabrain_problem("not due yet") is None
@@ -122,20 +126,6 @@ def test_gigabrain_problem_flags_failures():
     assert _gigabrain_problem("DM failed; suggestion not delivered") is not None
     assert _gigabrain_problem("guild 9 not visible") is not None
     assert _gigabrain_problem("error running suggestion") is not None
-
-
-def test_spark_problem_none_for_success_statuses():
-    assert _spark_problem("posted") is None
-    assert _spark_problem("no new items") is None
-
-
-def test_spark_problem_flags_failures():
-    assert _spark_problem("budget exceeded; skipped") is not None
-    assert _spark_problem("spark channel 42 not found") is not None
-    assert _spark_problem("spark brain not configured (no models)") is not None
-    assert _spark_problem("unparseable response; skipped") is not None
-    assert _spark_problem("delivery failed; not posted") is not None
-    assert _spark_problem("spark not configured (SPARK_CHANNEL_ID unset)") is not None
 
 
 def test_curated_quiet_day_is_ok_but_uncertain_delivery_alerts():
@@ -166,53 +156,3 @@ async def test_scheduled_curated_recovers_after_an_unexpected_tick_error(monkeyp
     await RogerClient._run_scheduled_curated(client)
     assert len(alerts) == 1
     assert "unexpected error" in alerts[0][0][1]
-
-
-async def test_scheduled_digest_records_failure_alerts_and_runs_again(tmp_path, monkeypatch):
-    store = await Store(str(tmp_path / "s.db")).open()
-    alerts = []
-
-    class Ops:
-        async def alert(self, *args, **kwargs):
-            alerts.append((args, kwargs))
-
-    results = iter([{"status": "delivery failed"}, {"status": "posted"}])
-
-    async def run_digest_job(**kwargs):
-        return next(results)
-
-    monkeypatch.setattr(bot, "run_digest_job", run_digest_job)
-    client = SimpleNamespace(settings=object(), llm=object(), store=store, _ops=Ops())
-    try:
-        await RogerClient._run_scheduled_digest(client)
-        first = json.loads(await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY))
-        assert set(first) == {"timestamp", "result"}
-        assert first["result"] == "failure" and isinstance(first["timestamp"], float)
-        assert len(alerts) == 1 and "delivery failed" in alerts[0][0][1]
-
-        await RogerClient._run_scheduled_digest(client)
-        assert json.loads(await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY))["result"] == "success"
-    finally:
-        await store.close()
-
-
-async def test_scheduled_digest_contains_unexpected_job_error(tmp_path, monkeypatch, caplog):
-    store = await Store(str(tmp_path / "s.db")).open()
-    alerts = []
-
-    class Ops:
-        async def alert(self, *args, **kwargs):
-            alerts.append((args, kwargs))
-
-    async def run_digest_job(**kwargs):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(bot, "run_digest_job", run_digest_job)
-    client = SimpleNamespace(settings=object(), llm=object(), store=store, _ops=Ops())
-    try:
-        await RogerClient._run_scheduled_digest(client)
-        assert json.loads(await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY))["result"] == "failure"
-        assert len(alerts) == 1
-        assert any(record.exc_info for record in caplog.records)
-    finally:
-        await store.close()

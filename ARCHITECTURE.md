@@ -11,15 +11,14 @@ turns.
 ## §1 Overview
 
 Roger is a **single-guild, owner-gated Discord assistant** built on hosted models via OpenRouter.
-It runs as one process with five independent **brains**, chosen entirely by *who* is talking and
+It runs as one process with four independent **brains**, chosen entirely by *who* is talking and
 *where*:
 
 | Brain | Purpose | Tools | Who |
 |---|---|---|---|
 | **Admin** (§6) | Server concierge — creates channels/roles, sets permissions | Yes | Owner only |
 | **Ambient** (§8) | Deadpan chat persona | None | Anyone |
-| **Digest** (§9) | Scheduled summary of Scout's picks | n/a (scheduled) | — |
-| **Spark** (§9) | Scheduled grounded item spotlight and discussion question | None | n/a |
+| **Curated** (§9) | Daily source-grounded story selection and optional public post | None | n/a |
 | **Giga Brain** (§12) | Deep, occasional strategic analysis — reviews server state, proposes ideas, never acts | Read-only subset | Owner only |
 
 No agent framework. The admin brain is a hand-rolled tool loop (§6) so every step is inspectable
@@ -98,7 +97,7 @@ These hold regardless of what any model outputs. They are the load-bearing part 
 All settings load from the process environment via `pydantic-settings` (`roger/config.py`), injected
 at runtime by `sops exec-env`. Nothing is read from a committed file. Notable shapes:
 
-- `MODEL_ADMIN` / `MODEL_AMBIENT` / `MODEL_DIGEST` / `MODEL_SPARK` are **comma-separated priority
+- `MODEL_ADMIN` / `MODEL_AMBIENT` / `MODEL_CURATED` / `MODEL_GIGABRAIN` are **comma-separated priority
   chains**. The primary comes first, followed by OpenRouter fallbacks. Every model in the admin
   chain must support tool calling.
 - `OPENROUTER_BASE_URL` is config, so pointing Roger at a local inference host is an env change.
@@ -109,7 +108,7 @@ at runtime by `sops exec-env`. Nothing is read from a committed file. Notable sh
 One `asyncio` process (`python -m roger`). Non-root, read-only root filesystem, `/tmp` on tmpfs,
 one writable bind mount at `/data` for the SQLite DB. Structured JSON logs to stdout
 (`_JsonFormatter`); discord.py's gateway chatter is pinned to WARNING. `discord.py`'s
-`ext.tasks` drives the daily digest and Spark loops (§9).
+`ext.tasks` drives the optional daily curated loop (§9).
 
 ## §5 Dispatch & routing
 
@@ -190,8 +189,7 @@ Registry:
 | `create_forum_post` | side effect (mass mentions suppressed) | **yes** (§2.8) |
 | `reply_to_forum_post` | side effect (mass mentions suppressed) | **yes** (§2.8) |
 | `move_channel` | yes (reorder a channel/category — position only) | **yes** (§2.8) |
-| `run_digest` | side effect | no |
-| `run_spark` | side effect | no |
+| `preview_curated` | no Discord post or seen-state write; spends model budget | no |
 | `set_presence` | self only (own status/activity, persisted) | no |
 | `set_nickname` | self only (own guild nickname) | no |
 | `server_stats` | no | — |
@@ -249,53 +247,29 @@ never touches the admin path.
 Roger's emerging character (and where a future personality pass would steer it) is logged in
 [`docs/personality.md`](docs/personality.md) — tone only; it never loosens §2/§7/§8.
 
-## §9 Digest and Spark brains
+## §9 Curated news
 
-A scheduled summary of items [Scout](https://github.com/R055LE/scout) already scored, on a daily
-`tasks.loop` fired at `DIGEST_HOUR` in `TZ`, also triggerable via the `run_digest` tool. No Discord
-message input enters this path. Scout item content is external and untrusted. See ADR-0012 for why
-this replaced Roger fetching feeds itself.
+Scout writes scored feed items and article excerpts to a read-only digest mount. Roger checks the
+recent output at `CURATED_HOUR=7` in `TZ`, after Scout's 05:30 local run. The loop starts only when
+`CURATED_CHANNEL_ID` is set. A quiet day is an ordinary result, with no quota to fill.
 
-- **Scout is the source, not a tool call.** `roger.scout_source.collect_from_scout` reads
-  `digests/<run_id>.json` files Scout writes to a read-only bind mount (`SCOUT_DIGEST_DIR`), co-located
-  as its own Compose service on the same host. Roger never fetches a feed and holds no credential for
-  this path; Scout owns the watchlist, the scoring, and the outbound HTTP.
-- **A rolling window, not just the newest file.** Scout never re-reports an item once it's written it
-  to a digest, so reading only the latest run would permanently lose anything from a run Roger missed
-  (a restart, a failed post, a brain that didn't fire). `collect_from_scout` reads recent digests
-  within `WINDOW_HOURS` (72) and dedupes by item id across overlapping runs, keeping the higher
-  relevance score if the same id appears twice.
-- **A broken producer is a distinct status, not a quiet day.** A missing digest directory, no digests
-  at all, or a newest run older than `SCOUT_MAX_AGE_HOURS` (default 36) each return their own job
-  status rather than "no new items" — the existing ops alerting keys off job status, so a stopped
-  Scout is visible instead of reading as nothing happened.
-- **Robust collection.** Entries cap at `MAX_ITEMS` (15), summaries are truncated to 500 chars before
-  the model sees them. The reason Scout matched an item (`relevance`, `matched` topics/terms) is
-  passed to the model too, so it can weight a three-topic match over one that scraped past on a
-  keyword instead of treating every item as equal-weight.
-- **Exactly-once posting.** Items are marked **seen** (`seen` table, keyed the same as before) only
-  *after* a successful post, so a failed post retries the same items next time rather than dropping
-  them.
-- **A personal, DM'd sibling.** `run_personal_digest_job` is the same mechanism — collect from Scout,
-  dedupe, summarize — delivered to `PERSONAL_DIGEST_CHANNEL_ID` if set, else DMed directly to the
-  owner — same fallback shape and the same "deploy owner's choice of destination and privacy, not
-  Roger's" reasoning as Giga Brain's periodic check-in (§12). It shares the `digest` brain's model and
-  daily budget; it's a second job reading the same Scout source, not a second brain or a separate
-  curated list. Scheduled unconditionally, same as Giga Brain's interval check — the job itself
-  decides "no new items" rather than the caller gating on any config.
-- **The public and personal digests can overlap.** Both read the same Scout output, so an item can
-  appear in whichever job runs first that day (personal digest defaults to `PERSONAL_DIGEST_HOUR=7`,
-  before the public digest's `DIGEST_HOUR=8`) and is then seen for the other.
-- **Spark posts one grounded item.** `run_spark_job` reuses the same `collect_from_scout` source as
-  the digest, then asks its own tool-free model identity to pick one item and write a short blurb and
-  question. Candidate titles and summaries are bounded and encoded as JSON data. The response must
-  match `ITEM:` / `BLURB:` / `QUESTION:` exactly. Public output is length-bounded, mentions are
-  suppressed, and only HTTP(S) item links without embedded credentials are accepted. A malformed
-  response or failed delivery posts nothing and leaves the item eligible for retry.
-- **Spark runs before the roundup.** Its chosen item is marked seen only after a successful post.
-  `SPARK_HOUR=7` defaults before `DIGEST_HOUR=8`, so the later roundup does not repeat the item.
-  Other candidates remain unseen. An unset `SPARK_CHANNEL_ID` disables the loop; there is no DM
-  fallback because the feature needs a public audience.
+- `collect_from_scout` reads a rolling 72-hour window, dedupes overlapping runs, and reports a
+  missing or stale producer as a distinct status for ops alerting. Scout owns feed retrieval and
+  public page fetching; Roger only reads the output.
+- The curated model sees at most eight candidates with bounded title, summary, match, and article
+  text fields. It must return a strict JSON skip or a draft with two to four facts. Each fact needs
+  an exact supporting quote from the supplied source excerpt. Invalid responses make no post.
+- The public post contains the chosen title, facts, why it matters, optional light take and natural
+  question, plus a source link. Discord mentions are suppressed. The owner can call
+  `preview_curated` to inspect the decision and supporting quotes without posting or marking an
+  item seen; preview still spends from the curated model budget.
+- `curated_delivery` reserves the local date and marks the chosen Scout item seen before sending.
+  A successful send records the Discord message ID. If sending has an uncertain outcome, the
+  reservation stays pending and Roger will not retry automatically; an operator must reconcile it.
+  This prevents duplicate posts after a timeout or crash. Only one public send can be claimed per
+  local date.
+
+Historical Digest and Spark usage rows remain in SQLite after those jobs and tools are retired.
 
 ## §10 Persistence
 
@@ -306,7 +280,8 @@ behaviour adds rows, not migrations.
 |---|---|
 | `audit` | Every admin action + gate rejection — the tamper-evident trail |
 | `usage` | Daily token spend per brain — drives the budget gate (§11) |
-| `seen` | `(feed_url, entry_id)` dedupe keys for Digest and Spark (§9) — `feed_url` holds Scout's feed id, not a URL |
+| `seen` | `(feed_url, entry_id)` dedupe keys for curated news (§9) — `feed_url` holds Scout's feed id, not a URL |
+| `curated_delivery` | One public send claim and delivery state per local date (§9) |
 | `ambient_log` | Ambient own-thread memory, per user+channel (§8) |
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |
@@ -338,8 +313,8 @@ Limits at a glance (defaults; all env-overridable):
 
 | Control | Default |
 |---|---|
-| Daily tokens — admin / ambient / digest / spark / gigabrain | 150k / 40k / 30k / 30k / 100k |
-| Daily USD — admin / ambient / digest / spark / gigabrain | off / off / off / off / off (0 = disabled) |
+| Daily tokens — admin / ambient / curated / gigabrain | 150k / 40k / 30k / 100k |
+| Daily USD — admin / ambient / curated / gigabrain | off / off / off / off (0 = disabled) |
 | Tool calls per admin request | 10 |
 | Model round-trips per admin request | 14 |
 | Tool calls / round-trips per gigabrain request | 10 / 14 |
@@ -375,18 +350,18 @@ Triggered two ways: on demand via `/gigabrain <question>`, and optionally on a p
 unprompted check-in (`run_gigabrain_suggestion`) — a fixed "review the server, propose
 improvements" prompt through the same read-only loop. Delivered to `GIGABRAIN_CHANNEL_ID` if set,
 else **DMed directly to the owner** — DM is the safer default (these can be candid, owner-only
-musings, unlike the digest's public post), but a dedicated private channel is supported for anyone
+musings, unlike the curated public post), but a dedicated private channel is supported for anyone
 who'd rather have a scrollable history than a string of DMs; either way it's the deploy owner's
 choice of destination and privacy, not Roger's. Off by default (`GIGABRAIN_INTERVAL_DAYS=0`); when
 set, a daily `tasks.loop` tick at `GIGABRAIN_HOUR` calls it unconditionally and the function decides
 for itself whether it's actually due, the same "the job decides, not the caller" shape as
-`run_digest_job`'s "no new items". Cadence is tracked via a `gigabrain_last_run_date` key in `meta`
+the curated job's quiet-day status. Cadence is tracked via a `gigabrain_last_run_date` key in `meta`
 (§10) rather than an in-memory guard, because a several-day interval must survive a mid-cycle
 restart. A failed delivery (DM closed, bot blocked, configured channel not found or not
 postable) is logged and surfaced once via the ops watchdog, not retried — the next scheduled tick
 will naturally try again once the interval elapses.
 
-The check-in uses the delivery destination's id as `channel_id`, not `None` — unlike the digest, it
+The check-in uses the delivery destination's id as `channel_id`, not `None` — it
 *should* have continuity: each run sees prior check-ins via the same `recent_gigabrain` memory an
 interactive conversation uses. The prompt is explicit about using that memory well: lead with
 what's changed, stay brief when nothing has, and don't re-flag the same unaddressed suggestion

@@ -37,17 +37,13 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     model_admin: str = ""
     model_ambient: str = ""
-    model_digest: str = ""
     model_gigabrain: str = ""
-    model_spark: str = ""
     model_curated: str = ""
 
     # --- budgets (daily in+out tokens per brain) ---
     daily_tokens_admin: int = Field(default=150_000, gt=0)
     daily_tokens_ambient: int = Field(default=40_000, gt=0)
-    daily_tokens_digest: int = Field(default=30_000, gt=0)
     daily_tokens_gigabrain: int = Field(default=100_000, gt=0)
-    daily_tokens_spark: int = Field(default=30_000, gt=0)
     daily_tokens_curated: int = Field(default=30_000, gt=0)
 
     # --- budgets (daily USD, layered on top of the token caps above) ---
@@ -57,9 +53,7 @@ class Settings(BaseSettings):
     # brain with no effective cap at all).
     daily_usd_admin: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     daily_usd_ambient: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-    daily_usd_digest: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     daily_usd_gigabrain: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-    daily_usd_spark: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     daily_usd_curated: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
     # --- admin tool loop bounds (§2.9) ---
@@ -75,7 +69,7 @@ class Settings(BaseSettings):
     # --- gigabrain periodic suggestions ---
     gigabrain_interval_days: int = Field(default=0, ge=0)  # 0 = disabled; e.g. 7 for weekly
     gigabrain_hour: int = Field(default=9, ge=0, le=23)
-    # unset = DM the owner directly; set = post there instead (same shape as digest_channel_id).
+    # unset = DM the owner directly; set = post there instead.
     gigabrain_channel_id: int | None = Field(default=None, gt=0)
 
     # --- ambient rate limiting ---
@@ -89,20 +83,6 @@ class Settings(BaseSettings):
     # Older than this and the brains report a broken producer rather than a quiet
     # day, so the ops alerting sees a Scout that stopped running.
     scout_max_age_hours: int = 36
-
-    # --- digest ---
-    digest_channel_id: int | None = Field(default=None, gt=0)
-    digest_hour: int = Field(default=8, ge=0, le=23)
-
-    # --- personal digest (owner-only, DM by default) ---
-    # unset = DM the owner directly; set = post there instead (same shape as digest_channel_id).
-    personal_digest_channel_id: int | None = Field(default=None, gt=0)
-    personal_digest_hour: int = Field(default=7, ge=0, le=23)
-
-    # --- spark (no source of its own — shares Scout's output). Required channel, no DM
-    # fallback: a discussion prompt needs an audience. ---
-    spark_channel_id: int | None = Field(default=None, gt=0)
-    spark_hour: int = Field(default=7, ge=0, le=23)
 
     # --- curated single-story posts (off until a channel is configured) ---
     curated_channel_id: int | None = Field(default=None, gt=0)
@@ -129,11 +109,8 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "digest_channel_id",
         "ops_channel_id",
         "gigabrain_channel_id",
-        "personal_digest_channel_id",
-        "spark_channel_id",
         "curated_channel_id",
         mode="before",
     )
@@ -162,16 +139,8 @@ class Settings(BaseSettings):
         return _split_csv(self.model_ambient)
 
     @property
-    def digest_models(self) -> list[str]:
-        return _split_csv(self.model_digest)
-
-    @property
     def gigabrain_models(self) -> list[str]:
         return _split_csv(self.model_gigabrain)
-
-    @property
-    def spark_models(self) -> list[str]:
-        return _split_csv(self.model_spark)
 
     @property
     def curated_models(self) -> list[str]:
