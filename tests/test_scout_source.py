@@ -117,7 +117,14 @@ async def test_seen_items_are_filtered(tmp_path):
 async def test_duplicate_across_runs_keeps_the_higher_score(tmp_path):
     store = await _store(tmp_path)
     try:
-        _write_digest(tmp_path, [_entry("dup")], run_id="2026-09-01T00:00:00Z-a", age_hours=5)
+        older = _write_digest(tmp_path, [_entry("dup")], run_id="2026-09-01T00:00:00Z-a",
+                              age_hours=5)
+        older_path = tmp_path / "digests" / f"{older}.json"
+        older_payload = json.loads(older_path.read_text())
+        older_payload["items"][0]["article"] = {
+            "status": "ok", "url": "https://example.org/dup", "text": "Source evidence",
+        }
+        older_path.write_text(json.dumps(older_payload))
         path = tmp_path / "digests" / "2026-09-02T00:00:00Z-b.json"
         started = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=1)
         path.write_text(json.dumps({
@@ -129,6 +136,7 @@ async def test_duplicate_across_runs_keeps_the_higher_score(tmp_path):
         batch = await _collect(tmp_path, store)
         assert len(batch.entries) == 1
         assert batch.entries[0]["relevance"] == 9
+        assert batch.entries[0]["article"]["status"] == "ok"
     finally:
         await store.close()
 
