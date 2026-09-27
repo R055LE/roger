@@ -114,13 +114,20 @@ def _format_candidates(entries: list[dict[str, Any]]) -> str:
     ], ensure_ascii=False)
 
 
-def _short(value: object, name: str, limit: int, *, required: bool = True) -> str:
+def _short(value: object, name: str, limit: int) -> str:
     if not isinstance(value, str):
         raise DraftError(f"{name} is not text")
     value = value.strip()
-    if (required and not value) or len(value) > limit:
+    if not value or len(value) > limit:
         raise DraftError(f"{name} is empty or too long")
     return value
+
+
+def _optional_short(value: object, name: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise DraftError(f"{name} is not text")
+    value = value.strip()
+    return value if len(value) <= limit else ""
 
 
 def _parse(text: str, entries: list[dict[str, Any]]) -> Draft | None:
@@ -163,8 +170,8 @@ def _parse(text: str, entries: list[dict[str, Any]]) -> Draft | None:
         facts=tuple(lines),
         evidence=tuple(quotes),
         why=_short(data.get("why"), "why", 400),
-        take=_short(data.get("take", ""), "take", 200, required=False),
-        question=_short(data.get("question", ""), "question", 160, required=False),
+        take=_optional_short(data.get("take", ""), "take", 200),
+        question=_optional_short(data.get("question", ""), "question", 160),
     )
 
 

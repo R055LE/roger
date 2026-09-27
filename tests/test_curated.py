@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from roger.brains.curated import DraftError, _format_candidates, _parse, draft, eligible
+from roger.brains.curated import DraftError, _embed, _format_candidates, _parse, draft, eligible
 
 QUOTE_A = "The release cuts cold start latency by 30 percent in the published test."
 QUOTE_B = "The maintainers also published the benchmark setup and raw measurements."
@@ -70,6 +70,17 @@ def test_specific_why_can_be_moderately_long_but_remains_bounded():
         _parse(_post(why=why + "x" * (401 - len(why))), [_entry()])
 
 
+def test_overlong_optional_commentary_is_omitted_from_post():
+    post = _parse(_post(take="t" * 201, question="q" * 161), [_entry()])
+    assert post is not None
+    assert post.facts and post.why
+    assert post.take == post.question == ""
+    embed = _embed(post, "2026-09-27")
+    assert "Why it matters:" in embed.description
+    assert "Roger's take:" not in embed.description
+    assert not embed.fields
+
+
 def test_clean_skip_is_normal():
     assert _parse('{"decision":"skip"}', [_entry()]) is None
 
@@ -90,6 +101,7 @@ def test_exact_json_fence_preserves_draft_checks():
                  {"text": "Another claim.", "evidence": QUOTE_B}]),
     _post(facts=[]),
     _post(why=""),
+    _post(take=5),
 ])
 def test_malformed_or_unsupported_draft_is_rejected(text):
     with pytest.raises(DraftError):
