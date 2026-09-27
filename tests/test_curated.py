@@ -132,3 +132,19 @@ def test_candidate_payload_has_no_source_link():
     data = json.loads(_format_candidates([_entry()]))
     assert "url" not in data[0]
     assert "source_text" in data[0]
+
+
+def test_arxiv_author_list_does_not_hide_abstract_evidence():
+    article_text = "Authors: " + "Researcher Name, " * 220 + f"Abstract: {QUOTE_A} {QUOTE_B}"
+    article = {"status": "ok", "url": "https://arxiv.org/abs/2609.22978", "text": article_text}
+    entry = _entry(article=article)
+    excerpt = json.loads(_format_candidates([entry]))[0]["source_text"]
+    assert excerpt.startswith("Abstract:")
+    assert len(excerpt) <= 3_000
+    assert QUOTE_B in excerpt
+    assert _parse(_post(), [entry]) is not None
+
+    article["url"] = "https://example.org/paper"
+    assert QUOTE_B not in json.loads(_format_candidates([entry]))[0]["source_text"]
+    with pytest.raises(DraftError):
+        _parse(_post(), [entry])
