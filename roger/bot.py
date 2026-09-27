@@ -29,6 +29,7 @@ from discord.ext import tasks
 from roger import metrics
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
+from roger.brains.curated import run_curated_job
 from roger.brains.digest import (
     run_digest_job,
     run_personal_digest_job,
@@ -248,6 +249,7 @@ _CONFIGURED_CHANNELS: tuple[tuple[str, str], ...] = (
     ("gigabrain_channel_id", "gigabrain check-in"),
     ("personal_digest_channel_id", "personal digest"),
     ("spark_channel_id", "spark"),
+    ("curated_channel_id", "curated"),
 )
 
 _DIGEST_CHANNEL_PERMISSIONS: tuple[tuple[str, str], ...] = (
@@ -283,7 +285,7 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
             problems.append(f"{label} channel #{channel.name} is not postable")
             continue
         required = (
-            _DIGEST_CHANNEL_PERMISSIONS if attr == "digest_channel_id"
+            _DIGEST_CHANNEL_PERMISSIONS if attr in {"digest_channel_id", "curated_channel_id"}
             else _POSTABLE_CHANNEL_PERMISSIONS
         )
         permissions = channel.permissions_for(guild.me)
@@ -297,7 +299,7 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
 
 # --------------------------------------------------------------------------- status & ops
 
-_BRAINS = ("admin", "ambient", "digest", "spark", "gigabrain")
+_BRAINS = ("admin", "ambient", "digest", "spark", "curated", "gigabrain")
 DIGEST_LAST_ATTEMPT_META_KEY = "digest_last_attempt"
 
 
@@ -339,6 +341,7 @@ def _daily_caps(settings: Settings) -> dict[str, int]:
         "ambient": settings.daily_tokens_ambient,
         "digest": settings.daily_tokens_digest,
         "spark": settings.daily_tokens_spark,
+        "curated": settings.daily_tokens_curated,
         "gigabrain": settings.daily_tokens_gigabrain,
     }
 
@@ -350,6 +353,7 @@ def _daily_usd_caps(settings: Settings) -> dict[str, float]:
         "ambient": settings.daily_usd_ambient,
         "digest": settings.daily_usd_digest,
         "spark": settings.daily_usd_spark,
+        "curated": settings.daily_usd_curated,
         "gigabrain": settings.daily_usd_gigabrain,
     }
 
@@ -401,6 +405,8 @@ def _format_status(
     tz: str,
     usd_caps: dict[str, float] | None = None,
     digest_result: str = "never run",
+    curated_hour: int = 7,
+    curated_configured: bool = False,
 ) -> str:
     """Render the /status readout body (pure). The caller wraps it in a code block."""
     usd_caps = usd_caps or {}
@@ -431,6 +437,8 @@ def _format_status(
     )
     spark = f"{spark_hour:02d}:00 {tz}" if spark_configured else "unconfigured"
     lines.append(f"digest: {digest}   spark: {spark}")
+    curated = f"{curated_hour:02d}:00 {tz}" if curated_configured else "unconfigured"
+    lines.append(f"curated: {curated}")
     if recent_audit:
         lines.append("recent actions:")
         for row in recent_audit:
@@ -465,6 +473,8 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         digest_configured=settings.digest_channel_id is not None,
         spark_hour=settings.spark_hour,
         spark_configured=settings.spark_channel_id is not None,
+        curated_hour=settings.curated_hour,
+        curated_configured=settings.curated_channel_id is not None,
         tz=settings.tz,
         digest_result=_digest_status(
             digest_configured=settings.digest_channel_id is not None,
@@ -561,6 +571,12 @@ def _spark_problem(status: str) -> str | None:
     return status
 
 
+def _curated_problem(status: str) -> str | None:
+    if status in {"posted", "already posted", "no post-worthy items"}:
+        return None
+    return status
+
+
 # Personal digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops
 # ping — same OK-prefix shape as the public digest.
 _PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items")
@@ -644,6 +660,15 @@ class RogerClient(discord.Client):
             log.info(
                 "spark scheduled daily at %02d:00 %s", self.settings.spark_hour, self.settings.tz
             )
+        if self.settings.curated_channel_id is not None:
+            self._curated_loop.change_interval(
+                time=datetime.time(
+                    hour=self.settings.curated_hour, tzinfo=ZoneInfo(self.settings.tz)
+                )
+            )
+            self._curated_loop.start()
+            log.info("curated posting scheduled daily at %02d:00 %s",
+                     self.settings.curated_hour, self.settings.tz)
         # Always scheduled, unconditionally — DM delivery needs no channel pre-configured.
         # run_personal_digest_job self-gates on "no new items" the same way run_gigabrain_suggestion
         # self-gates on its interval (§12): the job decides, not the caller.
@@ -883,6 +908,32 @@ class RogerClient(discord.Client):
 
     @_spark_loop.before_loop
     async def _before_spark(self) -> None:
+        await self.wait_until_ready()
+
+    @tasks.loop(time=datetime.time(hour=7))
+    async def _curated_loop(self) -> None:
+        await self._run_scheduled_curated()
+
+    async def _run_scheduled_curated(self) -> None:
+        try:
+            result = await run_curated_job(
+                client=self, settings=self.settings, llm=self.llm, store=self.store
+            )
+            status = str(result.get("status", ""))
+        except Exception:
+            log.exception("scheduled curated post failed unexpectedly")
+            status = "unexpected error"
+        log.info("scheduled curated post: %s", status)
+        problem = _curated_problem(status)
+        if problem:
+            await self._ops.alert(
+                f"curated:{time.strftime('%Y-%m-%d')}",
+                f"⚠️ **curated post problem** — {problem}",
+                cooldown_s=_DAY_S,
+            )
+
+    @_curated_loop.before_loop
+    async def _before_curated(self) -> None:
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=7))

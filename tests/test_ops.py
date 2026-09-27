@@ -9,6 +9,7 @@ from roger.bot import (
     OpsNotifier,
     RogerClient,
     _budget_alert,
+    _curated_problem,
     _digest_problem,
     _gigabrain_problem,
     _personal_digest_problem,
@@ -135,6 +136,36 @@ def test_spark_problem_flags_failures():
     assert _spark_problem("unparseable response; skipped") is not None
     assert _spark_problem("delivery failed; not posted") is not None
     assert _spark_problem("spark not configured (SPARK_CHANNEL_ID unset)") is not None
+
+
+def test_curated_quiet_day_is_ok_but_uncertain_delivery_alerts():
+    assert _curated_problem("no post-worthy items") is None
+    assert _curated_problem("posted") is None
+    assert _curated_problem("already posted") is None
+    assert _curated_problem("delivery uncertain; manual check required") is not None
+
+
+async def test_scheduled_curated_recovers_after_an_unexpected_tick_error(monkeypatch):
+    alerts = []
+
+    class Ops:
+        async def alert(self, *args, **kwargs):
+            alerts.append((args, kwargs))
+
+    outcomes = iter([RuntimeError("boom"), {"status": "no post-worthy items"}])
+
+    async def job(**kwargs):
+        value = next(outcomes)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(bot, "run_curated_job", job)
+    client = SimpleNamespace(settings=object(), llm=object(), store=object(), _ops=Ops())
+    await RogerClient._run_scheduled_curated(client)
+    await RogerClient._run_scheduled_curated(client)
+    assert len(alerts) == 1
+    assert "unexpected error" in alerts[0][0][1]
 
 
 async def test_scheduled_digest_records_failure_alerts_and_runs_again(tmp_path, monkeypatch):

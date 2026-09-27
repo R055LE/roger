@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import json
+import logging
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
-from roger.llm import LLM
+import discord
+from openai import OpenAIError
+
+from roger.llm import LLM, BudgetExceeded, LLMConfigError
+from roger.scout_source import collect_from_scout
+from roger.store import Store
+
+log = logging.getLogger("roger.curated")
 
 MAX_CANDIDATES = 8
 SOURCE_TEXT_CAP = 3_000
@@ -142,7 +152,7 @@ async def draft(entries: list[dict[str, Any]], llm: LLM) -> Draft | None:
     candidates = eligible(entries)
     if not candidates:
         return None
-    response = await llm.complete("spark", [
+    response = await llm.complete("curated", [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": _format_candidates(candidates)},
     ])
@@ -151,3 +161,77 @@ async def draft(entries: list[dict[str, Any]], llm: LLM) -> Draft | None:
     except (AttributeError, IndexError) as exc:
         raise DraftError("response had no text choice") from exc
     return _parse(text, candidates)
+
+
+def _embed(post: Draft, local_date: str) -> discord.Embed:
+    title = discord.utils.escape_mentions(str(post.entry["title"]))[:256] or "(untitled)"
+    parts = [" ".join(post.facts), f"Why it matters: {post.why}"]
+    if post.take:
+        parts.append(f"Roger's take: {post.take}")
+    description = discord.utils.escape_mentions("\n\n".join(parts))[:4096]
+    embed = discord.Embed(title=title, url=_safe_link(post.entry["article"]["url"]),
+                          description=description)
+    if post.question:
+        embed.add_field(name="Discuss", value=discord.utils.escape_mentions(post.question),
+                        inline=False)
+    embed.set_footer(text=f"Roger's pick · {local_date}")
+    return embed
+
+
+async def run_curated_job(
+    *, client: Any, settings: Any, llm: LLM, store: Store,
+    now: datetime.datetime | None = None,
+) -> dict[str, Any]:
+    channel_id = settings.curated_channel_id
+    if channel_id is None:
+        return {"status": "curated posting not configured"}
+    channel = client.get_channel(channel_id)
+    if channel is None or not callable(getattr(channel, "send", None)):
+        return {"status": "curated channel not postable"}
+
+    now = now or datetime.datetime.now(datetime.UTC)
+    local_date = now.astimezone(ZoneInfo(settings.tz)).date().isoformat()
+    existing = await store.curated_delivery(local_date)
+    if existing:
+        return {"status": "already posted" if existing["status"] == "sent"
+                else "delivery uncertain; manual check required"}
+
+    batch = await collect_from_scout(
+        settings.scout_digest_path, store,
+        max_age_hours=settings.scout_max_age_hours, limit=25, now=now,
+    )
+    if batch.status:
+        return {"status": batch.status}
+    if not batch.entries:
+        return {"status": "no post-worthy items"}
+    try:
+        post = await draft(batch.entries, llm)
+    except BudgetExceeded:
+        return {"status": "budget exceeded; skipped"}
+    except LLMConfigError:
+        return {"status": "curated brain not configured"}
+    except OpenAIError:
+        log.exception("curated model request failed")
+        return {"status": "model request failed; skipped"}
+    except DraftError as exc:
+        log.warning("curated model response rejected: %s", exc)
+        return {"status": "unusable model response; skipped"}
+    if post is None:
+        return {"status": "no post-worthy items"}
+
+    entry = post.entry
+    if not await store.claim_curated(local_date, entry["feed_url"], entry["id"]):
+        existing = await store.curated_delivery(local_date)
+        return {"status": "already posted" if existing and existing["status"] == "sent"
+                else "delivery uncertain; manual check required"}
+    try:
+        message = await channel.send(
+            embed=_embed(post, local_date), allowed_mentions=discord.AllowedMentions.none()
+        )
+        await store.mark_curated_sent(local_date, message.id)
+    except Exception:
+        # The request may have reached Discord even if the reply failed. Keep
+        # the durable claim and require a human check before any retry.
+        log.exception("curated delivery outcome uncertain")
+        return {"status": "delivery uncertain; manual check required"}
+    return {"status": "posted", "title": entry["title"]}

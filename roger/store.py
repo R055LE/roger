@@ -46,6 +46,15 @@ CREATE TABLE IF NOT EXISTS seen (
     PRIMARY KEY (feed_url, entry_id)
 );
 
+CREATE TABLE IF NOT EXISTS curated_delivery (
+    local_date TEXT PRIMARY KEY,
+    feed_url   TEXT NOT NULL,
+    entry_id   TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    message_id TEXT,
+    ts         REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS usage (
     date       TEXT    NOT NULL,
     brain      TEXT    NOT NULL,
@@ -333,6 +342,50 @@ class Store:
             "INSERT OR IGNORE INTO seen (feed_url, entry_id, ts) VALUES (?, ?, ?)",
             [(feed_url, entry_id, now) for feed_url, entry_id in pairs],
         )
+        await self._conn.commit()
+
+    async def curated_delivery(self, local_date: str) -> dict[str, Any] | None:
+        cursor = await self._conn.execute(
+            "SELECT status, feed_url, entry_id, message_id FROM curated_delivery "
+            "WHERE local_date = ?", (local_date,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def claim_curated(self, local_date: str, feed_url: str, entry_id: str) -> bool:
+        """Reserve the day's one send and suppress the item before touching Discord.
+
+        A crash or uncertain send leaves `pending`; automatic retry could post a
+        duplicate, so an operator must reconcile that state by hand.
+        """
+        try:
+            cursor = await self._conn.execute(
+                "INSERT OR IGNORE INTO curated_delivery "
+                "(local_date, feed_url, entry_id, status, ts) VALUES (?, ?, ?, 'pending', ?)",
+                (local_date, feed_url, entry_id, time.time()),
+            )
+            if cursor.rowcount != 1:
+                await self._conn.commit()
+                return False
+            await self._conn.execute(
+                "INSERT OR IGNORE INTO seen (feed_url, entry_id, ts) VALUES (?, ?, ?)",
+                (feed_url, entry_id, time.time()),
+            )
+            await self._conn.commit()
+            return True
+        except Exception:
+            await self._conn.rollback()
+            raise
+
+    async def mark_curated_sent(self, local_date: str, message_id: int) -> None:
+        cursor = await self._conn.execute(
+            "UPDATE curated_delivery SET status = 'sent', message_id = ? "
+            "WHERE local_date = ? AND status = 'pending'",
+            (str(message_id), local_date),
+        )
+        if cursor.rowcount != 1:
+            await self._conn.rollback()
+            raise RuntimeError("curated delivery claim missing")
         await self._conn.commit()
 
     # --- retention (§ backlog 1.3) ---

@@ -18,11 +18,13 @@ def _settings():
         daily_tokens_ambient=40_000,
         daily_tokens_digest=30_000,
         daily_tokens_spark=30_000,
+        daily_tokens_curated=30_000,
         daily_tokens_gigabrain=100_000,
         daily_usd_admin=0.0,
         daily_usd_ambient=0.0,
         daily_usd_digest=0.0,
         daily_usd_spark=0.0,
+        daily_usd_curated=0.0,
         daily_usd_gigabrain=0.0,
     )
 

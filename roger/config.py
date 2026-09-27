@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     model_digest: str = ""
     model_gigabrain: str = ""
     model_spark: str = ""
+    model_curated: str = ""
 
     # --- budgets (daily in+out tokens per brain) ---
     daily_tokens_admin: int = Field(default=150_000, gt=0)
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
     daily_tokens_digest: int = Field(default=30_000, gt=0)
     daily_tokens_gigabrain: int = Field(default=100_000, gt=0)
     daily_tokens_spark: int = Field(default=30_000, gt=0)
+    daily_tokens_curated: int = Field(default=30_000, gt=0)
 
     # --- budgets (daily USD, layered on top of the token caps above) ---
     # 0 = disabled (opt-in); set to a real figure once OpenRouter cost data looks right for your
@@ -58,6 +60,7 @@ class Settings(BaseSettings):
     daily_usd_digest: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     daily_usd_gigabrain: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     daily_usd_spark: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    daily_usd_curated: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
     # --- admin tool loop bounds (§2.9) ---
     admin_max_tool_calls: int = Field(default=10, gt=0)
@@ -101,6 +104,10 @@ class Settings(BaseSettings):
     spark_channel_id: int | None = Field(default=None, gt=0)
     spark_hour: int = Field(default=7, ge=0, le=23)
 
+    # --- curated single-story posts (off until a channel is configured) ---
+    curated_channel_id: int | None = Field(default=None, gt=0)
+    curated_hour: int = Field(default=7, ge=0, le=23)
+
     # --- ops ---
     # where Roger posts its boot self-report; None disables the report (logs still fire).
     ops_channel_id: int | None = Field(default=None, gt=0)
@@ -127,6 +134,7 @@ class Settings(BaseSettings):
         "gigabrain_channel_id",
         "personal_digest_channel_id",
         "spark_channel_id",
+        "curated_channel_id",
         mode="before",
     )
     @classmethod
@@ -164,6 +172,10 @@ class Settings(BaseSettings):
     @property
     def spark_models(self) -> list[str]:
         return _split_csv(self.model_spark)
+
+    @property
+    def curated_models(self) -> list[str]:
+        return _split_csv(self.model_curated)
 
     @property
     def scout_digest_path(self) -> pathlib.Path:
