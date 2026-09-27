@@ -84,6 +84,16 @@ def eligible(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _source_excerpt(entry: dict[str, Any]) -> str:
+    article = entry["article"]
+    source = article["text"]
+    if urlsplit(article["url"]).hostname in {"arxiv.org", "www.arxiv.org"}:
+        abstract = source.find("Abstract:")
+        if abstract >= 0:
+            source = source[abstract:]
+    return source[:SOURCE_TEXT_CAP]
+
+
 def _format_candidates(entries: list[dict[str, Any]]) -> str:
     return json.dumps([
         {
@@ -98,7 +108,7 @@ def _format_candidates(entries: list[dict[str, Any]]) -> str:
                               if isinstance(entry.get("matched"), list) else [])
                 if isinstance(match, dict)
             ],
-            "source_text": entry["article"]["text"][:SOURCE_TEXT_CAP],
+            "source_text": _source_excerpt(entry),
         }
         for index, entry in enumerate(entries, start=1)
     ], ensure_ascii=False)
@@ -136,7 +146,7 @@ def _parse(text: str, entries: list[dict[str, Any]]) -> Draft | None:
     facts = data.get("facts")
     if not isinstance(facts, list) or not 2 <= len(facts) <= 4:
         raise DraftError("expected 2-4 facts")
-    source = entry["article"]["text"][:SOURCE_TEXT_CAP]
+    source = _source_excerpt(entry)
     lines = []
     quotes = []
     for fact in facts:
