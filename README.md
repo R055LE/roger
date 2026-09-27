@@ -6,11 +6,11 @@ character, rebuilt from scratch on hosted models and modern tooling.
 
 Roger is a single-guild, owner-gated Discord assistant with four separate "brains":
 
-- **Admin** — an owner-only server concierge, reachable by `/roger`, a DM, or an @mention. Ask in
+- **Admin** — an owner-only server concierge, reached through `/roger` in the guild. Ask in
   plain language ("a read-only podcast channel under Media that DJs can post in") and it creates
   channels/roles and sets permissions through a small, hand-rolled tool loop, with short
   per-channel conversation memory so follow-ups have context. No agent framework.
-- **Ambient** — a deadpan chat persona (via `/chat`, or any non-owner @mention/DM). No tools, no
+- **Ambient** — a deadpan chat persona (via `/chat`, any @mention, or any DM). No tools, no
   authority.
 - **Curated** — a daily check of [Scout](https://github.com/R055LE/scout)'s picks. It posts one
   source-grounded story when there is something worth sharing, and skips quiet days. Public posting
@@ -113,11 +113,11 @@ ruff check .
 
 Feature-complete across the planned phases:
 
-- **Admin** — owner-gated via `/roger`, DM, or @mention, with short per-channel conversation
+- **Admin** — owner-gated via `/roger` in the guild, with short per-channel conversation
   memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`, and
   confirm-gated `set_permissions` / `edit_channel` / `post_message` / `move_channel`; per-request
   tool and daily token budgets; a full SQLite audit trail.
-- **Ambient** — deadpan chat via `/chat` or any non-owner @mention/DM, rate-limited per user +
+- **Ambient** — deadpan chat via `/chat`, any @mention, or any DM, rate-limited per user +
   globally, with a short own-thread memory. No tools, ever.
 - **Curated** — checks Scout's output at 07:00 local time and may post one useful story with source
   detail and a light take. There is no posting quota. The owner can preview the next decision with
