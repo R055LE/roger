@@ -145,6 +145,9 @@ read-only container can write the SQLite DB into the bind mount.
   `preview_curated` tool returns a draft with its exact supporting source excerpts, or a
   no-post result. It uses the curated model budget but does not send to the news channel
   or mark any Scout item seen. Leave `CURATED_CHANNEL_ID` blank during preview review.
+- **Public cutover:** reuse the existing public Digest channel ID as `CURATED_CHANNEL_ID`.
+  Stage that encrypted setting with the cutover Compose file, then redeploy once so the old
+  Digest schedules are removed when curated posting is enabled.
 
 ## Metrics exposure
 
