@@ -1675,3 +1675,22 @@ async def test_run_spark_delegates_to_run_spark_job(monkeypatch):
     result = await run_spark(guild=None, args=RunSparkArgs(), ctx=ctx)
     assert captured["called"] is True
     assert result == {"status": "posted", "title": "x"}
+
+
+async def test_curated_preview_tool_delegates_without_a_client(monkeypatch):
+    from roger.tools.context import ToolContext
+    from roger.tools.executors import PreviewCuratedArgs, preview_curated
+    from roger.tools.schemas import REGISTRY
+
+    captured = {}
+
+    async def fake_preview(*, settings, llm, store):
+        captured.update(settings=settings, llm=llm, store=store)
+        return {"status": "no post-worthy items"}
+
+    monkeypatch.setattr("roger.brains.curated.preview_curated_job", fake_preview)
+    assert REGISTRY["preview_curated"].requires_confirm is False
+    ctx = ToolContext(llm="llm", store="store", settings="settings", client="client")
+    result = await preview_curated(guild=None, args=PreviewCuratedArgs(), ctx=ctx)
+    assert captured == {"settings": "settings", "llm": "llm", "store": "store"}
+    assert result == {"status": "no post-worthy items"}
