@@ -61,8 +61,17 @@ def test_clean_skip_is_normal():
     assert _parse('{"decision":"skip"}', [_entry()]) is None
 
 
+def test_exact_json_fence_preserves_draft_checks():
+    assert _parse(f"```json\n{_post()}\n```", [_entry()]) is not None
+    assert _parse('```json\n{"decision":"skip"}\n```', [_entry()]) is None
+    with pytest.raises(DraftError):
+        _parse(f"```json\n{_post(facts=[])}\n```", [_entry()])
+
+
 @pytest.mark.parametrize("text", [
     "not JSON",
+    '```json\n{"decision":"skip"}\n``` trailing prose',
+    'introduction\n```json\n{"decision":"skip"}\n```',
     '{"decision":"post","item":2}',
     _post(facts=[{"text": "Invented claim.", "evidence": "not in source"},
                  {"text": "Another claim.", "evidence": QUOTE_B}]),
