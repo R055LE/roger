@@ -57,6 +57,19 @@ def test_post_has_supported_facts_and_optional_question():
     assert result.question == ""
 
 
+def test_specific_why_can_be_moderately_long_but_remains_bounded():
+    why = (
+        "This paper introduces a platform designed for large-scale agentic training and "
+        "evaluation of LLMs. It addresses the need for elastic execution environments by "
+        "supporting several sandbox types, efficient resource management, and stateful "
+        "execution across a cluster, which can matter for complex workloads."
+    )
+    assert 280 < len(why) <= 400
+    assert _parse(_post(why=why), [_entry()]) is not None
+    with pytest.raises(DraftError, match="why is empty or too long"):
+        _parse(_post(why=why + "x" * (401 - len(why))), [_entry()])
+
+
 def test_clean_skip_is_normal():
     assert _parse('{"decision":"skip"}', [_entry()]) is None
 
@@ -119,3 +132,19 @@ def test_candidate_payload_has_no_source_link():
     data = json.loads(_format_candidates([_entry()]))
     assert "url" not in data[0]
     assert "source_text" in data[0]
+
+
+def test_arxiv_author_list_does_not_hide_abstract_evidence():
+    article_text = "Authors: " + "Researcher Name, " * 220 + f"Abstract: {QUOTE_A} {QUOTE_B}"
+    article = {"status": "ok", "url": "https://arxiv.org/abs/2609.22978", "text": article_text}
+    entry = _entry(article=article)
+    excerpt = json.loads(_format_candidates([entry]))[0]["source_text"]
+    assert excerpt.startswith("Abstract:")
+    assert len(excerpt) <= 3_000
+    assert QUOTE_B in excerpt
+    assert _parse(_post(), [entry]) is not None
+
+    article["url"] = "https://example.org/paper"
+    assert QUOTE_B not in json.loads(_format_candidates([entry]))[0]["source_text"]
+    with pytest.raises(DraftError):
+        _parse(_post(), [entry])
