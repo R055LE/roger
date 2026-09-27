@@ -90,6 +90,7 @@ def _entry_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
         # whole point of consuming a scored source instead of a raw feed.
         "relevance": int(item.get("relevance") or 0),
         "matched": item.get("matched") or [],
+        "article": item.get("article") if isinstance(item.get("article"), dict) else {},
     }
 
 
@@ -174,7 +175,12 @@ async def collect_from_scout(
             continue
         current = best.get(entry["id"])
         if current is None or entry["relevance"] > current["relevance"]:
+            if current and current["article"].get("status") == "ok" and \
+                    entry["article"].get("status") != "ok":
+                entry["article"] = current["article"]
             best[entry["id"]] = entry
+        elif current["article"].get("status") != "ok" and entry["article"].get("status") == "ok":
+            current["article"] = entry["article"]
 
     by_feed: dict[str, list[str]] = {}
     for entry in best.values():
