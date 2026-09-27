@@ -57,6 +57,19 @@ def test_post_has_supported_facts_and_optional_question():
     assert result.question == ""
 
 
+def test_specific_why_can_be_moderately_long_but_remains_bounded():
+    why = (
+        "This paper introduces a platform designed for large-scale agentic training and "
+        "evaluation of LLMs. It addresses the need for elastic execution environments by "
+        "supporting several sandbox types, efficient resource management, and stateful "
+        "execution across a cluster, which can matter for complex workloads."
+    )
+    assert 280 < len(why) <= 400
+    assert _parse(_post(why=why), [_entry()]) is not None
+    with pytest.raises(DraftError, match="why is empty or too long"):
+        _parse(_post(why=why + "x" * (401 - len(why))), [_entry()])
+
+
 def test_clean_skip_is_normal():
     assert _parse('{"decision":"skip"}', [_entry()]) is None
 

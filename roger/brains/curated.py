@@ -162,7 +162,7 @@ def _parse(text: str, entries: list[dict[str, Any]]) -> Draft | None:
         entry=entry,
         facts=tuple(lines),
         evidence=tuple(quotes),
-        why=_short(data.get("why"), "why", 280),
+        why=_short(data.get("why"), "why", 400),
         take=_short(data.get("take", ""), "take", 200, required=False),
         question=_short(data.get("question", ""), "question", 160, required=False),
     )
