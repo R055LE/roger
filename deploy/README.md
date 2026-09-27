@@ -146,8 +146,11 @@ read-only container can write the SQLite DB into the bind mount.
   no-post result. It uses the curated model budget but does not send to the news channel
   or mark any Scout item seen. Leave `CURATED_CHANNEL_ID` blank during preview review.
 - **Public cutover:** reuse the existing public Digest channel ID as `CURATED_CHANNEL_ID`.
-  Stage that encrypted setting with the cutover Compose file, then redeploy once so the old
-  Digest schedules are removed when curated posting is enabled.
+  Stop `roger-deploy.timer` before merging the cutover PR so its five-minute poll cannot
+  deploy the new image ahead of the config. After the signed image is ready, stage that
+  encrypted setting with the cutover Compose file, start `roger-deploy.service` once, verify
+  the bot, and restart the timer. The old Digest schedules then leave with the same deploy
+  that enables curated posting.
 
 ## Metrics exposure
 
