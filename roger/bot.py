@@ -1,9 +1,9 @@
 """Client, intents, dispatch, owner gate, and the ``/roger`` slash command.
 
 Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped commands, the
-owner gate with audit logging, and message routing. Owner requests (via ``/roger``, a DM, or an
-@mention) go to the admin brain, which keeps short per-channel memory; ``/chat`` and non-owner chat
-go to the ambient brain; Digest and Spark post on their own scheduled loops.
+owner gate with audit logging, and message routing. Explicit ``/roger`` requests go to the admin
+brain, which keeps short per-channel memory; DMs, @mentions, and ``/chat`` go to the ambient brain;
+Digest and Spark post on their own scheduled loops.
 """
 
 from __future__ import annotations
@@ -196,14 +196,12 @@ def _make_confirmer(
 
 class Route(Enum):
     IGNORE = "ignore"
-    ADMIN_DM = "admin_dm"
-    ADMIN_MENTION = "admin_mention"
     AMBIENT_DM = "ambient_dm"
     AMBIENT_MENTION = "ambient_mention"
 
 
 def classify_message(
-    message: discord.Message, *, owner_id: int, bot_user_id: int, guild_id: int
+    message: discord.Message, *, bot_user_id: int, guild_id: int
 ) -> Route:
     """Pure routing decision — no side effects, so it is unit-testable with fakes.
 
@@ -215,12 +213,11 @@ def classify_message(
     if not (message.content or "").strip():
         return Route.IGNORE
     if message.guild is None:  # DM
-        return Route.ADMIN_DM if message.author.id == owner_id else Route.AMBIENT_DM
+        return Route.AMBIENT_DM
     if message.guild.id != guild_id:
         return Route.IGNORE
     if any(user.id == bot_user_id for user in message.mentions):
-        # Owner @mentions reach the admin brain; everyone else gets ambient.
-        return Route.ADMIN_MENTION if message.author.id == owner_id else Route.AMBIENT_MENTION
+        return Route.AMBIENT_MENTION
     return Route.IGNORE
 
 
@@ -771,22 +768,10 @@ class RogerClient(discord.Client):
     async def on_message(self, message: discord.Message) -> None:
         route = classify_message(
             message,
-            owner_id=self.settings.owner_id,
             bot_user_id=self.user.id,
             guild_id=self.settings.guild_id,
         )
-        if route in (Route.ADMIN_DM, Route.ADMIN_MENTION):
-            with request_context():
-                content = message.content
-                if route is Route.ADMIN_MENTION:
-                    content = _strip_mentions(content)  # strip the mention first
-                    if not content:
-                        return
-                reply = await self._run_admin(
-                    content, message.author.id, message.channel.id, message.channel.send
-                )
-                await _send_chunked(message.channel.send, reply)
-        elif route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
+        if route in (Route.AMBIENT_DM, Route.AMBIENT_MENTION):
             with request_context():
                 try:
                     content = message.content

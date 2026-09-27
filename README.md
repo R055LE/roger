@@ -6,11 +6,11 @@ character, rebuilt from scratch on hosted models and modern tooling.
 
 Roger is a single-guild, owner-gated Discord assistant with five separate "brains":
 
-- **Admin** — an owner-only server concierge, reachable by `/roger`, a DM, or an @mention. Ask in
+- **Admin** — an owner-only server concierge, reached through `/roger` in the guild. Ask in
   plain language ("a read-only podcast channel under Media that DJs can post in") and it creates
   channels/roles and sets permissions through a small, hand-rolled tool loop, with short
   per-channel conversation memory so follow-ups have context. No agent framework.
-- **Ambient** — a deadpan chat persona (via `/chat`, or any non-owner @mention/DM). No tools, no
+- **Ambient** — a deadpan chat persona (via `/chat`, any @mention, or any DM). No tools, no
   authority.
 - **Digest** — a scheduled summary of [Scout](https://github.com/R055LE/scout)'s picks, posted to a
   channel.
@@ -115,11 +115,11 @@ ruff check .
 
 Feature-complete across the planned phases:
 
-- **Admin** — owner-gated via `/roger`, DM, or @mention, with short per-channel conversation
+- **Admin** — owner-gated via `/roger` in the guild, with short per-channel conversation
   memory; a hand-rolled tool loop with `list_structure`, `create_channel`, `create_role`, and
   confirm-gated `set_permissions` / `edit_channel` / `post_message` / `move_channel`; per-request
   tool and daily token budgets; a full SQLite audit trail.
-- **Ambient** — deadpan chat via `/chat` or any non-owner @mention/DM, rate-limited per user +
+- **Ambient** — deadpan chat via `/chat`, any @mention, or any DM, rate-limited per user +
   globally, with a short own-thread memory. No tools, ever.
 - **Digest** — a scheduled daily summary of items [Scout](https://github.com/R055LE/scout) scored
   and picked (also triggerable via `/roger run the digest now`), deduped so nothing posts twice. A

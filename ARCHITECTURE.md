@@ -121,15 +121,14 @@ mention Roger nor arrive in a DM show up with empty content and are ignored by d
 |---|---|---|
 | Author is Roger | `IGNORE` | — |
 | Empty content | `IGNORE` | — |
-| DM from owner | `ADMIN_DM` | Admin |
-| DM from non-owner | `AMBIENT_DM` | Ambient |
-| Guild @mention from owner | `ADMIN_MENTION` | Admin |
-| Guild @mention from non-owner | `AMBIENT_MENTION` | Ambient |
+| DM from anyone | `AMBIENT_DM` | Ambient |
+| Guild @mention from anyone | `AMBIENT_MENTION` | Ambient |
 | Guild, no mention | `IGNORE` | — |
 
-Slash commands bypass classification: `/roger <request>` → admin (owner-gated), `/chat <message>` →
-ambient (open to anyone). On the mention routes the leading mention is stripped first so the model
-sees a clean request; an empty remainder is dropped.
+Slash commands bypass classification: `/roger <request>` → admin (owner-gated, guild only),
+`/chat <message>` → ambient (open to anyone). An owner DM or @mention cannot invoke admin tools.
+On the mention route the leading mention is stripped first so the model sees a clean request; an
+empty remainder is dropped.
 
 ## §6 Admin brain — the tool loop
 
@@ -241,7 +240,7 @@ dependency bag kept `Any`-typed so the tools package never imports the bot/llm/s
 
 ## §8 Ambient brain
 
-Deadpan chat for @mentions and non-owner DMs (and `/chat`). **No tools, no authority, ever.** It
+Deadpan chat for @mentions and DMs (and `/chat`). **No tools, no authority, ever.** It
 keeps a short own-thread memory (per user+channel, from `ambient_log`) and is rate-limited three
 ways (§11): per-user, per-user notify-once-then-go-silent, and a global hourly ceiling. Ambient
 never touches the admin path.
