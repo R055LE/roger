@@ -7,12 +7,16 @@ no-tools/no-authority rule (§8). Dry wit, fully sandboxed.
 
 ## Where personality lives today
 
+- **Shared identity** (`roger/identity.py`) — a short plain, dry tone anchor
+  used by Ambient and Curated. It describes tone only; each brain still owns its task and authority.
 - **Admin brain** (`roger/brains/admin.py`) — the system prompt *forbids* it: "short and factual;
   no personality flourishes." Paradoxically the strongest character comes from here: flawless
   deadpan **literalism**. It grants instructions to the letter and reports flatly, and the refusal
   to editorialize is exactly what reads as dry wit.
-- **Ambient brain** (`roger/brains/ambient.py`) — the *intended* home: "deadpan house robot… reply
-  briefly and dryly… decline and deflect with dry wit." This is the lever to reach for first.
+- **Ambient brain** (`roger/brains/ambient.py`) — applies the shared voice to brief, tool-free chat
+  and retains its own limits and deflection rules. This is the lever to reach for first.
+- **Curated brain** (`roger/brains/curated.py`) — applies the shared voice to source-grounded news.
+  Facts, evidence, and a reason to care are required; a take stays optional.
 
 ## The quality worth keeping
 
