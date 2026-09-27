@@ -3,6 +3,7 @@
 import json
 import logging
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
@@ -30,7 +31,6 @@ def msg(author_id, content, *, guild=_IN_GUILD, mentions=()):
 def route(message):
     return classify_message(
         message,
-        owner_id=OWNER,
         bot_user_id=BOT,
         guild_id=_IN_GUILD.id,
     )
@@ -45,8 +45,8 @@ def test_ignores_empty_content():
     assert route(msg(OTHER, "   ", guild=None)) is Route.IGNORE
 
 
-def test_owner_dm_goes_to_admin():
-    assert route(msg(OWNER, "make a channel", guild=None)) is Route.ADMIN_DM
+def test_owner_dm_goes_to_ambient():
+    assert route(msg(OWNER, "make a channel", guild=None)) is Route.AMBIENT_DM
 
 
 def test_nonowner_dm_goes_to_ambient():
@@ -57,8 +57,8 @@ def test_nonowner_guild_mention_goes_to_ambient():
     assert route(msg(OTHER, "hey roger", mentions=[BOT])) is Route.AMBIENT_MENTION
 
 
-def test_owner_guild_mention_goes_to_admin():
-    assert route(msg(OWNER, "roger make a channel", mentions=[BOT])) is Route.ADMIN_MENTION
+def test_owner_guild_mention_goes_to_ambient():
+    assert route(msg(OWNER, "roger make a channel", mentions=[BOT])) is Route.AMBIENT_MENTION
 
 
 def test_owner_mention_in_another_guild_is_ignored():
@@ -80,6 +80,59 @@ def test_guild_message_without_mention_is_ignored():
 
 def test_owner_gets_no_special_treatment_in_guild_without_mention():
     assert route(msg(OWNER, "talking in a channel", mentions=[])) is Route.IGNORE
+
+
+@pytest.mark.parametrize(
+    ("guild", "content", "mentions"),
+    [(None, "hello", ()), (_IN_GUILD, f"<@{BOT}> hello", (BOT,))],
+)
+async def test_owner_message_uses_ambient_without_admin(monkeypatch, guild, content, mentions):
+    ambient = AsyncMock(return_value="chat reply")
+    send = AsyncMock()
+    monkeypatch.setattr(bot, "handle_ambient", ambient)
+    client = SimpleNamespace(
+        settings=SimpleNamespace(owner_id=OWNER, guild_id=_IN_GUILD.id),
+        user=SimpleNamespace(id=BOT),
+        llm=None,
+        store=None,
+        ambient_limiter=None,
+    )
+    message = msg(OWNER, content, guild=guild, mentions=mentions)
+    message.channel = SimpleNamespace(id=12, send=send)
+
+    await bot.RogerClient.on_message(client, message)
+
+    assert ambient.await_args.kwargs["content"] == "hello"
+    assert send.await_args.args == ("chat reply",)
+
+
+@pytest.mark.parametrize("user_id", [OWNER, OTHER])
+async def test_roger_command_is_the_owner_gated_admin_entry(user_id):
+    run_admin = AsyncMock(return_value="done")
+    record_audit = AsyncMock()
+    send = AsyncMock()
+    client = SimpleNamespace(
+        settings=SimpleNamespace(owner_id=OWNER),
+        store=SimpleNamespace(record_audit=record_audit),
+        _run_admin=run_admin,
+    )
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=user_id),
+        channel_id=12,
+        response=SimpleNamespace(send_message=send, defer=AsyncMock()),
+        followup=SimpleNamespace(send=send),
+    )
+
+    await bot._handle_roger_request(client, interaction, "make a channel")
+
+    if user_id == OWNER:
+        assert run_admin.await_args.args[:2] == ("make a channel", OWNER)
+        assert send.await_args.args == ("done",)
+        record_audit.assert_not_awaited()
+    else:
+        run_admin.assert_not_awaited()
+        assert record_audit.await_args.kwargs["status"] is bot.AuditStatus.GATE_REJECTED
+        assert send.await_args.args == (bot.CANNED_DENY,)
 
 
 def test_request_context_generates_distinct_opaque_ids_and_resets_after_exception():
