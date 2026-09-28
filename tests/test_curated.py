@@ -150,12 +150,12 @@ def test_malformed_or_unsupported_draft_is_rejected(text):
 
 class FakeLLM:
     def __init__(self, content):
-        self.content = content
+        self.contents = content if isinstance(content, list) else [content]
         self.calls = []
 
     async def complete(self, brain, messages):
         self.calls.append((brain, messages))
-        message = SimpleNamespace(content=self.content)
+        message = SimpleNamespace(content=self.contents.pop(0))
         return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
@@ -163,6 +163,58 @@ async def test_no_article_needs_no_model_call():
     llm = FakeLLM(_post())
     assert await draft([_entry(article={})], llm) is None
     assert llm.calls == []
+
+
+async def test_overlong_why_gets_one_bounded_repair():
+    why = "The measured release gives engineers a reason to compare inference servers. " * 7
+    assert 400 < len(why.strip()) < 2_000
+    revised = "The measured release gives engineers a reason to compare inference servers."
+    llm = FakeLLM([_post(why=why), json.dumps({"sentences": [1]})])
+    post = await draft([_entry()], llm)
+    assert post is not None
+    assert post.why == revised
+    assert post.facts == _parse(_post(), [_entry()]).facts
+    assert len(llm.calls) == 2
+    assert json.loads(llm.calls[1][1][1]["content"])["sentences"][0] == revised
+
+
+@pytest.mark.parametrize("repair", [
+    json.dumps({"sentences": [99]}),
+    json.dumps({"sentences": [2, 1]}),
+    json.dumps({"sentences": [1], "why": "New claim."}),
+    "not JSON",
+])
+async def test_invalid_why_repair_skips_without_a_third_call(repair):
+    why = "This reason exceeds the limit and needs a shorter, faithful form. " * 8
+    llm = FakeLLM([_post(why=why), repair])
+    with pytest.raises(DraftError):
+        await draft([_entry()], llm)
+    assert len(llm.calls) == 2
+
+
+async def test_why_repair_still_enforces_length_and_single_sentence_skip():
+    sentence = "A measured technical result matters because " + "it changes deployment choices " * 8
+    sentence = sentence.strip() + "."
+    llm = FakeLLM([_post(why=" ".join([sentence] * 3)),
+                   json.dumps({"sentences": [1, 2]})])
+    with pytest.raises(DraftError, match="why is empty or too long"):
+        await draft([_entry()], llm)
+    assert len(llm.calls) == 2
+
+    llm = FakeLLM(_post(why="word " * 90 + "."))
+    with pytest.raises(DraftError, match="why is empty or too long"):
+        await draft([_entry()], llm)
+    assert len(llm.calls) == 1
+
+
+async def test_other_invalid_fields_never_trigger_why_repair():
+    why = "This reason exceeds the limit. " * 15
+    facts = [{"text": "Unsupported claim.", "evidence": "not in source"},
+             {"text": "Measurements were published.", "evidence": QUOTE_B}]
+    llm = FakeLLM(_post(facts=facts, why=why))
+    with pytest.raises(DraftError, match="evidence"):
+        await draft([_entry()], llm)
+    assert len(llm.calls) == 1
 
 
 async def test_untrusted_source_is_bounded_json_data_not_an_instruction():
