@@ -58,16 +58,9 @@ def test_post_has_supported_facts_and_optional_question():
 
 
 def test_lwn_credential_claim_shows_following_supporting_sentence():
-    prompt = (
-        'The group also discovered a method to conduct a UI-redress attack (or " clickjacking " '
-        'attack) on KDE 5 and KDE 6 by monitoring /usr/bin/pkexec to detect when Polkit spawns '
-        'an authentication prompt.'
-    )
-    consequence = (
-        "An attacker could draw a fake password window on top of the real window to collect a "
-        "user's credentials."
-    )
-    source = f"{prompt} {consequence} {QUOTE_B}"
+    prompt = "In KDE, monitoring /usr/bin/pkexec reveals when Polkit spawns a login prompt."
+    consequence = "A fake password window could then collect user credentials."
+    source = "Research context on the attack. " * 10 + f"{prompt} {consequence} {QUOTE_B}"
     entry = _entry(article={"status": "ok", "url": "https://lwn.net/Articles/1096431/",
                             "text": source})
     facts = [
