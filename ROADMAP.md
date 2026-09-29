@@ -11,6 +11,10 @@ runs in are different things. This file is the "how Roger could help" side.
 
 Same effort key as BACKLOG: **S** ≈ an afternoon, **M** ≈ a day or two, **L** ≈ multi-day.
 
+The personal Digest and Spark sections below record features that shipped and were later retired
+when curated single-story news replaced the scheduled news jobs. Current behaviour is in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §9.
+
 ---
 
 ## 1. Personal digest — **S/M** — *shipped*

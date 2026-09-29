@@ -52,8 +52,8 @@ with scopes `bot` and `applications.commands`, and tick exactly:
 | View Channels | read the structure it manages |
 | Manage Channels | create and edit channels |
 | Manage Roles | create (zero-perm) roles and set channel overwrites |
-| Send Messages | post the digest, `post_message`, and the forum-post tools |
-| Embed Links | the digest is posted as an embed |
+| Send Messages | post curated stories, `post_message`, and the forum-post tools |
+| Embed Links | support links and other bot features |
 | Add Reactions | the `add_reaction` tool |
 | Read Message History | Discord requires it to react to a message, and to remove its own reaction |
 | Change Nickname | the `set_nickname` tool (its own nick only) |
@@ -145,6 +145,12 @@ read-only container can write the SQLite DB into the bind mount.
   `preview_curated` tool returns a draft with its exact supporting source excerpts, or a
   no-post result. It uses the curated model budget but does not send to the news channel
   or mark any Scout item seen. Leave `CURATED_CHANNEL_ID` blank during preview review.
+- **Public cutover:** reuse the existing public Digest channel ID as `CURATED_CHANNEL_ID`.
+  Stop `roger-deploy.timer` before merging the cutover PR so its five-minute poll cannot
+  deploy the new image ahead of the config. After the signed image is ready, stage that
+  encrypted setting with the cutover Compose file, start `roger-deploy.service` once, verify
+  the bot, and restart the timer. The old Digest schedules then leave with the same deploy
+  that enables curated posting.
 
 ## Metrics exposure
 

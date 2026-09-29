@@ -322,7 +322,7 @@ class Store:
         )
         await self._conn.commit()
 
-    # --- digest dedupe (§9) ---
+    # --- Scout item dedupe (§9) ---
 
     async def filter_unseen(self, feed_url: str, entry_ids: list[str]) -> set[str]:
         if not entry_ids:

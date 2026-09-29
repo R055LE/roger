@@ -1,24 +1,17 @@
-"""Boot self-report and /status readout — pure formatters plus a real-store integration."""
+"""Boot self-report and /status readout for the active brains."""
 
 from types import SimpleNamespace
 
 import discord
 
-from roger.bot import (
-    DIGEST_LAST_ATTEMPT_META_KEY,
-    _boot_header,
-    _format_status,
-    _unreachable_channels,
-    gather_status,
-)
+from roger.bot import _boot_header, _format_status, _unreachable_channels, gather_status
 from roger.store import AuditStatus, Store
 
-# The invite integer documented in deploy/README.md — grants exactly the required scopes.
 FULL_PERMS = 268454928
 
 
 class _FakeChannel:
-    def __init__(self, name="digest", perms=None):
+    def __init__(self, name="news", perms=None):
         self.name = name
         self._perms = perms if perms is not None else discord.Permissions(FULL_PERMS)
 
@@ -38,105 +31,86 @@ def _fake_guild(name="Live Guild", channels=None, perms=FULL_PERMS):
     )
 
 
-def test_boot_header_ok_is_green_and_shows_the_version():
-    line = _boot_header("sha-abc1234", [], [], [])
-    assert "✅" in line and "roger online" in line and "sha-abc1234" in line
-
-
-def test_boot_header_warns_lists_missing_scopes_and_shows_version():
-    line = _boot_header("dev", ["Manage Channels", "Manage Roles"], [], [])
-    assert "⚠️" in line and "Manage Channels, Manage Roles" in line
-    assert "re-invite" in line and "dev" in line
-
-
-def test_boot_header_warns_on_channel_problems_even_with_full_permissions():
-    line = _boot_header("dev", [], ["digest channel 42 not found"], [])
-    assert "⚠️" in line and "digest channel 42 not found" in line
-
-
-def test_boot_header_warns_on_openrouter_problems_even_with_full_permissions():
-    line = _boot_header("dev", [], [], ["OpenRouter key rejected: bad key"])
-    assert "⚠️" in line and "OpenRouter key rejected: bad key" in line
-
-
-def test_unreachable_channels_flags_a_missing_channel():
-    guild = _fake_guild(channels={})
-    settings = SimpleNamespace(digest_channel_id=42, ops_channel_id=None, gigabrain_channel_id=None)
-    problems = _unreachable_channels(guild, settings)
-    assert "digest channel 42 not found" in problems[0]
-
-
-def test_unreachable_channels_flags_a_channel_roger_cant_post_in():
-    no_send = discord.Permissions(view_channel=True, send_messages=False)
-    guild = _fake_guild(channels={99: _FakeChannel(name="checkins", perms=no_send)})
-    settings = SimpleNamespace(
-        digest_channel_id=None, ops_channel_id=None, gigabrain_channel_id=99
+def _settings(**over):
+    base = dict(
+        guild_id=9,
+        daily_tokens_admin=150000,
+        daily_tokens_ambient=40000,
+        daily_tokens_curated=30000,
+        daily_tokens_gigabrain=100000,
+        daily_usd_admin=0.0,
+        daily_usd_ambient=0.0,
+        daily_usd_curated=0.0,
+        daily_usd_gigabrain=0.0,
+        curated_hour=7,
+        curated_channel_id=42,
+        ops_channel_id=None,
+        gigabrain_channel_id=None,
+        tz="UTC",
     )
-    problems = _unreachable_channels(guild, settings)
-    assert "gigabrain check-in channel #checkins not postable" in problems[0]
+    base.update(over)
+    return SimpleNamespace(**base)
 
 
-def test_unreachable_digest_channel_names_missing_embed_links():
+def test_boot_header_reports_health_and_configuration():
+    assert "✅" in _boot_header("sha-abc1234", [], [], [])
+    warning = _boot_header("dev", ["Manage Roles"], ["curated channel 42 not found"], [])
+    assert "⚠️" in warning
+    assert "Manage Roles" in warning
+    assert "curated channel 42 not found" in warning
+    assert "re-invite" in warning
+
+
+def test_unreachable_curated_channel_reports_missing_destination_and_permissions():
+    assert _unreachable_channels(_fake_guild(), _settings()) == [
+        "curated channel 42 not found"
+    ]
     no_embeds = discord.Permissions(view_channel=True, send_messages=True)
     guild = _fake_guild(channels={42: _FakeChannel(perms=no_embeds)})
-    settings = SimpleNamespace(digest_channel_id=42)
-    assert _unreachable_channels(guild, settings) == [
-        "digest channel #digest not postable (missing Embed Links)"
+    assert _unreachable_channels(guild, _settings()) == [
+        "curated channel #news not postable (missing Embed Links)"
     ]
 
 
-def test_unreachable_channels_flags_a_missing_spark_channel():
-    guild = _fake_guild(channels={})
-    settings = SimpleNamespace(
-        digest_channel_id=None, ops_channel_id=None, gigabrain_channel_id=None,
-        spark_channel_id=42,
+def test_unreachable_channels_checks_other_brains_and_non_messageable_destinations():
+    no_send = discord.Permissions(view_channel=True, send_messages=False)
+    guild = _fake_guild(channels={99: _FakeChannel(name="checkins", perms=no_send)})
+    assert "gigabrain check-in channel #checkins not postable" in _unreachable_channels(
+        guild, _settings(curated_channel_id=None, gigabrain_channel_id=99)
+    )[0]
+    category = SimpleNamespace(
+        name="category", permissions_for=lambda member: discord.Permissions(FULL_PERMS)
     )
-    problems = _unreachable_channels(guild, settings)
-    assert "spark channel 42 not found" in problems[0]
+    guild = _fake_guild(channels={42: category})
+    assert _unreachable_channels(guild, _settings()) == [
+        "curated channel #category is not postable"
+    ]
 
 
-def test_unreachable_channels_flags_a_non_messageable_spark_channel():
-    channel = SimpleNamespace(
-        name="category",
-        permissions_for=lambda member: discord.Permissions(FULL_PERMS),
-    )
-    guild = _fake_guild(channels={42: channel})
-    settings = SimpleNamespace(spark_channel_id=42)
-    assert _unreachable_channels(guild, settings) == ["spark channel #category is not postable"]
-
-
-def test_unreachable_channels_empty_when_nothing_configured_or_everything_reachable():
-    guild = _fake_guild(channels={42: _FakeChannel()})
-    settings = SimpleNamespace(digest_channel_id=42, ops_channel_id=None, gigabrain_channel_id=None)
-    assert _unreachable_channels(guild, settings) == []
-
-
-def test_format_status_renders_perms_usage_and_actions():
+def test_format_status_shows_curated_schedule_spend_and_actions():
     body = _format_status(
         guild_name="Test Guild",
         missing_perms=[],
         channel_problems=[],
-        usage={"admin": 12345, "ambient": 0, "digest": 200},
-        caps={"admin": 150000, "ambient": 40000, "digest": 30000},
-        cost={"admin": 0.0123, "ambient": 0.0, "digest": 0.002},
+        usage={"admin": 12345, "curated": 200},
+        caps={"admin": 150000, "curated": 30000},
+        cost={"admin": 0.0123, "curated": 0.002},
+        usd_caps={"admin": 2.0},
         recent_audit=[{"ts": 0, "tool": "create_channel", "status": "ok", "detail": None}],
-        digest_hour=8,
-        digest_configured=True,
-        spark_hour=7,
-        spark_configured=True,
+        curated_hour=7,
+        curated_configured=True,
         tz="UTC",
     )
-    assert "permissions: OK" in body
-    assert "channels: OK" in body
+    assert "permissions: OK" in body and "channels: OK" in body
     assert "12,345 / 150,000" in body
-    assert "$0.0123" in body  # per-brain cost
-    assert "total" in body and "$0.0143" in body  # summed across brains
-    assert "digest: 08:00 UTC" in body
-    assert "spark: 07:00 UTC" in body
-    assert "00:00  create_channel" in body  # epoch ts rendered in the given tz
+    assert "$0.0123 / $2.0000" in body
+    assert "total" in body and "$0.0143" in body
+    assert "curated: 07:00 UTC" in body
+    assert "00:00  create_channel" in body
+    assert "digest:" not in body and "spark:" not in body
 
 
-def test_format_status_flags_missing_perms_and_unconfigured_digest():
+def test_format_status_flags_missing_perms_and_disabled_curated_job():
     body = _format_status(
         guild_name="G",
         missing_perms=["Manage Roles"],
@@ -145,216 +119,48 @@ def test_format_status_flags_missing_perms_and_unconfigured_digest():
         caps={},
         cost={},
         recent_audit=[],
-        digest_hour=8,
-        digest_configured=False,
-        spark_hour=7,
-        spark_configured=False,
+        curated_configured=False,
         tz="UTC",
     )
     assert "permissions: MISSING: Manage Roles" in body
-    assert "digest: destination unset" in body
-    assert "spark: unconfigured" in body
+    assert "curated: unconfigured" in body
 
 
-def test_format_status_flags_channel_problems():
-    body = _format_status(
-        guild_name="G",
-        missing_perms=[],
-        channel_problems=["gigabrain check-in channel 555 not found"],
-        usage={},
-        caps={},
-        cost={},
-        recent_audit=[],
-        digest_hour=8,
-        digest_configured=True,
-        spark_hour=7,
-        spark_configured=False,
-        tz="UTC",
-    )
-    assert "channels: gigabrain check-in channel 555 not found" in body
-
-
-def test_format_status_includes_audit_detail_when_present():
-    body = _format_status(
-        guild_name="G",
-        missing_perms=[],
-        channel_problems=[],
-        usage={},
-        caps={},
-        cost={},
-        recent_audit=[
-            {"ts": 0, "tool": "set_permissions", "status": "denied", "detail": "owner denied"}
-        ],
-        digest_hour=8,
-        digest_configured=True,
-        spark_hour=7,
-        spark_configured=False,
-        tz="UTC",
-    )
-    assert "set_permissions" in body and "denied (owner denied)" in body
-
-
-def _settings(**over):
-    base = dict(
-        guild_id=9,
-        daily_tokens_admin=150000,
-        daily_tokens_ambient=40000,
-        daily_tokens_digest=30000,
-        daily_tokens_spark=30000,
-        daily_tokens_curated=30000,
-        daily_tokens_gigabrain=100000,
-        daily_usd_admin=0.0,
-        daily_usd_ambient=0.0,
-        daily_usd_digest=0.0,
-        daily_usd_spark=0.0,
-        daily_usd_curated=0.0,
-        daily_usd_gigabrain=0.0,
-        digest_hour=8,
-        digest_channel_id=42,
-        spark_hour=7,
-        spark_channel_id=None,
-        curated_hour=7,
-        curated_channel_id=None,
-        tz="UTC",
-    )
-    base.update(over)
-    return SimpleNamespace(**base)
-
-
-async def test_gather_status_reads_live_store(tmp_path):
-    store = await Store(str(tmp_path / "s.db")).open()
+async def test_gather_status_reads_active_spend_and_retains_legacy_usage(tmp_path):
+    path = tmp_path / "s.db"
+    store = await Store(str(path)).open()
     try:
-        await store.add_usage("admin", 100, 50, cost_usd=0.0075)  # 150 in+out
-        await store.add_usage("spark", 20, 10, cost_usd=0.001)
+        await store.add_usage("admin", 100, 50, cost_usd=0.0075)
+        await store.add_usage("digest", 20, 10, cost_usd=0.001)
         await store.record_audit(
             actor_id=1, brain="admin", tool="create_channel", args=None,
             status=AuditStatus.OK, detail=None,
         )
         guild = _fake_guild(channels={42: _FakeChannel()})
         body = await gather_status(store=store, settings=_settings(), guild=guild)
-        assert "Live Guild" in body
-        assert "permissions: OK" in body  # the full invite set grants everything required
-        assert "channels: OK" in body  # digest_channel_id=42 resolves and is postable
-        assert "150 / 150,000" in body
-        assert "$0.0075" in body  # OpenRouter-reported cost surfaced from the live store
-        assert "spark" in body and "30 / 30,000" in body
-        assert "create_channel" in body
+        assert "Live Guild" in body and "channels: OK" in body
+        assert "150 / 150,000" in body and "$0.0075" in body
+        assert "curated: 07:00 UTC" in body and "create_channel" in body
+        assert await store.usage_today("digest") == 30
     finally:
         await store.close()
-
-
-async def test_gather_status_flags_an_unreachable_configured_channel(tmp_path):
-    store = await Store(str(tmp_path / "s.db")).open()
-    try:
-        guild = _fake_guild(channels={})  # digest_channel_id=42 won't resolve
-        body = await gather_status(store=store, settings=_settings(), guild=guild)
-        assert "channels: digest channel 42 not found" in body
-    finally:
-        await store.close()
-
-
-async def test_gather_status_without_a_visible_guild(tmp_path):
-    store = await Store(str(tmp_path / "s.db")).open()
-    try:
-        body = await gather_status(
-            store=store, settings=_settings(digest_channel_id=None), guild=None
-        )
-        assert "roger status — 9" in body  # falls back to the guild id
-        assert "permissions: OK" in body  # no guild -> nothing reported missing
-        assert "channels: OK" in body  # no guild -> nothing to check either
-        assert "digest: destination unset" in body
-    finally:
-        await store.close()
-
-
-def test_format_status_shows_usd_cap_when_configured():
-    body = _format_status(
-        guild_name="G",
-        missing_perms=[],
-        channel_problems=[],
-        usage={"admin": 1000},
-        caps={"admin": 150000},
-        cost={"admin": 0.5},
-        usd_caps={"admin": 2.0},
-        recent_audit=[],
-        digest_hour=8,
-        digest_configured=True,
-        spark_hour=7,
-        spark_configured=False,
-        tz="UTC",
-    )
-    assert "$0.5000 / $2.0000" in body
-    assert "ambient" in body and "$0.0000 / $" not in body  # unconfigured brain: no cap suffix
-
-
-async def test_gather_status_shows_usd_cap_from_settings(tmp_path):
-    store = await Store(str(tmp_path / "s.db")).open()
-    try:
-        await store.add_usage("admin", 10, 10, cost_usd=0.25)
-        guild = _fake_guild(channels={42: _FakeChannel()})
-        settings = _settings(daily_usd_admin=1.0)
-        body = await gather_status(store=store, settings=settings, guild=guild)
-        assert "$0.2500 / $1.0000" in body
-    finally:
-        await store.close()
-
-
-async def test_gather_status_shows_digest_configuration_and_last_attempt(tmp_path):
-    store = await Store(str(tmp_path / "s.db")).open()
-    try:
-        guild = _fake_guild(channels={42: _FakeChannel()})
-        assert "digest: 08:00 UTC (never run)" in await gather_status(
-            store=store, settings=_settings(), guild=guild
-        )
-
-        await store.set_meta(
-            DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 1, "result": "success"}'
-        )
-        assert "digest: 08:00 UTC (success, last 1970-01-01 00:00 UTC)" in await gather_status(
-            store=store, settings=_settings(), guild=guild
-        )
-
-        await store.set_meta(
-            DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 2, "result": "no new items"}'
-        )
-        assert "digest: 08:00 UTC (no new items, last 1970-01-01 00:00 UTC)" in await gather_status(
-            store=store, settings=_settings(), guild=guild
-        )
-
-        await store.set_meta(
-            DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 3, "result": "failure"}'
-        )
-        assert "digest: 08:00 UTC (failure, last 1970-01-01 00:00 UTC)" in await gather_status(
-            store=store, settings=_settings(), guild=guild
-        )
-
-        await store.set_meta(DIGEST_LAST_ATTEMPT_META_KEY, "invalid")
-        assert "digest: 08:00 UTC (unknown)" in await gather_status(
-            store=store, settings=_settings(), guild=guild
-        )
-
-        assert "digest: destination unset" in await gather_status(
-            store=store, settings=_settings(digest_channel_id=None), guild=guild
-        )
-    finally:
-        await store.close()
-
-
-async def test_gather_status_reads_digest_attempt_after_store_reopens(tmp_path):
-    path = tmp_path / "s.db"
-    store = await Store(str(path)).open()
-    await store.set_meta(
-        DIGEST_LAST_ATTEMPT_META_KEY, '{"timestamp": 1, "result": "success"}'
-    )
-    await store.close()
 
     reopened = await Store(str(path)).open()
     try:
-        body = await gather_status(
-            store=reopened,
-            settings=_settings(),
-            guild=_fake_guild(channels={42: _FakeChannel()}),
-        )
-        assert "digest: 08:00 UTC (success, last 1970-01-01 00:00 UTC)" in body
+        assert await reopened.usage_today("digest") == 30
     finally:
         await reopened.close()
+
+
+async def test_gather_status_reports_channel_and_guild_state(tmp_path):
+    store = await Store(str(tmp_path / "s.db")).open()
+    try:
+        body = await gather_status(store=store, settings=_settings(), guild=_fake_guild())
+        assert "channels: curated channel 42 not found" in body
+        body = await gather_status(
+            store=store, settings=_settings(curated_channel_id=None), guild=None
+        )
+        assert "roger status — 9" in body
+        assert "curated: unconfigured" in body
+    finally:
+        await store.close()

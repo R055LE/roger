@@ -1,1 +1,1 @@
-"""Roger's five brains: admin, ambient, digest, spark, and gigabrain."""
+"""Roger's brains: admin, ambient, curated, and gigabrain."""

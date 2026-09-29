@@ -1,4 +1,4 @@
-"""Read Scout's digest output as the item source for the scheduled brains (§9).
+"""Read Scout's digest output as the item source for curated news (§9).
 
 Scout (``R055LE/agent-platform``, ``scripts/scout``) walks a watchlist of public
 feeds, scores each item against explicit topics, and writes the survivors to
@@ -20,8 +20,8 @@ Trust. Everything in a digest originates from an external feed and is untrusted
 quoted data, exactly as it was when Roger fetched feeds directly. The mount is
 read-only; Roger cannot influence what Scout collects.
 
-Availability. Scout is a hard dependency of the scheduled brains. When its
-output is missing or stale the brains report that rather than silently posting
+Availability. Scout is a hard dependency of curated news. When its
+output is missing or stale the job reports that rather than silently posting
 nothing, so the existing ops alerting sees a broken producer.
 """
 
@@ -43,11 +43,11 @@ log = logging.getLogger("roger.scout")
 # Read a window of recent digests rather than only the newest. Scout suppresses
 # an item once it has reported it, so an unread run's items never reappear; if
 # Roger only looked at the latest file, anything from a run it missed (a failed
-# post, a restart, a brain that did not fire) would be lost for good. The store's
+# post or a restart) would be lost for good. The store's
 # seen table does the deduplication, so overlapping windows are free.
 WINDOW_HOURS = 72
 MAX_FILES = 32
-_SUMMARY_CAP = 500  # matches the digest brain's own cap
+_SUMMARY_CAP = 500  # bounds untrusted feed text before model input
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,7 +59,7 @@ class ScoutBatch:
 
 
 def _to_struct_time(value: object) -> time.struct_time | None:
-    """Scout emits ISO-8601; the brains sort on ``time.struct_time`` like feedparser."""
+    """Scout emits ISO-8601; collection sorts on ``time.struct_time`` like feedparser."""
     try:
         return datetime.datetime.fromisoformat(str(value)).timetuple()
     except (TypeError, ValueError):
@@ -67,7 +67,7 @@ def _to_struct_time(value: object) -> time.struct_time | None:
 
 
 def _entry_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
-    """Map one Scout item onto the dict shape the brains already consume.
+    """Map one Scout item onto the dict shape the curated brain consumes.
 
     ``feed_url`` and ``id`` keep their names because they are the seen-table key
     and every call site already speaks that shape. ``feed_url`` holds Scout's

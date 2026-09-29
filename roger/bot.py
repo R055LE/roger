@@ -3,7 +3,7 @@
 Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped commands, the
 owner gate with audit logging, and message routing. Explicit ``/roger`` requests go to the admin
 brain, which keeps short per-channel memory; DMs, @mentions, and ``/chat`` go to the ambient brain;
-Digest and Spark post on their own scheduled loops.
+Curated posts run on a configured daily loop.
 """
 
 from __future__ import annotations
@@ -30,12 +30,7 @@ from roger import metrics
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
 from roger.brains.curated import run_curated_job
-from roger.brains.digest import (
-    run_digest_job,
-    run_personal_digest_job,
-)
 from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
-from roger.brains.spark import run_spark_job
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
 from roger.llm import LLM
@@ -65,7 +60,7 @@ METRICS_REFRESH_S = 30
 # Ops watchdog (§ backlog 1.2): a periodic health sweep pushes deduped alerts to the ops channel.
 WATCHDOG_INTERVAL_MIN = 10
 BUDGET_ALERT_FRACTION = 0.8  # warn once a brain crosses this share of its daily token cap
-_DAY_S = 24 * 3600  # budget/digest alerts: at most one per day (naturally re-armed by the date key)
+_DAY_S = 24 * 3600  # budget/job alerts: at most one per day (naturally re-armed by the date key)
 _PERM_ALERT_COOLDOWN_S = 6 * 3600  # a missing scope re-reminds every 6h while it stays broken
 
 
@@ -241,15 +236,12 @@ def _missing_permissions(perms: discord.Permissions) -> list[str]:
 # Every optional channel a brain posts to unprompted — each is worth confirming Roger can actually
 # reach *before* the feature that needs it silently fails days or weeks later on a scheduled tick.
 _CONFIGURED_CHANNELS: tuple[tuple[str, str], ...] = (
-    ("digest_channel_id", "digest"),
     ("ops_channel_id", "ops"),
     ("gigabrain_channel_id", "gigabrain check-in"),
-    ("personal_digest_channel_id", "personal digest"),
-    ("spark_channel_id", "spark"),
     ("curated_channel_id", "curated"),
 )
 
-_DIGEST_CHANNEL_PERMISSIONS: tuple[tuple[str, str], ...] = (
+_CURATED_CHANNEL_PERMISSIONS: tuple[tuple[str, str], ...] = (
     ("view_channel", "View Channels"),
     ("send_messages", "Send Messages"),
     ("embed_links", "Embed Links"),
@@ -282,7 +274,7 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
             problems.append(f"{label} channel #{channel.name} is not postable")
             continue
         required = (
-            _DIGEST_CHANNEL_PERMISSIONS if attr in {"digest_channel_id", "curated_channel_id"}
+            _CURATED_CHANNEL_PERMISSIONS if attr == "curated_channel_id"
             else _POSTABLE_CHANNEL_PERMISSIONS
         )
         permissions = channel.permissions_for(guild.me)
@@ -296,39 +288,7 @@ def _unreachable_channels(guild: Any, settings: Settings) -> list[str]:
 
 # --------------------------------------------------------------------------- status & ops
 
-_BRAINS = ("admin", "ambient", "digest", "spark", "curated", "gigabrain")
-DIGEST_LAST_ATTEMPT_META_KEY = "digest_last_attempt"
-
-
-def _digest_attempt_result(status: str) -> str:
-    """Sanitize scheduled Digest outcomes before persisting or exposing them."""
-    if status == "posted":
-        return "success"
-    if status == "no new items":
-        return "no new items"
-    return "failure"
-
-
-def _digest_status(*, digest_configured: bool, last_attempt: str | None, tz: str) -> str:
-    """Digest status safe for boot and /status: config first, then its last scheduled outcome."""
-    if not digest_configured:
-        return "destination unset"
-    if not last_attempt:
-        return "never run"
-    try:
-        attempt = json.loads(last_attempt)
-        result = attempt.get("result")
-        timestamp = attempt.get("timestamp")
-        if result not in {"success", "no new items", "failure"} or not isinstance(
-            timestamp, int | float
-        ):
-            return "unknown"
-        when = datetime.datetime.fromtimestamp(timestamp, ZoneInfo(tz)).strftime(
-            "%Y-%m-%d %H:%M %Z"
-        )
-    except (json.JSONDecodeError, AttributeError, OSError, OverflowError, ValueError):
-        return "unknown"
-    return f"{result}, last {when}"
+_BRAINS = ("admin", "ambient", "curated", "gigabrain")
 
 
 def _daily_caps(settings: Settings) -> dict[str, int]:
@@ -336,8 +296,6 @@ def _daily_caps(settings: Settings) -> dict[str, int]:
     return {
         "admin": settings.daily_tokens_admin,
         "ambient": settings.daily_tokens_ambient,
-        "digest": settings.daily_tokens_digest,
-        "spark": settings.daily_tokens_spark,
         "curated": settings.daily_tokens_curated,
         "gigabrain": settings.daily_tokens_gigabrain,
     }
@@ -348,8 +306,6 @@ def _daily_usd_caps(settings: Settings) -> dict[str, float]:
     return {
         "admin": settings.daily_usd_admin,
         "ambient": settings.daily_usd_ambient,
-        "digest": settings.daily_usd_digest,
-        "spark": settings.daily_usd_spark,
         "curated": settings.daily_usd_curated,
         "gigabrain": settings.daily_usd_gigabrain,
     }
@@ -360,7 +316,7 @@ def _boot_header(
 ) -> str:
     """Header of the boot self-report (pure): health glyph + the deployed build.
 
-    The full state block — permissions, token/dollar spend, digest schedule, recent actions — is
+    The full state block — permissions, token/dollar spend, curated schedule, recent actions — is
     rendered separately by ``gather_status`` and appended under this header, so the ops channel gets
     a complete snapshot on every deploy instead of a bare "online" line. A missing required scope
     adds an actionable re-invite hint here (it's the one thing you must fix by hand off-box); an
@@ -395,13 +351,8 @@ def _format_status(
     caps: dict[str, int],
     cost: dict[str, float],
     recent_audit: list[dict[str, Any]],
-    digest_hour: int,
-    digest_configured: bool,
-    spark_hour: int,
-    spark_configured: bool,
     tz: str,
     usd_caps: dict[str, float] | None = None,
-    digest_result: str = "never run",
     curated_hour: int = 7,
     curated_configured: bool = False,
 ) -> str:
@@ -427,13 +378,6 @@ def _format_status(
             f"  {brain:<10}{usage.get(brain, 0):>8,} / {caps.get(brain, 0):<8,}  {cost_str}"
         )
     lines.append(f"  {'total':<29}  ${total_cost:.4f}")
-    digest = (
-        f"{digest_hour:02d}:00 {tz} ({digest_result})"
-        if digest_configured
-        else "destination unset"
-    )
-    spark = f"{spark_hour:02d}:00 {tz}" if spark_configured else "unconfigured"
-    lines.append(f"digest: {digest}   spark: {spark}")
     curated = f"{curated_hour:02d}:00 {tz}" if curated_configured else "unconfigured"
     lines.append(f"curated: {curated}")
     if recent_audit:
@@ -466,18 +410,9 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         cost=cost,
         usd_caps=usd_caps,
         recent_audit=await store.fetch_audit(limit=8),
-        digest_hour=settings.digest_hour,
-        digest_configured=settings.digest_channel_id is not None,
-        spark_hour=settings.spark_hour,
-        spark_configured=settings.spark_channel_id is not None,
         curated_hour=settings.curated_hour,
         curated_configured=settings.curated_channel_id is not None,
         tz=settings.tz,
-        digest_result=_digest_status(
-            digest_configured=settings.digest_channel_id is not None,
-            last_attempt=await store.get_meta(DIGEST_LAST_ATTEMPT_META_KEY),
-            tz=settings.tz,
-        ),
     )
 
 
@@ -544,44 +479,8 @@ def _budget_alert(
     return f"⚠️ **{brain} budget {pct}%** — {detail}. Approaching the daily cap."
 
 
-# Digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops ping.
-_DIGEST_OK_PREFIXES = ("posted", "no new items")
-
-
-def _digest_problem(status: str) -> str | None:
-    """The digest status if it signals a problem worth alerting on, else None (pure)."""
-    if any(status.startswith(prefix) for prefix in _DIGEST_OK_PREFIXES):
-        return None
-    return status
-
-
-# Spark statuses that mean "ran fine, nothing to flag"; anything else is worth an ops ping —
-# mirrors _DIGEST_OK_PREFIXES exactly: the loop only ever starts once a channel is configured,
-# so a "not configured" status is unreachable from the loop and needs no OK-prefix here.
-_SPARK_OK_PREFIXES = ("posted", "no new items")
-
-
-def _spark_problem(status: str) -> str | None:
-    """The spark status if it signals a problem worth alerting on, else None (pure)."""
-    if any(status.startswith(prefix) for prefix in _SPARK_OK_PREFIXES):
-        return None
-    return status
-
-
 def _curated_problem(status: str) -> str | None:
     if status in {"posted", "already posted", "no post-worthy items"}:
-        return None
-    return status
-
-
-# Personal digest statuses that mean "ran fine, nothing to flag"; anything else is worth an ops
-# ping — same OK-prefix shape as the public digest.
-_PERSONAL_DIGEST_OK_PREFIXES = ("posted", "no new items")
-
-
-def _personal_digest_problem(status: str) -> str | None:
-    """The personal digest status if it signals a problem worth alerting on, else None (pure)."""
-    if any(status.startswith(prefix) for prefix in _PERSONAL_DIGEST_OK_PREFIXES):
         return None
     return status
 
@@ -636,27 +535,7 @@ class RogerClient(discord.Client):
             self._metrics_server = metrics.start_server(self.settings.metrics_port)
             await metrics.refresh(self.store, self.settings, ROGER_VERSION)
             self._metrics_refresh.start()
-        # Start the daily loop whenever a channel is configured.
-        if self.settings.digest_channel_id is not None:
-            self._digest_loop.change_interval(
-                time=datetime.time(
-                    hour=self.settings.digest_hour, tzinfo=ZoneInfo(self.settings.tz)
-                )
-            )
-            self._digest_loop.start()
-            log.info(
-                "digest scheduled daily at %02d:00 %s", self.settings.digest_hour, self.settings.tz
-            )
-        if self.settings.spark_channel_id is not None:
-            self._spark_loop.change_interval(
-                time=datetime.time(
-                    hour=self.settings.spark_hour, tzinfo=ZoneInfo(self.settings.tz)
-                )
-            )
-            self._spark_loop.start()
-            log.info(
-                "spark scheduled daily at %02d:00 %s", self.settings.spark_hour, self.settings.tz
-            )
+        # The public news loop stays off until a channel is configured.
         if self.settings.curated_channel_id is not None:
             self._curated_loop.change_interval(
                 time=datetime.time(
@@ -666,21 +545,7 @@ class RogerClient(discord.Client):
             self._curated_loop.start()
             log.info("curated posting scheduled daily at %02d:00 %s",
                      self.settings.curated_hour, self.settings.tz)
-        # Always scheduled, unconditionally — DM delivery needs no channel pre-configured.
-        # run_personal_digest_job self-gates on "no new items" the same way run_gigabrain_suggestion
-        # self-gates on its interval (§12): the job decides, not the caller.
-        self._personal_digest_loop.change_interval(
-            time=datetime.time(
-                hour=self.settings.personal_digest_hour, tzinfo=ZoneInfo(self.settings.tz)
-            )
-        )
-        self._personal_digest_loop.start()
-        log.info(
-            "personal digest scheduled daily at %02d:00 %s",
-            self.settings.personal_digest_hour,
-            self.settings.tz,
-        )
-        # Same pattern as digest: a daily tick that self-gates on the configured interval (§12).
+        # Giga Brain checks its configured interval on each daily tick (§12).
         if self.settings.gigabrain_interval_days > 0:
             self._gigabrain_loop.change_interval(
                 time=datetime.time(
@@ -841,60 +706,6 @@ class RogerClient(discord.Client):
             log.exception("gigabrain request failed for actor %s", actor_id)
             return "Something went wrong handling that — check the logs."
 
-    @tasks.loop(time=datetime.time(hour=8))
-    async def _digest_loop(self) -> None:
-        await self._run_scheduled_digest()
-
-    async def _run_scheduled_digest(self) -> None:
-        """Run and record one scheduled Digest attempt without letting a job error stop its loop."""
-        try:
-            result = await run_digest_job(
-                client=self, settings=self.settings, llm=self.llm, store=self.store
-            )
-            status = str(result.get("status", ""))
-        except Exception:
-            log.exception("scheduled digest failed unexpectedly")
-            status = "unexpected error"
-        sanitized = _digest_attempt_result(status)
-        try:
-            await self.store.set_meta(
-                DIGEST_LAST_ATTEMPT_META_KEY,
-                json.dumps({"timestamp": time.time(), "result": sanitized}),
-            )
-        except Exception:
-            log.exception("failed to record scheduled digest result")
-        log.info("scheduled digest: %s", status)
-        problem = _digest_problem(status)
-        if problem:
-            await self._ops.alert(
-                f"digest:{time.strftime('%Y-%m-%d')}",
-                f"⚠️ **digest problem** — {problem}",
-                cooldown_s=_DAY_S,
-            )
-
-    @_digest_loop.before_loop
-    async def _before_digest(self) -> None:
-        await self.wait_until_ready()
-
-    @tasks.loop(time=datetime.time(hour=7))
-    async def _spark_loop(self) -> None:
-        result = await run_spark_job(
-            client=self, settings=self.settings, llm=self.llm, store=self.store
-        )
-        status = str(result.get("status", ""))
-        log.info("scheduled spark: %s", status)
-        problem = _spark_problem(status)
-        if problem:
-            await self._ops.alert(
-                f"spark:{time.strftime('%Y-%m-%d')}",
-                f"⚠️ **spark problem** — {problem}",
-                cooldown_s=_DAY_S,
-            )
-
-    @_spark_loop.before_loop
-    async def _before_spark(self) -> None:
-        await self.wait_until_ready()
-
     @tasks.loop(time=datetime.time(hour=7))
     async def _curated_loop(self) -> None:
         await self._run_scheduled_curated()
@@ -919,25 +730,6 @@ class RogerClient(discord.Client):
 
     @_curated_loop.before_loop
     async def _before_curated(self) -> None:
-        await self.wait_until_ready()
-
-    @tasks.loop(time=datetime.time(hour=7))
-    async def _personal_digest_loop(self) -> None:
-        result = await run_personal_digest_job(
-            client=self, settings=self.settings, llm=self.llm, store=self.store
-        )
-        status = str(result.get("status", ""))
-        log.info("scheduled personal digest: %s", status)
-        problem = _personal_digest_problem(status)
-        if problem:
-            await self._ops.alert(
-                f"personal_digest:{time.strftime('%Y-%m-%d')}",
-                f"⚠️ **personal digest problem** — {problem}",
-                cooldown_s=_DAY_S,
-            )
-
-    @_personal_digest_loop.before_loop
-    async def _before_personal_digest(self) -> None:
         await self.wait_until_ready()
 
     @tasks.loop(time=datetime.time(hour=9))

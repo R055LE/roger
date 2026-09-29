@@ -405,13 +405,13 @@ async def test_preflight_skips_the_catalog_call_when_nothing_is_configured(monke
         await store.close()
 
 
-async def test_spark_budget_exceeded_before_network(monkeypatch, tmp_path):
-    _env(monkeypatch, MODEL_SPARK="a/b", DAILY_TOKENS_SPARK="10")
+async def test_curated_budget_exceeded_before_network(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_CURATED="a/b", DAILY_TOKENS_CURATED="10")
     store = await Store(str(tmp_path / "l.db")).open()
     try:
-        await store.add_usage("spark", 8, 5)  # 13 >= 10
+        await store.add_usage("curated", 8, 5)  # 13 >= 10
         llm = LLM(Settings(), store)
         with pytest.raises(BudgetExceeded):
-            await llm.complete("spark", [{"role": "user", "content": "hi"}])
+            await llm.complete("curated", [{"role": "user", "content": "hi"}])
     finally:
         await store.close()
