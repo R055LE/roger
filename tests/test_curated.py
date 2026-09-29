@@ -57,6 +57,46 @@ def test_post_has_supported_facts_and_optional_question():
     assert result.question == ""
 
 
+def test_lwn_credential_claim_shows_following_supporting_sentence():
+    prompt = "In KDE, monitoring /usr/bin/pkexec reveals when Polkit spawns a login prompt."
+    consequence = "A fake password window could then collect user credentials."
+    source = "Research context on the attack. " * 10 + f"{prompt} {consequence} {QUOTE_B}"
+    entry = _entry(article={"status": "ok", "url": "https://lwn.net/Articles/1096431/",
+                            "text": source})
+    facts = [
+        {"text": "The KDE attack can collect credentials by spoofing a Polkit prompt.",
+         "evidence": prompt},
+        {"text": "The benchmark setup was published.", "evidence": QUOTE_B},
+    ]
+    post = _parse(_post(facts=facts), [entry])
+    assert post is not None
+    assert post.evidence[0] == f"{prompt} {consequence}"
+    assert len(post.evidence[0]) <= 500
+    assert post.evidence[0] in source
+
+
+def test_evidence_does_not_append_an_unrelated_sentence():
+    source = f"{QUOTE_A} {QUOTE_B} " + "More source detail. " * 15
+    entry = _entry(article={"status": "ok", "url": "https://example.org/release",
+                            "text": source})
+    post = _parse(_post(), [entry])
+    assert post is not None
+    assert post.evidence[0] == QUOTE_A
+
+
+def test_evidence_context_over_cap_skips_the_draft():
+    source = f"{QUOTE_A} Credentials " + "were collected " * 35 + f". {QUOTE_B}"
+    entry = _entry(article={"status": "ok", "url": "https://example.org/release",
+                            "text": source})
+    facts = [
+        {"text": "The release collected credentials after the measured test.",
+         "evidence": QUOTE_A},
+        {"text": "Measurements were published.", "evidence": QUOTE_B},
+    ]
+    with pytest.raises(DraftError, match="evidence context exceeds limit"):
+        _parse(_post(facts=facts), [entry])
+
+
 def test_specific_why_can_be_moderately_long_but_remains_bounded():
     why = (
         "This paper introduces a platform designed for large-scale agentic training and "
