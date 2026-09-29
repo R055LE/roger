@@ -49,9 +49,16 @@ def _response():
 class LLM:
     calls = 0
 
+    def __init__(self, responses=None):
+        self.responses = list(responses or [])
+
     async def complete(self, brain, messages):
         self.calls += 1
         assert brain == "curated"
+        if self.responses:
+            content = self.responses.pop(0)
+            message = SimpleNamespace(content=content)
+            return SimpleNamespace(choices=[SimpleNamespace(message=message)])
         return _response()
 
 
@@ -157,5 +164,24 @@ async def test_preview_keeps_seen_state_and_shows_supporting_quotes(tmp_path):
         await store.mark_seen([("scout:f", "story")])
         again = await preview_curated_job(settings=settings, llm=llm, store=store)
         assert again["status"] == "draft", "preview should inspect even previously seen items"
+    finally:
+        await store.close()
+
+
+async def test_preview_repairs_why_without_consuming_seen_state(tmp_path):
+    _digest(tmp_path)
+    original = json.loads(_response().choices[0].message.content)
+    original["why"] = "The published result helps compare inference servers. " * 10
+    llm = LLM([json.dumps(original), json.dumps({"sentences": [1]})])
+    store = await Store(str(tmp_path / "roger.db")).open()
+    settings = _settings(tmp_path)
+    try:
+        result = await preview_curated_job(settings=settings, llm=llm, store=store)
+        assert result["status"] == "draft"
+        assert result["why"] == "The published result helps compare inference servers."
+        assert llm.calls == 2
+        assert len((await collect_from_scout(
+            settings.scout_digest_path, store, max_age_hours=36, limit=25
+        )).entries) == 1
     finally:
         await store.close()
