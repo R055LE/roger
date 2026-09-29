@@ -91,6 +91,8 @@ class LLM:
             "spark": settings.spark_models,
             "curated": settings.curated_models,
         }
+        self._curated_review_models = settings.curated_review_models
+        self._curated_public = settings.curated_channel_id is not None
         self._caps = {
             "admin": settings.daily_tokens_admin,
             "ambient": settings.daily_tokens_ambient,
@@ -115,10 +117,15 @@ class LLM:
         brain: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        *,
+        curated_review: bool = False,
     ) -> Any:
-        chain = self._chains[brain]
+        if curated_review and brain != "curated":
+            raise ValueError("curated review is only available to the curated brain")
+        chain = self._curated_review_models if curated_review else self._chains[brain]
         if not chain:
-            raise LLMConfigError(f"no models configured for {brain} (set MODEL_{brain.upper()})")
+            setting = "MODEL_CURATED_REVIEW" if curated_review else f"MODEL_{brain.upper()}"
+            raise LLMConfigError(f"no models configured for {brain} (set {setting})")
 
         used = await self._store.usage_today(brain)
         cap = self._caps[brain]
@@ -177,6 +184,8 @@ class LLM:
         env value shipped. Both checks are plain GETs: no completion call, no token/$ spend.
         """
         problems: list[str] = []
+        if self._curated_public and not self._curated_review_models:
+            problems.append("MODEL_CURATED_REVIEW is required for public Curated posting")
         try:
             await self._client.get("/key", cast_to=object)
         except APIStatusError as exc:
@@ -187,6 +196,8 @@ class LLM:
         configured = {
             (brain, model_id) for brain, chain in self._chains.items() for model_id in chain
         }
+        configured.update(("curated_review", model_id)
+                          for model_id in self._curated_review_models)
         if not configured:
             return problems
 

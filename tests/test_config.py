@@ -180,6 +180,7 @@ def test_curated_defaults(monkeypatch):
     assert settings.curated_channel_id is None
     assert settings.curated_hour == 7
     assert settings.curated_models == []
+    assert settings.curated_review_models == []
     assert settings.daily_tokens_curated == 30_000
     assert settings.daily_usd_curated == 0.0
 
