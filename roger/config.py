@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     model_ambient: str = ""
     model_gigabrain: str = ""
     model_curated: str = ""
+    model_curated_review: str = ""
 
     # --- budgets (daily in+out tokens per brain) ---
     daily_tokens_admin: int = Field(default=150_000, gt=0)
@@ -145,6 +146,10 @@ class Settings(BaseSettings):
     @property
     def curated_models(self) -> list[str]:
         return _split_csv(self.model_curated)
+
+    @property
+    def curated_review_models(self) -> list[str]:
+        return _split_csv(self.model_curated_review)
 
     @property
     def scout_digest_path(self) -> pathlib.Path:

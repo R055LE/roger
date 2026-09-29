@@ -42,6 +42,62 @@ async def test_config_error_when_no_models(monkeypatch, tmp_path):
         await store.close()
 
 
+async def test_curated_review_requires_its_own_model(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_CURATED="a/b")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        with pytest.raises(LLMConfigError, match="MODEL_CURATED_REVIEW"):
+            await llm.complete("curated", [{"role": "user", "content": "hi"}],
+                               curated_review=True)
+    finally:
+        await store.close()
+
+
+async def test_public_curated_without_reviewer_is_flagged_at_preflight(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_CURATED="a/b", CURATED_CHANNEL_ID="42")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+
+        async def fake_get(path, **_kwargs):
+            if path == "/key":
+                return {"data": {}}
+            return {"data": [{"id": "a/b"}]}
+
+        monkeypatch.setattr(llm._client, "get", fake_get)
+        assert any("MODEL_CURATED_REVIEW" in p for p in await llm.preflight())
+    finally:
+        await store.close()
+
+
+async def test_curated_review_uses_its_model_and_shared_budget(monkeypatch, tmp_path):
+    _env(monkeypatch, MODEL_CURATED="a/b", MODEL_CURATED_REVIEW="c/d",
+         DAILY_TOKENS_CURATED="10")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        captured = {}
+
+        async def fake_create(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=6, completion_tokens=4, cost=0.01)
+            )
+
+        monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+        await llm.complete("curated", [{"role": "user", "content": "hi"}],
+                           curated_review=True)
+        assert captured["model"] == "c/d"
+        assert captured["extra_body"]["models"] == ["c/d"]
+        assert await store.usage_today("curated") == 10
+        assert await store.cost_today("curated") == 0.01
+        with pytest.raises(BudgetExceeded):
+            await llm.complete("curated", [{"role": "user", "content": "hi"}])
+    finally:
+        await store.close()
+
+
 async def test_budget_exceeded_before_network(monkeypatch, tmp_path):
     _env(monkeypatch, MODEL_ADMIN="a/b", DAILY_TOKENS_ADMIN="10")
     store = await Store(str(tmp_path / "l.db")).open()
@@ -239,7 +295,8 @@ async def test_missing_cost_field_defaults_to_zero(monkeypatch, tmp_path):
 
 
 async def test_preflight_ok_when_key_and_all_configured_models_resolve(monkeypatch, tmp_path):
-    _env(monkeypatch, MODEL_ADMIN="a/b", MODEL_AMBIENT="a/b,c/d")
+    _env(monkeypatch, MODEL_ADMIN="a/b", MODEL_AMBIENT="a/b,c/d",
+         MODEL_CURATED_REVIEW="e/f")
     store = await Store(str(tmp_path / "l.db")).open()
     try:
         llm = LLM(Settings(), store)
@@ -248,7 +305,7 @@ async def test_preflight_ok_when_key_and_all_configured_models_resolve(monkeypat
             if path == "/key":
                 return {"data": {"label": "test"}}
             assert path == "/models"
-            return {"data": [{"id": "a/b"}, {"id": "c/d"}]}
+            return {"data": [{"id": "a/b"}, {"id": "c/d"}, {"id": "e/f"}]}
 
         monkeypatch.setattr(llm._client, "get", fake_get)
         assert await llm.preflight() == []
