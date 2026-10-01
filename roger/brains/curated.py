@@ -60,6 +60,20 @@ SYSTEM = ROGER_IDENTITY + " " + (
     "or actions. Do not include links or Discord mentions in generated fields."
 )
 
+REVISION = SYSTEM + " " + (
+    "This is the only revision attempt for a rejected draft. Stay with the supplied item 1. "
+    "unsupported_facts lists 1-based fact numbers whose paired excerpts were insufficient. "
+    "Prefer the smallest useful set of two to four facts. Preserve supported facts and omit "
+    "rejected facts when at least two supported facts remain. Otherwise narrow a rejected "
+    "claim to the paired quote or "
+    "choose a fuller exact quote from source_text that supports every claim. The title and "
+    "summary are not evidence. Preserve reported counts and qualifiers instead of replacing "
+    "them with judgments such as low or effective. Keep each result's scope with that result; "
+    "do not apply a task or benchmark qualifier to results from another sentence. "
+    "Update why, take, and question to fit the "
+    "revised facts. If the article cannot support a useful post, return the skip decision."
+)
+
 
 class DraftError(ValueError):
     """The model returned an unusable editorial decision or unsupported draft."""
@@ -232,6 +246,23 @@ def _response_text(response: Any) -> str:
         raise DraftError("response had no text choice") from exc
 
 
+async def _review_support(post: Draft, llm: LLM) -> list[bool]:
+    review = await llm.complete("curated", [
+        {"role": "system", "content": SUPPORT_REVIEW},
+        {"role": "user", "content": json.dumps([
+            {"fact": fact, "evidence": evidence}
+            for fact, evidence in zip(post.facts, post.evidence, strict=True)
+        ])},
+    ], curated_review=True)
+    verdict = _json_object(_response_text(review))
+    supported = verdict.get("supported")
+    if set(verdict) != {"supported"} or not isinstance(supported, list) or (
+        len(supported) != len(post.facts)
+    ) or any(type(value) is not bool for value in supported):
+        raise DraftError("invalid fact support review")
+    return supported
+
+
 async def draft(entries: list[dict[str, Any]], llm: LLM) -> Draft | None:
     candidates = eligible(entries)
     if not candidates:
@@ -285,21 +316,31 @@ async def draft(entries: list[dict[str, Any]], llm: LLM) -> Draft | None:
 
     if post is None:
         return None
-    review = await llm.complete("curated", [
-        {"role": "system", "content": SUPPORT_REVIEW},
-        {"role": "user", "content": json.dumps([
-            {"fact": fact, "evidence": evidence}
-            for fact, evidence in zip(post.facts, post.evidence, strict=True)
-        ])},
-    ], curated_review=True)
-    verdict = _json_object(_response_text(review))
-    supported = verdict.get("supported")
-    if set(verdict) != {"supported"} or not isinstance(supported, list) or (
-        len(supported) != len(post.facts)
-    ) or any(type(value) is not bool for value in supported):
-        raise DraftError("invalid fact support review")
-    if not all(supported):
-        raise DraftError("fact evidence does not support every claim")
+    supported = await _review_support(post, llm)
+    if all(supported):
+        return post
+    log.info("curated fact support rejected for %d/%d facts; revising once",
+             supported.count(False), len(supported))
+    revised = await llm.complete("curated", [
+        {"role": "system", "content": REVISION},
+        {"role": "user", "content": json.dumps({
+            "candidate": json.loads(_format_candidates([post.entry]))[0],
+            "draft": {
+                "decision": "post", "item": 1,
+                "facts": [
+                    {"text": fact, "evidence": evidence}
+                    for fact, evidence in zip(post.facts, post.evidence, strict=True)
+                ],
+                "why": post.why, "take": post.take, "question": post.question,
+            },
+            "unsupported_facts": [index for index, ok in enumerate(supported, 1) if not ok],
+        })},
+    ])
+    post = _parse(_response_text(revised), [post.entry])
+    if post is None:
+        return None
+    if not all(await _review_support(post, llm)):
+        raise DraftError("fact evidence does not support every claim after revision")
     return post
 
 
@@ -355,7 +396,7 @@ async def run_curated_job(
         return {"status": "model request failed; skipped"}
     except DraftError as exc:
         log.warning("curated model response rejected: %s", exc)
-        return {"status": "unusable model response; skipped"}
+        return {"status": f"unusable model response: {exc}; skipped"}
     if post is None:
         return {"status": "no post-worthy items"}
 
@@ -396,7 +437,7 @@ async def preview_curated_job(*, settings: Any, llm: LLM, store: Store) -> dict[
         return {"status": "model request failed; skipped"}
     except DraftError as exc:
         log.warning("curated preview response rejected: %s", exc)
-        return {"status": "unusable model response; skipped"}
+        return {"status": f"unusable model response: {exc}; skipped"}
     if post is None:
         return {"status": "no post-worthy items", "run_id": batch.newest_run_id}
     return {

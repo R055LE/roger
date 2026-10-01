@@ -258,6 +258,10 @@ recent output at `CURATED_HOUR=7` in `TZ`, after Scout's 05:30 local run. The lo
 - The curated model sees at most eight candidates with bounded title, summary, match, and article
   text fields. It must return a strict JSON skip or a draft with two to four facts. Each fact needs
   an exact supporting quote from the supplied source excerpt. Invalid responses make no post.
+- A separate reviewer checks every fact against its paired quote. A negative verdict allows one
+  revision of the same article, followed by strict parsing and a fresh support review. A malformed
+  response or a second negative verdict stops before any delivery claim. All calls share the
+  Curated budget, and failure statuses include a sanitized reason.
 - The public post contains the chosen title, facts, why it matters, optional light take and natural
   question, plus a source link. Discord mentions are suppressed. The owner can call
   `preview_curated` to inspect the decision and supporting quotes without posting or marking an
