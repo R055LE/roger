@@ -187,20 +187,73 @@ async def test_overlong_why_gets_one_bounded_repair():
     "DSec enables LLM training across several sandbox backends.",
     "AGATE prevents compositional attacks with an authorization gate.",
 ])
-async def test_partial_support_is_rejected_after_exact_quote_validation(unsupported):
+async def test_partial_support_still_rejected_after_one_revision(unsupported):
     facts = [
         {"text": unsupported, "evidence": QUOTE_A},
         {"text": "The benchmark setup was published.", "evidence": QUOTE_B},
     ]
-    llm = FakeLLM([_post(facts=facts), json.dumps({"supported": [False, True]})])
-    with pytest.raises(DraftError, match="fact evidence does not support"):
+    negative = json.dumps({"supported": [False, True]})
+    llm = FakeLLM([_post(facts=facts), negative, _post(facts=facts), negative])
+    with pytest.raises(DraftError, match="every claim after revision"):
         await draft([_entry()], llm)
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == 4
     pairs = json.loads(llm.calls[1][1][1]["content"])
     assert pairs[0] == {"fact": unsupported, "evidence": QUOTE_A}
     assert set(pairs[1]) == {"fact", "evidence"}
 
 
+async def test_support_revision_uses_same_article_and_reviews_all_revised_facts():
+    facts = [
+        {"text": "Cold starts improved for every workload.", "evidence": QUOTE_A},
+        {"text": "Cold starts were 30 percent faster in the published test.",
+         "evidence": QUOTE_A},
+        {"text": "The benchmark setup and raw measurements were published.",
+         "evidence": QUOTE_B},
+        {"text": "The benchmark is the most reliable comparison for all workloads.",
+         "evidence": QUOTE_B},
+    ]
+    llm = FakeLLM([
+        _post(facts=facts), json.dumps({"supported": [False, True, True, False]}),
+        _post(), json.dumps({"supported": [True, True]}),
+    ])
+    post = await draft([_entry(), _entry(title="Another article")], llm)
+    assert post is not None
+    assert post.facts == _parse(_post(), [_entry()]).facts
+    assert [call[2] for call in llm.calls] == [False, True, False, True]
+    revision = json.loads(llm.calls[2][1][1]["content"])
+    assert revision["candidate"] == json.loads(_format_candidates([_entry()]))[0]
+    assert revision["unsupported_facts"] == [1, 4]
+    assert revision["draft"]["facts"] == facts
+    assert json.loads(llm.calls[3][1][1]["content"]) == [
+        {"fact": fact, "evidence": evidence}
+        for fact, evidence in zip(post.facts, post.evidence, strict=True)
+    ]
+
+
+async def test_support_revision_can_skip_without_a_second_review():
+    llm = FakeLLM([
+        _post(), json.dumps({"supported": [False, True]}), '{"decision":"skip"}',
+    ])
+    assert await draft([_entry()], llm) is None
+    assert len(llm.calls) == 3
+
+
+@pytest.mark.parametrize("revision", [
+    "not JSON",
+    _post(item=2),
+    _post(facts=[{"text": "A claim.", "evidence": "Absent from the source excerpt."},
+                 {"text": "Measurements were published.", "evidence": QUOTE_B}]),
+    _post(facts=[]),
+    _post(why="This reason would need another shortening call. " * 12),
+])
+async def test_invalid_support_revision_never_gets_another_repair_or_review(revision):
+    llm = FakeLLM([_post(), json.dumps({"supported": [False, True]}), revision])
+    with pytest.raises(DraftError):
+        await draft([_entry(), _entry(title="Another article")], llm)
+    assert len(llm.calls) == 3
+
+
+@pytest.mark.parametrize("after_revision", [False, True])
 @pytest.mark.parametrize("verdict", [
     '{"supported":[true]}',
     '{"supported":[1,true]}',
@@ -208,11 +261,14 @@ async def test_partial_support_is_rejected_after_exact_quote_validation(unsuppor
     '{"supported":[true,"uncertain"]}',
     "not JSON",
 ])
-async def test_uncertain_or_malformed_support_review_is_rejected(verdict):
-    llm = FakeLLM([_post(), verdict])
+async def test_uncertain_or_malformed_support_review_is_rejected(verdict, after_revision):
+    responses = [_post(), verdict]
+    if after_revision:
+        responses = [_post(), json.dumps({"supported": [False, True]}), *responses]
+    llm = FakeLLM(responses)
     with pytest.raises(DraftError):
         await draft([_entry()], llm)
-    assert len(llm.calls) == 2
+    assert len(llm.calls) == (4 if after_revision else 2)
 
 
 async def test_support_review_receives_adjacent_source_context():

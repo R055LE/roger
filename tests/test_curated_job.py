@@ -4,9 +4,12 @@ import datetime
 import json
 from types import SimpleNamespace
 
+import pytest
 from conftest import write_digest
+from openai import APIConnectionError
 
 from roger.brains.curated import SUPPORT_REVIEW, preview_curated_job, run_curated_job
+from roger.llm import BudgetExceeded, LLMConfigError
 from roger.scout_source import collect_from_scout
 from roger.store import Store
 
@@ -59,6 +62,8 @@ class LLM:
         assert curated_review is (messages[0]["content"] == SUPPORT_REVIEW)
         if self.responses:
             content = self.responses.pop(0)
+            if isinstance(content, Exception):
+                raise content
             message = SimpleNamespace(content=content)
             return SimpleNamespace(choices=[SimpleNamespace(message=message)])
         if curated_review:
@@ -85,9 +90,12 @@ def _settings(tmp_path):
                            scout_digest_path=tmp_path / "digests", scout_max_age_hours=36)
 
 
-async def test_posts_once_across_restart_and_suppresses_the_item(tmp_path):
+@pytest.mark.parametrize("recover", [False, True])
+async def test_posts_once_across_restart_and_suppresses_the_item(tmp_path, recover):
     _digest(tmp_path)
-    llm, channel = LLM(), Channel()
+    original = _response().choices[0].message.content
+    llm = LLM([original, json.dumps({"supported": [False, True]}), original] if recover else [])
+    channel = Channel()
     client = SimpleNamespace(get_channel=lambda _: channel)
     settings = _settings(tmp_path)
     store = await Store(str(tmp_path / "roger.db")).open()
@@ -108,7 +116,7 @@ async def test_posts_once_across_restart_and_suppresses_the_item(tmp_path):
     try:
         second = await run_curated_job(client=client, settings=settings, llm=llm, store=store)
         assert second["status"] == "already posted"
-        assert llm.calls == 2
+        assert llm.calls == (4 if recover else 2)
         assert len(channel.sent) == 1
     finally:
         await store.close()
@@ -193,21 +201,42 @@ async def test_preview_repairs_why_without_consuming_seen_state(tmp_path):
         await store.close()
 
 
-async def test_unsupported_fact_never_claims_or_sends(tmp_path):
+@pytest.mark.parametrize("preview", [False, True])
+@pytest.mark.parametrize("revision_responses, status", [
+    ([_response().choices[0].message.content, json.dumps({"supported": [False, True]})],
+     "unusable model response: fact evidence does not support every claim after revision; skipped"),
+    (["not JSON"], "unusable model response: response is not JSON; skipped"),
+    ([_response().choices[0].message.content, '{"supported":[true]}'],
+     "unusable model response: invalid fact support review; skipped"),
+    ([BudgetExceeded("curated", 30_000, 30_000)], "budget exceeded; skipped"),
+    ([_response().choices[0].message.content, BudgetExceeded("curated", 30_000, 30_000)],
+     "budget exceeded; skipped"),
+    ([LLMConfigError("no configured model")], "curated brain not configured"),
+    ([APIConnectionError(request=None)], "model request failed; skipped"),
+    (['{"decision":"skip"}'], "no post-worthy items"),
+])
+async def test_support_recovery_failures_never_claim_send_or_consume_items(
+    tmp_path, preview, revision_responses, status,
+):
     _digest(tmp_path)
     original = _response().choices[0].message.content
-    llm, channel = LLM([original, json.dumps({"supported": [False, True]})]), Channel()
+    llm = LLM([original, json.dumps({"supported": [False, True]}), *revision_responses])
+    channel = Channel()
     store = await Store(str(tmp_path / "roger.db")).open()
     settings = _settings(tmp_path)
     try:
-        result = await run_curated_job(
-            client=SimpleNamespace(get_channel=lambda _: channel),
-            settings=settings, llm=llm, store=store,
-            now=datetime.datetime(2026, 9, 29, tzinfo=datetime.UTC),
-        )
-        assert result["status"] == "unusable model response; skipped"
+        if preview:
+            result = await preview_curated_job(settings=settings, llm=llm, store=store)
+        else:
+            result = await run_curated_job(
+                client=SimpleNamespace(get_channel=lambda _: channel),
+                settings=settings, llm=llm, store=store,
+                now=datetime.datetime(2026, 10, 1, tzinfo=datetime.UTC),
+            )
+        assert result["status"] == status
+        assert llm.calls == 2 + len(revision_responses)
         assert channel.sent == []
-        assert await store.curated_delivery("2026-09-29") is None
+        assert await store.curated_delivery("2026-10-01") is None
         assert len((await collect_from_scout(
             settings.scout_digest_path, store, max_age_hours=36, limit=25
         )).entries) == 1
