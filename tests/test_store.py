@@ -1,11 +1,13 @@
 """Store — real aiosqlite against a temp DB (integration-level, no mocks)."""
 
+import asyncio
 import time
 
 import aiosqlite
+import pytest
 
 from roger.request_context import request_context
-from roger.store import RETENTION_DAYS, AuditStatus, Store
+from roger.store import CURATED_CHECK_LEASE_SECONDS, RETENTION_DAYS, AuditStatus, Store
 
 
 async def test_record_audit_persists(tmp_path):
@@ -27,6 +29,196 @@ async def test_record_audit_persists(tmp_path):
         assert rows[0]["request_id"] is None
     finally:
         await store.close()
+
+
+async def test_curated_migration_preserves_every_legacy_delivery_and_seen_key(tmp_path):
+    path = str(tmp_path / "legacy.db")
+    raw = await aiosqlite.connect(path)
+    await raw.execute(
+        "CREATE TABLE curated_delivery (local_date TEXT PRIMARY KEY, feed_url TEXT NOT NULL, "
+        "entry_id TEXT NOT NULL, status TEXT NOT NULL, message_id TEXT, ts REAL NOT NULL)"
+    )
+    await raw.executemany(
+        "INSERT INTO curated_delivery VALUES (?, 'feed', 'same-item', ?, ?, ?)",
+        [("2026-09-30", "sent", "123", 100.0), ("2026-10-01", "pending", None, 200.0)],
+    )
+    await raw.execute(
+        "CREATE TABLE seen (feed_url TEXT, entry_id TEXT, ts REAL, PRIMARY KEY(feed_url, entry_id))"
+    )
+    await raw.execute("INSERT INTO seen VALUES ('feed', 'same-item', 100)")
+    await raw.commit()
+    await raw.close()
+    for _ in range(2):
+        store = await Store(path).open()
+        try:
+            sent = await store.curated_delivery("2026-09-30")
+            pending = await store.curated_delivery("2026-10-01")
+            assert (sent["status"], sent["message_id"], sent["ts"]) == ("sent", "123", 100)
+            assert (pending["status"], pending["message_id"], pending["ts"]) == (
+                "pending", None, 200,
+            )
+            assert sent["id"] != pending["id"]
+            assert await store.filter_unseen("feed", ["same-item", "new-item"]) == {"new-item"}
+            state = await store.curated_delivery_state("2026-10-01")
+            assert state["used"] == state["pending_deliveries"] == 1
+            assert state["last_claim_at"] == 200
+        finally:
+            await store.close()
+
+
+async def test_concurrent_curated_claims_cannot_take_the_same_last_slot(tmp_path):
+    path = str(tmp_path / "roger.db")
+    first, second = await Store(path).open(), await Store(path).open()
+    try:
+        generation = await first.claim_curated_check(1000)
+        claims = await asyncio.gather(*[
+            store.claim_curated("2026-10-01", "feed", entry_id, event_key=entry_id,
+                                max_posts=1, spacing_seconds=0, generation=generation, now=1000)
+            for store, entry_id in [(first, "a"), (second, "b")]
+        ])
+        assert sum(claim is not None for claim in claims) == 1
+        assert (await first.curated_delivery_state("2026-10-01"))["used"] == 1
+        assert len(await first.filter_unseen("feed", ["a", "b"])) == 1
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_curated_item_and_event_claims_survive_restart_and_new_day(tmp_path):
+    path = str(tmp_path / "roger.db")
+    store = await Store(path).open()
+    try:
+        generation = await store.claim_curated_check(1000)
+        claim = await store.claim_curated(
+            "2026-10-01", "feed", "a", event_key="https://example.org/event",
+            max_posts=3, spacing_seconds=0, generation=generation, now=1000,
+        )
+        await store.mark_curated_sent(claim, 123)
+        await store.release_curated_check(generation)
+    finally:
+        await store.close()
+    store = await Store(path).open()
+    try:
+        generation = await store.claim_curated_check(90000)
+        for feed, item, event in [("other-feed", "b", "https://example.org/event"),
+                                  ("feed", "a", "https://example.org/other")]:
+            assert await store.claim_curated(
+                "2026-10-02", feed, item, event_key=event, max_posts=3,
+                spacing_seconds=0, generation=generation, now=90000,
+            ) is None
+        assert (await store.curated_delivery_state("2026-10-02"))["used"] == 0
+        assert await store.filter_unseen("other-feed", ["b"]) == {"b"}
+    finally:
+        await store.close()
+
+
+async def test_expired_curated_worker_cannot_send_or_overwrite_its_successor(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        first = await store.claim_curated_check(1000)
+        assert await store.begin_curated_observation(
+            ["input"], first, 1000, local_date="2026-10-01", max_observations=8,
+        )
+        later = 1000 + CURATED_CHECK_LEASE_SECONDS + 1
+        second = await store.claim_curated_check(later)
+        assert second != first
+        await store.finish_curated_observation([("input", "rejected")], first, later)
+        await store.release_curated_check(first)
+        assert (await store.curated_check_state())["expires_at"] > later
+        assert (await store.curated_observations(["input"]))["input"]["status"] == "processing"
+        assert await store.claim_curated(
+            "2026-10-01", "feed", "item", event_key="event", max_posts=3,
+            spacing_seconds=0, generation=first, now=later,
+        ) is None
+    finally:
+        await store.close()
+
+
+async def test_curated_daily_observation_admission_is_durable_and_resets_on_local_date(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        first = await store.claim_curated_check(1000)
+        assert await store.begin_curated_observation(
+            ["a"], first, 1000, local_date="2026-10-01", max_observations=1,
+        )
+        await store.release_curated_check(first)
+        second = await store.claim_curated_check(1001)
+        assert not await store.begin_curated_observation(
+            ["b"], second, 1001, local_date="2026-10-01", max_observations=1,
+        )
+        assert await store.curated_observations(["b"]) == {}
+        await store.release_curated_check(second)
+        third = await store.claim_curated_check(1002)
+        assert await store.begin_curated_observation(
+            ["b"], third, 1002, local_date="2026-10-02", max_observations=1,
+        )
+        assert (await store.curated_check_state())["observations"] == 1
+    finally:
+        await store.close()
+
+
+async def test_curated_claim_and_seen_state_are_atomic_during_another_commit(tmp_path, monkeypatch):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        generation = await store.claim_curated_check(1000)
+        await store._conn.execute(
+            "CREATE TEMP TRIGGER fail_seen BEFORE INSERT ON seen "
+            "BEGIN SELECT RAISE(ABORT, 'seen write failed'); END"
+        )
+        execute = store._conn.execute
+
+        async def interleaving_execute(sql, parameters=()):
+            cursor = await execute(sql, parameters)
+            if sql.startswith("INSERT OR IGNORE INTO curated_delivery"):
+                await store.set_meta("concurrent_commit", "another brain committed")
+            return cursor
+
+        monkeypatch.setattr(store._conn, "execute", interleaving_execute)
+        with pytest.raises(aiosqlite.IntegrityError, match="seen write failed"):
+            await store.claim_curated(
+                "2026-10-01", "feed", "item", event_key="event", max_posts=3,
+                spacing_seconds=0, generation=generation, now=1000,
+            )
+        assert (await store.curated_delivery_state("2026-10-01"))["used"] == 0
+        assert await store.filter_unseen("feed", ["item"]) == {"item"}
+    finally:
+        await store.close()
+
+
+async def test_curated_legacy_migration_rolls_back_a_failed_copy(tmp_path, monkeypatch):
+    path = str(tmp_path / "legacy.db")
+    raw = await aiosqlite.connect(path)
+    await raw.execute(
+        "CREATE TABLE curated_delivery (local_date TEXT PRIMARY KEY, feed_url TEXT NOT NULL, "
+        "entry_id TEXT NOT NULL, status TEXT NOT NULL, message_id TEXT, ts REAL NOT NULL)"
+    )
+    await raw.execute(
+        "INSERT INTO curated_delivery VALUES ('2026-10-01', 'feed', 'item', 'sent', '123', 1000)"
+    )
+    await raw.commit()
+    await raw.close()
+    execute = aiosqlite.Connection.execute
+
+    async def fail_copy(self, sql, parameters=()):
+        if sql.startswith("INSERT INTO curated_delivery "):
+            raise RuntimeError("copy interrupted")
+        return await execute(self, sql, parameters)
+
+    broken = Store(path)
+    monkeypatch.setattr(aiosqlite.Connection, "execute", fail_copy)
+    try:
+        with pytest.raises(RuntimeError, match="copy interrupted"):
+            await broken.open()
+    finally:
+        await broken.close()
+    monkeypatch.setattr(aiosqlite.Connection, "execute", execute)
+    recovered = await Store(path).open()
+    try:
+        row = await recovered.curated_delivery("2026-10-01")
+        assert row["status"] == "sent" and row["message_id"] == "123"
+        assert row["ts"] == 1000
+    finally:
+        await recovered.close()
 
 
 async def test_meta_roundtrip_and_upsert(tmp_path):
@@ -175,5 +367,4 @@ async def test_prune_drops_expired_rows_and_keeps_recent(tmp_path):
         assert await store.prune(now=now) == dict.fromkeys(RETENTION_DAYS, 0)
     finally:
         await store.close()
-
 

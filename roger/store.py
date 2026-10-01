@@ -26,6 +26,19 @@ class AuditStatus(StrEnum):
     GATE_REJECTED = "gate_rejected"
 
 
+_CURATED_DELIVERY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS curated_delivery (
+    id         INTEGER PRIMARY KEY,
+    local_date TEXT NOT NULL,
+    feed_url   TEXT NOT NULL,
+    entry_id   TEXT NOT NULL,
+    event_key  TEXT NOT NULL UNIQUE,
+    status     TEXT NOT NULL,
+    message_id TEXT,
+    ts         REAL NOT NULL
+)
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS audit (
     id        INTEGER PRIMARY KEY,
@@ -46,13 +59,20 @@ CREATE TABLE IF NOT EXISTS seen (
     PRIMARY KEY (feed_url, entry_id)
 );
 
-CREATE TABLE IF NOT EXISTS curated_delivery (
-    local_date TEXT PRIMARY KEY,
-    feed_url   TEXT NOT NULL,
-    entry_id   TEXT NOT NULL,
-    status     TEXT NOT NULL,
-    message_id TEXT,
-    ts         REAL NOT NULL
+CREATE TABLE IF NOT EXISTS curated_check (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    generation INTEGER NOT NULL,
+    expires_at REAL NOT NULL,
+    local_date TEXT NOT NULL DEFAULT '',
+    observations INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS curated_observation (
+    fingerprint TEXT PRIMARY KEY,
+    status      TEXT NOT NULL,
+    failures    INTEGER NOT NULL,
+    retry_at    REAL NOT NULL,
+    ts          REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS usage (
@@ -97,6 +117,8 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
+CURATED_CHECK_LEASE_SECONDS = 30 * 60
+
 
 def _today() -> str:
     return time.strftime("%Y-%m-%d")
@@ -113,6 +135,7 @@ RETENTION_DAYS: dict[str, int] = {
     "gigabrain_log": 30,
     "seen": 90,
     "audit": 365,
+    "curated_observation": 7,
 }
 
 
@@ -129,7 +152,7 @@ class Store:
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
-        await self._db.executescript(_SCHEMA)
+        await self._db.executescript(_SCHEMA + _CURATED_DELIVERY_SCHEMA + ";")
         await self._migrate()
         await self._db.commit()
         return self
@@ -151,6 +174,35 @@ class Store:
         A DB provisioned before a column existed skips the current ``CREATE TABLE IF NOT EXISTS``
         schema, so additive column checks keep its data intact and make current DBs a no-op.
         """
+        if not await self._has_column("curated_delivery", "id"):
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not await self._has_column("curated_delivery", "id"):
+                    await self._conn.execute(
+                        "ALTER TABLE curated_delivery RENAME TO curated_delivery_daily"
+                    )
+                    await self._conn.execute(_CURATED_DELIVERY_SCHEMA)
+                    await self._conn.execute(
+                        "INSERT INTO curated_delivery "
+                        "(local_date, feed_url, entry_id, event_key, status, message_id, ts) "
+                        "SELECT local_date, feed_url, entry_id, 'legacy:' || local_date, "
+                        "status, message_id, ts FROM curated_delivery_daily"
+                    )
+                    await self._conn.execute("DROP TABLE curated_delivery_daily")
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS curated_delivery_date ON curated_delivery(local_date)"
+        )
+        # Other brains commit this shared connection between awaits. A trigger
+        # keeps suppression in the claim INSERT even when those commits interleave.
+        await self._conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS curated_delivery_seen AFTER INSERT ON curated_delivery "
+            "BEGIN INSERT OR IGNORE INTO seen (feed_url, entry_id, ts) "
+            "VALUES (NEW.feed_url, NEW.entry_id, NEW.ts); END"
+        )
         if not await self._has_column("usage", "cost_usd"):
             await self._conn.execute(
                 "ALTER TABLE usage ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0"
@@ -346,14 +398,117 @@ class Store:
 
     async def curated_delivery(self, local_date: str) -> dict[str, Any] | None:
         cursor = await self._conn.execute(
-            "SELECT status, feed_url, entry_id, message_id FROM curated_delivery "
-            "WHERE local_date = ?", (local_date,),
+            "SELECT * FROM curated_delivery WHERE local_date = ? ORDER BY id DESC LIMIT 1",
+            (local_date,),
         )
         row = await cursor.fetchone()
         return dict(row) if row else None
 
-    async def claim_curated(self, local_date: str, feed_url: str, entry_id: str) -> bool:
-        """Reserve the day's one send and suppress the item before touching Discord.
+    async def curated_delivery_state(self, local_date: str) -> dict[str, Any]:
+        cursor = await self._conn.execute(
+            "SELECT COUNT(*) AS used, "
+            "COALESCE(SUM(status = 'pending'), 0) AS pending_today "
+            "FROM curated_delivery WHERE local_date = ?", (local_date,),
+        )
+        state = dict(await cursor.fetchone())
+        cursor = await self._conn.execute(
+            "SELECT MAX(ts) AS last_claim_at, "
+            "COALESCE(SUM(status = 'pending'), 0) AS pending_deliveries FROM curated_delivery"
+        )
+        return state | dict(await cursor.fetchone())
+
+    async def curated_event_keys(self, event_keys: list[str]) -> set[str]:
+        if not event_keys:
+            return set()
+        placeholders = ",".join("?" * len(event_keys))
+        cursor = await self._conn.execute(
+            f"SELECT event_key FROM curated_delivery WHERE event_key IN ({placeholders})",  # noqa: S608
+            event_keys,
+        )
+        return {row[0] for row in await cursor.fetchall()}
+
+    async def claim_curated_check(self, now: float) -> int | None:
+        cursor = await self._conn.execute(
+            "INSERT INTO curated_check (id, generation, expires_at) VALUES (1, 1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET generation = generation + 1, "
+            "expires_at = excluded.expires_at WHERE expires_at <= ? RETURNING generation",
+            (now + CURATED_CHECK_LEASE_SECONDS, now),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        await self._conn.commit()
+        return int(row[0]) if row else None
+
+    async def release_curated_check(self, generation: int) -> None:
+        await self._conn.execute(
+            "UPDATE curated_check SET expires_at = 0 WHERE id = 1 AND generation = ?",
+            (generation,),
+        )
+        await self._conn.commit()
+
+    async def curated_check_state(self) -> dict[str, Any]:
+        cursor = await self._conn.execute(
+            "SELECT local_date, observations, expires_at FROM curated_check WHERE id = 1"
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else {"local_date": "", "observations": 0, "expires_at": 0}
+
+    async def curated_observations(self, fingerprints: list[str]) -> dict[str, dict[str, Any]]:
+        if not fingerprints:
+            return {}
+        placeholders = ",".join("?" * len(fingerprints))
+        cursor = await self._conn.execute(
+            f"SELECT * FROM curated_observation WHERE fingerprint IN ({placeholders})",  # noqa: S608
+            fingerprints,
+        )
+        return {row["fingerprint"]: dict(row) for row in await cursor.fetchall()}
+
+    async def begin_curated_observation(
+        self, fingerprints: list[str], generation: int, now: float,
+        *, local_date: str, max_observations: int,
+    ) -> bool:
+        admitted = await self._conn.execute(
+            "UPDATE curated_check SET observations = CASE WHEN local_date = ? "
+            "THEN observations + 1 ELSE 1 END, local_date = ? "
+            "WHERE generation = ? AND expires_at > ? "
+            "AND (local_date != ? OR observations < ?) RETURNING observations",
+            (local_date, local_date, generation, now, local_date, max_observations),
+        )
+        row = await admitted.fetchone()
+        await admitted.close()
+        if row is None:
+            await self._conn.commit()
+            return False
+        cursor = await self._conn.executemany(
+            "INSERT INTO curated_observation (fingerprint, status, failures, retry_at, ts) "
+            "SELECT ?, 'processing', 1, ?, ? WHERE EXISTS "
+            "(SELECT 1 FROM curated_check WHERE generation = ? AND expires_at > ?) "
+            "ON CONFLICT(fingerprint) DO UPDATE SET status = 'processing', "
+            "failures = failures + 1, retry_at = excluded.retry_at, ts = excluded.ts",
+            [(key, now + CURATED_CHECK_LEASE_SECONDS, now, generation, now)
+             for key in fingerprints],
+        )
+        await self._conn.commit()
+        return cursor.rowcount == len(fingerprints)
+
+    async def finish_curated_observation(
+        self, outcomes: list[tuple[str, str]], generation: int, now: float,
+        *, retry_at: float = 0,
+    ) -> None:
+        await self._conn.executemany(
+            "UPDATE curated_observation SET status = ?, failures = MAX(0, failures - ?), "
+            "retry_at = ?, ts = ? WHERE fingerprint = ? AND EXISTS "
+            "(SELECT 1 FROM curated_check WHERE generation = ?)",
+            [(status, int(status == 'available'), retry_at, now, key, generation)
+             for key, status in outcomes],
+        )
+        await self._conn.commit()
+
+    async def claim_curated(
+        self, local_date: str, feed_url: str, entry_id: str, *, event_key: str,
+        max_posts: int, spacing_seconds: int, generation: int, now: float,
+    ) -> int | None:
+        """Atomically reserve capacity, spacing and item/event identity before Discord.
 
         A crash or uncertain send leaves `pending`; automatic retry could post a
         duplicate, so an operator must reconcile that state by hand.
@@ -361,27 +516,32 @@ class Store:
         try:
             cursor = await self._conn.execute(
                 "INSERT OR IGNORE INTO curated_delivery "
-                "(local_date, feed_url, entry_id, status, ts) VALUES (?, ?, ?, 'pending', ?)",
-                (local_date, feed_url, entry_id, time.time()),
+                "(local_date, feed_url, entry_id, event_key, status, ts) "
+                "SELECT ?, ?, ?, ?, 'pending', ? WHERE "
+                "(SELECT COUNT(*) FROM curated_delivery WHERE local_date = ?) < ? "
+                "AND NOT EXISTS (SELECT 1 FROM curated_delivery WHERE ts > ?) "
+                "AND NOT EXISTS (SELECT 1 FROM curated_delivery WHERE feed_url = ? "
+                "AND entry_id = ?) AND NOT EXISTS "
+                "(SELECT 1 FROM seen WHERE feed_url = ? AND entry_id = ?) "
+                "AND EXISTS (SELECT 1 FROM curated_check "
+                "WHERE generation = ? AND expires_at > ?)",
+                (local_date, feed_url, entry_id, event_key, now, local_date, max_posts,
+                 now - spacing_seconds, feed_url, entry_id, feed_url, entry_id, generation, now),
             )
             if cursor.rowcount != 1:
                 await self._conn.commit()
-                return False
-            await self._conn.execute(
-                "INSERT OR IGNORE INTO seen (feed_url, entry_id, ts) VALUES (?, ?, ?)",
-                (feed_url, entry_id, time.time()),
-            )
+                return None
             await self._conn.commit()
-            return True
+            return cursor.lastrowid
         except Exception:
             await self._conn.rollback()
             raise
 
-    async def mark_curated_sent(self, local_date: str, message_id: int) -> None:
+    async def mark_curated_sent(self, delivery_id: int, message_id: int) -> None:
         cursor = await self._conn.execute(
             "UPDATE curated_delivery SET status = 'sent', message_id = ? "
-            "WHERE local_date = ? AND status = 'pending'",
-            (str(message_id), local_date),
+            "WHERE id = ? AND status = 'pending'",
+            (str(message_id), delivery_id),
         )
         if cursor.rowcount != 1:
             await self._conn.rollback()

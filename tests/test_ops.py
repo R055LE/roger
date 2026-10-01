@@ -3,6 +3,8 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from roger import bot
 from roger.bot import (
     OpsNotifier,
@@ -51,6 +53,27 @@ async def test_curated_schedule_stays_off_without_a_channel(monkeypatch):
     await client.setup_hook()
 
     assert not client._curated_loop.is_running()
+
+
+@pytest.mark.parametrize("interval", [0, 15])
+async def test_curated_schedule_uses_the_configured_daily_or_interval_policy(monkeypatch, interval):
+    settings = Settings(discord_token="x", openrouter_api_key="y",  # noqa: S106 - test credentials
+                        owner_id=1, guild_id=2,
+                        metrics_port=0, gigabrain_interval_days=0, ops_channel_id=None,
+                        curated_channel_id=42, curated_check_interval_minutes=interval, tz="UTC")
+    client = RogerClient(settings, store=object(), llm=object())
+    monkeypatch.setattr(bot, "_register_commands", lambda _: None)
+    monkeypatch.setattr(client.tree, "sync", AsyncMock())
+    monkeypatch.setattr(client, "_maybe_prune", AsyncMock())
+    monkeypatch.setattr(client._heartbeat, "start", Mock())
+    monkeypatch.setattr(client._curated_loop, "start", Mock())
+    await client.setup_hook()
+    client._curated_loop.start.assert_called_once()
+    if interval:
+        assert client._curated_loop.minutes == interval
+        assert client._curated_loop.time is None
+    else:
+        assert client._curated_loop.time[0].hour == 7
 
 
 async def test_notifier_dedupes_within_cooldown():
@@ -133,6 +156,15 @@ def test_curated_quiet_day_is_ok_but_uncertain_delivery_alerts():
     assert _curated_problem("posted") is None
     assert _curated_problem("already posted") is None
     assert _curated_problem("delivery uncertain; manual check required") is not None
+
+
+@pytest.mark.parametrize("status", [
+    "unchanged input; skipped", "spacing deferred", "daily posting limit reached",
+    "observation already in progress", "daily observation limit reached",
+    "observation expired; skipped",
+])
+def test_curated_stream_deferrals_are_normal_outcomes(status):
+    assert _curated_problem(status) is None
 
 
 async def test_scheduled_curated_recovers_after_an_unexpected_tick_error(monkeypatch):

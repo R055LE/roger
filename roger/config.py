@@ -85,9 +85,13 @@ class Settings(BaseSettings):
     # day, so the ops alerting sees a Scout that stopped running.
     scout_max_age_hours: int = 36
 
-    # --- curated single-story posts (off until a channel is configured) ---
+    # --- curated news (off until a channel is configured) ---
     curated_channel_id: int | None = Field(default=None, gt=0)
     curated_hour: int = Field(default=7, ge=0, le=23)
+    curated_check_interval_minutes: int = Field(default=0, ge=0, le=1440)
+    curated_max_posts_per_day: int = Field(default=1, gt=0, le=24)
+    curated_min_spacing_minutes: int = Field(default=60, ge=0, le=1440)
+    curated_max_observations_per_day: int = Field(default=8, gt=0, le=96)
 
     # --- ops ---
     # where Roger posts its boot self-report; None disables the report (logs still fire).
