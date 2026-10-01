@@ -119,8 +119,14 @@ Feature-complete across the planned phases:
   tool and daily token budgets; a full SQLite audit trail.
 - **Ambient** — deadpan chat via `/chat`, any @mention, or any DM, rate-limited per user +
   globally, with a short own-thread memory. No tools, ever.
-- **Curated** — checks Scout's output at 07:00 local time and may post one useful story with source
-  detail and a light take. There is no posting quota. The owner can preview the next decision with
+- **Curated** — defaults to checking Scout's output at 07:00 local time and may post one useful
+  story with source detail and a light take. Set `CURATED_CHECK_INTERVAL_MINUTES` to enable an
+  ongoing stream, bounded by `CURATED_MAX_POSTS_PER_DAY`, `CURATED_MIN_SPACING_MINUTES`,
+  `CURATED_MAX_OBSERVATIONS_PER_DAY`, and the existing model budgets. There is no posting quota.
+  Quiet or rejected input is remembered; changed evidence or model policy allows reconsideration.
+  Transient failures get one retry after an hour; budget deferrals get one on the next local day.
+  `/status` shows remaining allowances, spacing, uncertain deliveries, and the last decisions.
+  The owner can preview the next decision with
   `/roger preview the curated post`; that spends from the curated model budget but does not post or
   mark the story seen. Set `CURATED_CHANNEL_ID` only after reviewing preview quality. See
   [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md) for the Scout boundary.

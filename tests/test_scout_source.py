@@ -210,3 +210,16 @@ async def test_unparseable_published_does_not_crash_the_batch(tmp_path):
         assert batch.entries[0]["published"] is None
     finally:
         await store.close()
+
+
+async def test_frequent_collection_preserves_older_items_in_the_72_hour_window(tmp_path):
+    store = await _store(tmp_path)
+    try:
+        for index in range(288):
+            _write_digest(tmp_path, [_entry(str(index))],
+                          run_id=f"2026-10-01T{index:03d}", age_hours=(287 - index) / 4)
+        await store.mark_seen([("scout:f", str(index)) for index in range(1, 288)])
+        batch = await _collect(tmp_path, store, limit=25)
+        assert [entry["id"] for entry in batch.entries] == ["0"]
+    finally:
+        await store.close()

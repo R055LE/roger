@@ -3,7 +3,7 @@
 Wires the skeleton and the admin brain: a non-privileged connection, the guild-scoped commands, the
 owner gate with audit logging, and message routing. Explicit ``/roger`` requests go to the admin
 brain, which keeps short per-channel memory; DMs, @mentions, and ``/chat`` go to the ambient brain;
-Curated posts run on a configured daily loop.
+Curated posts run on a configured daily or interval loop.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from discord.ext import tasks
 from roger import metrics
 from roger.brains.admin import handle_admin_request
 from roger.brains.ambient import AmbientLimiter, handle_ambient
-from roger.brains.curated import run_curated_job
+from roger.brains.curated import posting_capacity, run_curated_job
 from roger.brains.gigabrain import handle_gigabrain_request, run_gigabrain_suggestion
 from roger.config import Settings, load_settings
 from roger.health import HEARTBEAT_PATH
@@ -355,6 +355,14 @@ def _format_status(
     usd_caps: dict[str, float] | None = None,
     curated_hour: int = 7,
     curated_configured: bool = False,
+    curated_check_interval_minutes: int = 0,
+    curated_max_posts_per_day: int = 1,
+    curated_min_spacing_minutes: int = 60,
+    curated_max_observations_per_day: int = 8,
+    curated_state: dict[str, Any] | None = None,
+    curated_last_check: dict[str, Any] | None = None,
+    curated_last_decision: dict[str, Any] | None = None,
+    curated_last_input: dict[str, Any] | None = None,
 ) -> str:
     """Render the /status readout body (pure). The caller wraps it in a code block."""
     usd_caps = usd_caps or {}
@@ -379,7 +387,33 @@ def _format_status(
         )
     lines.append(f"  {'total':<29}  ${total_cost:.4f}")
     curated = f"{curated_hour:02d}:00 {tz}" if curated_configured else "unconfigured"
+    if curated_configured and curated_check_interval_minutes:
+        curated = f"checks every {curated_check_interval_minutes} min ({tz} daily limits)"
     lines.append(f"curated: {curated}")
+    if curated_configured and curated_state is not None:
+        lines.append(
+            f"curated allowance: {curated_state['remaining_posts']}/{curated_max_posts_per_day} "
+            f"posts; {curated_state['remaining_observations']}/"
+            f"{curated_max_observations_per_day} observations"
+        )
+        lines.append(
+            f"curated spacing: {curated_min_spacing_minutes} min; "
+            f"{curated_state['spacing_remaining_seconds']}s remaining; "
+            f"pending deliveries: {curated_state['pending_deliveries']}"
+        )
+    if curated_last_check:
+        lines.append(f"curated last check: {curated_last_check['status']}")
+    if curated_last_decision and (
+        not curated_last_check or curated_last_decision["status"] != curated_last_check["status"]
+    ):
+        lines.append(f"curated last decision: {curated_last_decision['status']}")
+    if curated_last_input:
+        age = curated_last_input["source_age_hours"]
+        if age is not None:
+            checked_at = datetime.datetime.fromisoformat(curated_last_input["checked_at"])
+            age += (datetime.datetime.now(datetime.UTC) - checked_at).total_seconds() / 3600
+        age_text = f"{age:.1f}h old" if age is not None else "age unknown"
+        lines.append(f"curated last input: {curated_last_input['run_id'] or 'none'} ({age_text})")
     if recent_audit:
         lines.append("recent actions:")
         for row in recent_audit:
@@ -401,6 +435,14 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
     cost = {brain: await store.cost_today(brain) for brain in _BRAINS}
     caps = _daily_caps(settings)
     usd_caps = _daily_usd_caps(settings)
+    now = datetime.datetime.now(datetime.UTC)
+    local_date = now.astimezone(ZoneInfo(settings.tz)).date().isoformat()
+    state = posting_capacity(await store.curated_delivery_state(local_date),
+                             settings, now.timestamp())
+    check = await store.curated_check_state()
+    observations = check["observations"] if check["local_date"] == local_date else 0
+    state["remaining_observations"] = max(0, settings.curated_max_observations_per_day
+                                          - observations)
     return _format_status(
         guild_name=guild_name,
         missing_perms=missing,
@@ -412,6 +454,14 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         recent_audit=await store.fetch_audit(limit=8),
         curated_hour=settings.curated_hour,
         curated_configured=settings.curated_channel_id is not None,
+        curated_check_interval_minutes=settings.curated_check_interval_minutes,
+        curated_max_posts_per_day=settings.curated_max_posts_per_day,
+        curated_min_spacing_minutes=settings.curated_min_spacing_minutes,
+        curated_max_observations_per_day=settings.curated_max_observations_per_day,
+        curated_state=state,
+        curated_last_check=json.loads(await store.get_meta("curated_last_check") or "{}"),
+        curated_last_decision=json.loads(await store.get_meta("curated_last_decision") or "{}"),
+        curated_last_input=json.loads(await store.get_meta("curated_last_input") or "{}"),
         tz=settings.tz,
     )
 
@@ -480,7 +530,11 @@ def _budget_alert(
 
 
 def _curated_problem(status: str) -> str | None:
-    if status in {"posted", "already posted", "no post-worthy items"}:
+    if status in {
+        "posted", "already posted", "no post-worthy items", "unchanged input; skipped",
+        "spacing deferred", "daily posting limit reached", "observation already in progress",
+        "daily observation limit reached", "observation expired; skipped",
+    }:
         return None
     return status
 
@@ -537,14 +591,21 @@ class RogerClient(discord.Client):
             self._metrics_refresh.start()
         # The public news loop stays off until a channel is configured.
         if self.settings.curated_channel_id is not None:
-            self._curated_loop.change_interval(
-                time=datetime.time(
-                    hour=self.settings.curated_hour, tzinfo=ZoneInfo(self.settings.tz)
+            if self.settings.curated_check_interval_minutes:
+                self._curated_loop.change_interval(
+                    minutes=self.settings.curated_check_interval_minutes
                 )
-            )
+                log.info("curated input checked every %d minutes",
+                         self.settings.curated_check_interval_minutes)
+            else:
+                self._curated_loop.change_interval(
+                    time=datetime.time(
+                        hour=self.settings.curated_hour, tzinfo=ZoneInfo(self.settings.tz)
+                    )
+                )
+                log.info("curated input checked daily at %02d:00 %s",
+                         self.settings.curated_hour, self.settings.tz)
             self._curated_loop.start()
-            log.info("curated posting scheduled daily at %02d:00 %s",
-                     self.settings.curated_hour, self.settings.tz)
         # Giga Brain checks its configured interval on each daily tick (§12).
         if self.settings.gigabrain_interval_days > 0:
             self._gigabrain_loop.change_interval(
@@ -716,6 +777,8 @@ class RogerClient(discord.Client):
                 client=self, settings=self.settings, llm=self.llm, store=self.store
             )
             status = str(result.get("status", ""))
+            log.info("scheduled curated outcome: %s",
+                     {key: value for key, value in result.items() if key != "title"})
         except Exception:
             log.exception("scheduled curated post failed unexpectedly")
             status = "unexpected error"

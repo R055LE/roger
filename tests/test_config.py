@@ -31,6 +31,8 @@ _POSITIVE_SETTINGS = [
     "AMBIENT_RATE_PER_USER",
     "AMBIENT_RATE_WINDOW_S",
     "AMBIENT_GLOBAL_HOURLY",
+    "CURATED_MAX_POSTS_PER_DAY",
+    "CURATED_MAX_OBSERVATIONS_PER_DAY",
 ]
 _USD_CAPS = [
     "DAILY_USD_ADMIN",
@@ -152,6 +154,29 @@ def test_curated_defaults(monkeypatch):
     assert settings.curated_review_models == []
     assert settings.daily_tokens_curated == 30_000
     assert settings.daily_usd_curated == 0.0
+    assert settings.curated_check_interval_minutes == 0
+    assert settings.curated_max_posts_per_day == 1
+    assert settings.curated_min_spacing_minutes == 60
+    assert settings.curated_max_observations_per_day == 8
+
+
+@pytest.mark.parametrize("setting", ["CURATED_CHECK_INTERVAL_MINUTES",
+                                     "CURATED_MIN_SPACING_MINUTES"])
+@pytest.mark.parametrize("value", ["-1", "1441"])
+def test_curated_intervals_reject_values_outside_bounds(monkeypatch, setting, value):
+    _set_required(monkeypatch)
+    monkeypatch.setenv(setting, value)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.parametrize("setting, value", [("CURATED_MAX_POSTS_PER_DAY", "25"),
+                                          ("CURATED_MAX_OBSERVATIONS_PER_DAY", "97")])
+def test_curated_daily_limits_reject_values_above_bounds(monkeypatch, setting, value):
+    _set_required(monkeypatch)
+    monkeypatch.setenv(setting, value)
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 @pytest.mark.parametrize("setting", _POSITIVE_SETTINGS)

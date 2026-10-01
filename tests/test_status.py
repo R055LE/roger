@@ -1,5 +1,7 @@
 """Boot self-report and /status readout for the active brains."""
 
+import datetime
+import json
 from types import SimpleNamespace
 
 import discord
@@ -43,6 +45,10 @@ def _settings(**over):
         daily_usd_curated=0.0,
         daily_usd_gigabrain=0.0,
         curated_hour=7,
+        curated_check_interval_minutes=0,
+        curated_max_posts_per_day=1,
+        curated_min_spacing_minutes=60,
+        curated_max_observations_per_day=8,
         curated_channel_id=42,
         ops_channel_id=None,
         gigabrain_channel_id=None,
@@ -150,6 +156,41 @@ async def test_gather_status_reads_active_spend_and_retains_legacy_usage(tmp_pat
         assert await reopened.usage_today("digest") == 30
     finally:
         await reopened.close()
+
+
+async def test_stream_status_reports_allowance_uncertainty_and_last_rejection(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    now = datetime.datetime.now(datetime.UTC)
+    local_date = now.date().isoformat()
+    try:
+        generation = await store.claim_curated_check(now.timestamp())
+        await store.begin_curated_observation(
+            ["version"], generation, now.timestamp(), local_date=local_date, max_observations=8,
+        )
+        await store.claim_curated(local_date, "feed", "item", event_key="event", max_posts=3,
+                                  spacing_seconds=0, generation=generation, now=now.timestamp())
+        await store.set_meta("curated_last_check", json.dumps({
+            "status": "unchanged input; skipped",
+        }))
+        await store.set_meta("curated_last_decision", json.dumps({
+            "status": "unusable model response: evidence missing; skipped",
+        }))
+        await store.set_meta("curated_last_input", json.dumps({
+            "run_id": "test-run", "source_age_hours": 1, "checked_at": now.isoformat(),
+        }))
+        body = await gather_status(
+            store=store, settings=_settings(curated_check_interval_minutes=15,
+                                            curated_max_posts_per_day=3),
+            guild=_fake_guild(channels={42: _FakeChannel()}),
+        )
+        assert "curated: checks every 15 min" in body
+        assert "2/3 posts; 7/8 observations" in body
+        assert "pending deliveries: 1" in body
+        assert "curated last check: unchanged input; skipped" in body
+        assert "curated last decision: unusable model response: evidence missing; skipped" in body
+        assert "test-run (1.0h old)" in body
+    finally:
+        await store.close()
 
 
 async def test_gather_status_reports_channel_and_guild_state(tmp_path):
