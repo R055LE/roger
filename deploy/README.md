@@ -25,7 +25,7 @@ push to main ──▶ GitHub Actions ──▶ ghcr.io/r055le/roger:main
 | File | Role |
 |---|---|
 | `bootstrap.sh` | Install Docker + compose + age + sops + cosign on the host. Idempotent. |
-| `roger-deploy.sh` | Pull + **cosign verify** + `up -d` + prune. Installed as `/usr/local/bin/roger-deploy`. |
+| `roger-deploy.sh` | Pull + **cosign verify** + `up -d`. Installed as `/usr/local/bin/roger-deploy`. |
 | `roger-deploy.service` / `.timer` | systemd oneshot + 5-minute poll timer. |
 | `install-systemd.sh` | Install the above and enable the timer (runs the deploy as the invoking user). |
 
@@ -179,6 +179,10 @@ container port, but no process listens behind it.
   fails **closed**: no cosign, or an unsigned/tampered image, aborts the deploy and the last-good
   container keeps running. `bootstrap.sh` installs cosign; if you enabled the gate on an already-
   provisioned host, install cosign to `/usr/local/bin` first or the timer's deploys will (safely) halt.
+- **Image cleanup.** Pruning belongs in coordinated host maintenance. On a shared Docker daemon,
+  cleanup must hold every image consumer's project lock so it cannot overlap a pull or run. Updating
+  this repository does not update the installed host-side deploy script; install the approved script
+  explicitly before relying on the change.
 - **Later, over a private overlay.** If the host joins a mesh VPN, a push-on-merge deploy
   (Actions → SSH over the overlay) becomes possible without exposing the host. The pull timer is
   a fine permanent fallback either way.
