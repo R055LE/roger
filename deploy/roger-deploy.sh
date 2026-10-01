@@ -36,7 +36,4 @@ cosign verify \
 echo "roger-deploy: applying"
 sops exec-env roger.env 'docker compose up -d'
 
-echo "roger-deploy: pruning superseded images"
-docker image prune -f >/dev/null
-
 echo "roger-deploy: done"
