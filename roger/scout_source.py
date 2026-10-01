@@ -46,7 +46,9 @@ log = logging.getLogger("roger.scout")
 # post or a restart) would be lost for good. The store's
 # seen table does the deduplication, so overlapping windows are free.
 WINDOW_HOURS = 72
-MAX_FILES = 32
+# Covers 72 hours at a 15-minute producer interval (288 runs), with room for
+# restarts/manual runs. The cap still bounds a directory full of damaged files.
+MAX_FILES = 512
 _SUMMARY_CAP = 500  # bounds untrusted feed text before model input
 
 

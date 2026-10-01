@@ -18,7 +18,7 @@ It runs as one process with four independent **brains**, chosen entirely by *who
 |---|---|---|---|
 | **Admin** (§6) | Server concierge — creates channels/roles, sets permissions | Yes | Owner only |
 | **Ambient** (§8) | Deadpan chat persona | None | Anyone |
-| **Curated** (§9) | Daily source-grounded story selection and optional public post | None | n/a |
+| **Curated** (§9) | Source-grounded story selection and optional public post | None | n/a |
 | **Giga Brain** (§12) | Deep, occasional strategic analysis — reviews server state, proposes ideas, never acts | Read-only subset | Owner only |
 
 No agent framework. The admin brain is a hand-rolled tool loop (§6) so every step is inspectable
@@ -108,7 +108,7 @@ at runtime by `sops exec-env`. Nothing is read from a committed file. Notable sh
 One `asyncio` process (`python -m roger`). Non-root, read-only root filesystem, `/tmp` on tmpfs,
 one writable bind mount at `/data` for the SQLite DB. Structured JSON logs to stdout
 (`_JsonFormatter`); discord.py's gateway chatter is pinned to WARNING. `discord.py`'s
-`ext.tasks` drives the optional daily curated loop (§9).
+`ext.tasks` drives the optional daily or interval curated loop (§9).
 
 ## §5 Dispatch & routing
 
@@ -249,12 +249,23 @@ Roger's emerging character (and where a future personality pass would steer it) 
 ## §9 Curated news
 
 Scout writes scored feed items and article excerpts to a read-only digest mount. Roger checks the
-recent output at `CURATED_HOUR=7` in `TZ`, after Scout's 05:30 local run. The loop starts only when
-`CURATED_CHANNEL_ID` is set. A quiet day is an ordinary result, with no quota to fill.
+recent output at `CURATED_HOUR=7` in `TZ` by default, after Scout's 05:30 local run. A positive
+`CURATED_CHECK_INTERVAL_MINUTES` enables regular observation instead. The loop starts only when
+`CURATED_CHANNEL_ID` is set. Output follows useful developments, with no quota to fill.
 
 - `collect_from_scout` reads a rolling 72-hour window, dedupes overlapping runs, and reports a
   missing or stale producer as a distinct status for ops alerting. Scout owns feed retrieval and
-  public page fetching; Roger only reads the output.
+  public page fetching; Roger only reads the output. The 512-file scan cap covers the window at a
+  proposed 15-minute collection interval (288 runs) with room for manual runs and restarts.
+- A durable check lease admits one observation at a time, including across processes/restarts.
+  The lease lasts 30 minutes and bounds the whole model workflow; an expired worker cannot claim
+  a send or overwrite a newer check.
+  Each item version fingerprints its bounded model input, item/source identity, model chains, and
+  editorial prompts. Unchanged quiet/rejected input is skipped without a model call. Changed input
+  or model policy is eligible again. A transient failure gets one retry after an hour; a budget
+  deferral gets one on the next local day. Interrupted observations get one after lease expiry.
+  A quiet or unusable decision defers every admitted candidate version. An accepted selection
+  leaves passed-over items available. Rejection/quiet state never marks a source item seen.
 - The curated model sees at most eight candidates with bounded title, summary, match, and article
   text fields. It must return a strict JSON skip or a draft with two to four facts. Each fact needs
   an exact supporting quote from the supplied source excerpt. Invalid responses make no post.
@@ -266,25 +277,38 @@ recent output at `CURATED_HOUR=7` in `TZ`, after Scout's 05:30 local run. The lo
   question, plus a source link. Discord mentions are suppressed. The owner can call
   `preview_curated` to inspect the decision and supporting quotes without posting or marking an
   item seen; preview still spends from the curated model budget.
-- `curated_delivery` reserves the local date and marks the chosen Scout item seen before sending.
+- `CURATED_MAX_OBSERVATIONS_PER_DAY` defaults to eight admitted observations, each with at most five
+  completion calls (including repairs and reviews). Unchanged input doesn't use this allowance.
+  All completions still pass the existing token/dollar gates. The allowance bounds calls even when
+  a provider doesn't report usage. Owner previews spend the same model budget but are explicit
+  requests and don't consume stream observation state.
+- `curated_delivery` reserves the item/event, local-day allowance and spacing, then marks the
+  chosen Scout item seen before sending. Capacity counts pending claims as potentially delivered.
+  Spacing uses UTC elapsed time across midnight and DST, while daily limits follow `TZ`.
   A successful send records the Discord message ID. If sending has an uncertain outcome, the
   reservation stays pending and Roger will not retry automatically; an operator must reconcile it.
-  This prevents duplicate posts after a timeout or crash. Only one public send can be claimed per
-  local date.
+  This prevents duplicate posts after a timeout or crash. The default is still one public send per
+  local date; `CURATED_MAX_POSTS_PER_DAY` and `CURATED_MIN_SPACING_MINUTES` configure stream ceilings.
+  Event identity currently uses the source URL without its fragment, with a lowercase host; #100
+  will extend it for developing stories. `/status` and sanitized job outcomes report allowances,
+  spacing, pending deliveries, last input age, and recent check/editorial outcomes.
 
 Historical Digest and Spark usage rows remain in SQLite after those jobs and tools are retired.
 
 ## §10 Persistence
 
-`aiosqlite` in WAL mode, one file under `/data`. The full schema is created up front so new
-behaviour adds rows, not migrations.
+`aiosqlite` in WAL mode, one file under `/data`. Schema creation and idempotent migrations run at
+boot. The former per-date Curated ledger migrates atomically, retaining every sent/pending row and
+its message reference; seen state remains intact.
 
 | Table | Holds |
 |---|---|
 | `audit` | Every admin action + gate rejection — the tamper-evident trail |
 | `usage` | Daily token spend per brain — drives the budget gate (§11) |
 | `seen` | `(feed_url, entry_id)` dedupe keys for curated news (§9) — `feed_url` holds Scout's feed id, not a URL |
-| `curated_delivery` | One public send claim and delivery state per local date (§9) |
+| `curated_delivery` | Item/event send claims and delivery state, counted by local date (§9) |
+| `curated_check` | Singleton observation lease and daily admission count (§9) |
+| `curated_observation` | Item-version decisions and bounded retry state, retained seven days (§9) |
 | `ambient_log` | Ambient own-thread memory, per user+channel (§8) |
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |

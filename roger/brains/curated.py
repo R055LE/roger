@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import datetime
+import hashlib
 import json
 import logging
+import math
 import re
+import time
 from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -17,7 +21,7 @@ from openai import OpenAIError
 from roger.identity import ROGER_IDENTITY
 from roger.llm import LLM, BudgetExceeded, LLMConfigError
 from roger.scout_source import collect_from_scout
-from roger.store import Store
+from roger.store import CURATED_CHECK_LEASE_SECONDS, Store
 
 log = logging.getLogger("roger.curated")
 
@@ -102,7 +106,7 @@ def _safe_link(value: object) -> str | None:
     return link
 
 
-def eligible(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def eligible(entries: list[dict[str, Any]], *, limit: int = MAX_CANDIDATES) -> list[dict[str, Any]]:
     out = []
     for entry in entries:
         article = entry.get("article")
@@ -113,7 +117,7 @@ def eligible(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not _safe_link(article.get("url")):
             continue
         out.append(entry)
-        if len(out) == MAX_CANDIDATES:
+        if len(out) == limit:
             break
     return out
 
@@ -359,63 +363,200 @@ def _embed(post: Draft, local_date: str) -> discord.Embed:
     return embed
 
 
+def _event_key(entry: dict[str, Any]) -> str:
+    # #100 can supply a material-development identity. For this first slice,
+    # aliases of the same source URL must not earn another announcement post.
+    url = urlsplit(entry["article"]["url"])
+    return url._replace(netloc=url.netloc.lower(), fragment="").geturl()
+
+
+def _input_fingerprint(entry: dict[str, Any], settings: Any) -> str:
+    data = [entry["feed_url"], entry["id"], _event_key(entry),
+            _format_candidates([entry]), settings.curated_models, settings.curated_review_models,
+            SYSTEM, REVISION, SUPPORT_REVIEW]
+    return hashlib.sha256(json.dumps(data, ensure_ascii=False).encode()).hexdigest()
+
+
+def posting_capacity(state: dict[str, Any], settings: Any, now: float) -> dict[str, Any]:
+    remaining = max(0, settings.curated_max_posts_per_day - state["used"])
+    spacing = max(0.0, (state["last_claim_at"] or 0)
+                  + settings.curated_min_spacing_minutes * 60 - now)
+    status = ""
+    if not remaining:
+        status = "delivery uncertain; manual check required" if state["pending_today"] else (
+            "already posted" if settings.curated_max_posts_per_day == 1
+            else "daily posting limit reached"
+        )
+    elif spacing:
+        status = "spacing deferred"
+    return {"status": status, "remaining_posts": remaining,
+            "pending_deliveries": state["pending_deliveries"],
+            "spacing_remaining_seconds": math.ceil(spacing)}
+
+
 async def run_curated_job(
     *, client: Any, settings: Any, llm: LLM, store: Store,
     now: datetime.datetime | None = None,
 ) -> dict[str, Any]:
+    now = now or datetime.datetime.now(datetime.UTC)
+    started = time.monotonic()
+    timezone = ZoneInfo(settings.tz)
+    source: dict[str, Any] = {}
+    observed = False
+
+    def clock() -> datetime.datetime:
+        return now + datetime.timedelta(seconds=time.monotonic() - started)
+
+    async def result(status: str, **details: Any) -> dict[str, Any]:
+        checked = clock()
+        local_date = checked.astimezone(timezone).date().isoformat()
+        state = await store.curated_delivery_state(local_date)
+        check = await store.curated_check_state()
+        observations = check["observations"] if check["local_date"] == local_date else 0
+        outcome = posting_capacity(state, settings, checked.timestamp()) | source | details | {
+            "status": status, "checked_at": checked.isoformat(),
+            "remaining_observations": max(0, settings.curated_max_observations_per_day
+                                          - observations),
+        }
+        if source.get("source_age_hours") is not None:
+            outcome["source_age_hours"] += (checked - now).total_seconds() / 3600
+        sanitized = {key: value for key, value in outcome.items() if key != "title"}
+        await store.set_meta("curated_last_check", json.dumps(sanitized))
+        if "run_id" in source:
+            await store.set_meta("curated_last_input", json.dumps({
+                "run_id": source["run_id"], "source_age_hours": outcome["source_age_hours"],
+                "checked_at": checked.isoformat(),
+            }))
+        if observed:
+            await store.set_meta("curated_last_decision", json.dumps(sanitized))
+        return outcome
+
     channel_id = settings.curated_channel_id
     if channel_id is None:
-        return {"status": "curated posting not configured"}
+        return await result("curated posting not configured")
     channel = client.get_channel(channel_id)
     if channel is None or not callable(getattr(channel, "send", None)):
-        return {"status": "curated channel not postable"}
+        return await result("curated channel not postable")
 
-    now = now or datetime.datetime.now(datetime.UTC)
-    local_date = now.astimezone(ZoneInfo(settings.tz)).date().isoformat()
-    existing = await store.curated_delivery(local_date)
-    if existing:
-        return {"status": "already posted" if existing["status"] == "sent"
-                else "delivery uncertain; manual check required"}
+    state = await store.curated_delivery_state(now.astimezone(timezone).date().isoformat())
+    capacity = posting_capacity(state, settings, now.timestamp())
+    if capacity["status"]:
+        return await result(capacity["status"])
+    check = await store.curated_check_state()
+    if check["local_date"] == now.astimezone(timezone).date().isoformat() and (
+        check["observations"] >= settings.curated_max_observations_per_day
+    ):
+        return await result("daily observation limit reached")
 
     batch = await collect_from_scout(
         settings.scout_digest_path, store,
         max_age_hours=settings.scout_max_age_hours, limit=25, now=now,
     )
+    source = {"run_id": batch.newest_run_id, "source_age_hours": batch.age_hours}
     if batch.status:
-        return {"status": batch.status}
-    if not batch.entries:
-        return {"status": "no post-worthy items"}
+        return await result(batch.status)
+    candidates = eligible(batch.entries, limit=25)
+    covered = await store.curated_event_keys([_event_key(entry) for entry in candidates])
+    candidates = [entry for entry in candidates if _event_key(entry) not in covered]
+    if not candidates:
+        return await result("no post-worthy items")
+    lease_started_at = clock().timestamp()
+    generation = await store.claim_curated_check(lease_started_at)
+    if generation is None:
+        return await result("observation already in progress")
     try:
-        post = await draft(batch.entries, llm)
-    except BudgetExceeded:
-        return {"status": "budget exceeded; skipped"}
-    except LLMConfigError:
-        return {"status": "curated brain not configured"}
-    except OpenAIError:
-        log.exception("curated model request failed")
-        return {"status": "model request failed; skipped"}
-    except DraftError as exc:
-        log.warning("curated model response rejected: %s", exc)
-        return {"status": f"unusable model response: {exc}; skipped"}
-    if post is None:
-        return {"status": "no post-worthy items"}
+        keyed = [(_input_fingerprint(entry, settings), entry) for entry in candidates]
+        records = await store.curated_observations([key for key, _ in keyed])
+        ready = []
+        for key, entry in keyed:
+            record = records.get(key)
+            if record is None or record["status"] == "available" or (
+                record["status"] in {"processing", "transient", "budget"}
+                and record["failures"] < 2 and record["retry_at"] <= clock().timestamp()
+            ):
+                ready.append((key, entry))
+            if len(ready) == MAX_CANDIDATES:
+                break
+        source["candidate_count"] = len(ready)
+        if not ready:
+            return await result("unchanged input; skipped",
+                                previous_outcomes=sorted({r["status"] for r in records.values()}))
+        fingerprints = [key for key, _ in ready]
+        source["input_version"] = hashlib.sha256("".join(fingerprints).encode()).hexdigest()
+        admitted_at = clock()
+        if not await store.begin_curated_observation(
+            fingerprints, generation, admitted_at.timestamp(),
+            local_date=admitted_at.astimezone(timezone).date().isoformat(),
+            max_observations=settings.curated_max_observations_per_day,
+        ):
+            check = await store.curated_check_state()
+            exhausted = check["observations"] >= settings.curated_max_observations_per_day
+            return await result("daily observation limit reached" if exhausted
+                                else "observation expired; skipped")
 
-    entry = post.entry
-    if not await store.claim_curated(local_date, entry["feed_url"], entry["id"]):
-        existing = await store.curated_delivery(local_date)
-        return {"status": "already posted" if existing and existing["status"] == "sent"
-                else "delivery uncertain; manual check required"}
-    try:
-        message = await channel.send(
-            embed=_embed(post, local_date), allowed_mentions=discord.AllowedMentions.none()
+        async def finish(status: str, *, retry_at: float = 0) -> None:
+            await store.finish_curated_observation(
+                [(key, status) for key in fingerprints], generation, clock().timestamp(),
+                retry_at=retry_at,
+            )
+
+        observed = True
+        try:
+            remaining = lease_started_at + CURATED_CHECK_LEASE_SECONDS - clock().timestamp()
+            async with asyncio.timeout(max(0, remaining)):
+                post = await draft([entry for _, entry in ready], llm)
+        except BudgetExceeded:
+            local = clock().astimezone(timezone)
+            tomorrow = datetime.datetime.combine(
+                local.date() + datetime.timedelta(days=1), datetime.time(), tzinfo=timezone,
+            )
+            await finish("budget", retry_at=tomorrow.timestamp())
+            return await result("budget exceeded; skipped")
+        except LLMConfigError:
+            await finish("configuration")
+            return await result("curated brain not configured")
+        except (OpenAIError, TimeoutError):
+            log.exception("curated model request failed")
+            await finish("transient", retry_at=clock().timestamp() + 3600)
+            return await result("model request failed; skipped")
+        except DraftError as exc:
+            log.warning("curated model response rejected: %s", exc)
+            await finish("rejected")
+            return await result(f"unusable model response: {exc}; skipped")
+        if post is None:
+            await finish("quiet")
+            return await result("no post-worthy items")
+
+        entry = post.entry
+        publish_at = clock()
+        local_date = publish_at.astimezone(timezone).date().isoformat()
+        delivery_id = await store.claim_curated(
+            local_date, entry["feed_url"], entry["id"], event_key=_event_key(entry),
+            max_posts=settings.curated_max_posts_per_day,
+            spacing_seconds=settings.curated_min_spacing_minutes * 60,
+            generation=generation, now=publish_at.timestamp(),
         )
-        await store.mark_curated_sent(local_date, message.id)
-    except Exception:
-        # The request may have reached Discord even if the reply failed. Keep
-        # the durable claim and require a human check before any retry.
-        log.exception("curated delivery outcome uncertain")
-        return {"status": "delivery uncertain; manual check required"}
-    return {"status": "posted", "title": entry["title"]}
+        if delivery_id is None:
+            await finish("available")
+            state = await store.curated_delivery_state(local_date)
+            return await result(posting_capacity(state, settings, clock().timestamp())["status"]
+                                or "observation expired; skipped")
+        status = "posted"
+        try:
+            message = await channel.send(
+                embed=_embed(post, local_date), allowed_mentions=discord.AllowedMentions.none()
+            )
+            await store.mark_curated_sent(delivery_id, message.id)
+        except Exception:
+            log.exception("curated delivery outcome uncertain")
+            status = "delivery uncertain; manual check required"
+        await store.finish_curated_observation(
+            [(key, "posted" if candidate is entry else "available") for key, candidate in ready],
+            generation, clock().timestamp(),
+        )
+        return await result(status, title=entry["title"])
+    finally:
+        await store.release_curated_check(generation)
 
 
 async def preview_curated_job(*, settings: Any, llm: LLM, store: Store) -> dict[str, Any]:
