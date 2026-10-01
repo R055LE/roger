@@ -92,6 +92,8 @@ class Settings(BaseSettings):
     curated_max_posts_per_day: int = Field(default=1, gt=0, le=24)
     curated_min_spacing_minutes: int = Field(default=60, ge=0, le=1440)
     curated_max_observations_per_day: int = Field(default=8, gt=0, le=96)
+    # Opt in only after developing-story previews have been reviewed.
+    curated_developing_stories: bool = False
 
     # --- ops ---
     # where Roger posts its boot self-report; None disables the report (logs still fire).

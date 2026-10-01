@@ -163,7 +163,9 @@ class MoveChannelArgs(ToolArgs):
 
 
 class PreviewCuratedArgs(ToolArgs):
-    """No arguments — drafts a curated story without posting or marking it seen."""
+    """Draft a curated decision without posting or changing Curated state."""
+
+    developing_stories: bool = False
 
 
 # --------------------------------------------------------------------------- toys (self / read)
@@ -411,7 +413,8 @@ REGISTRY: dict[str, ToolSpec] = {
         name="preview_curated",
         description=(
             "Preview Roger's next curated Scout story or a no-post decision. Uses the curated "
-            "model budget but does not post to a channel or mark an item seen. Owner only."
+            "model budget but does not post or change story, delivery, seen, or observation state. "
+            "Set developing_stories=true to review the opt-in story-memory path. Owner only."
         ),
         args_model=PreviewCuratedArgs,
     ),

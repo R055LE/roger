@@ -257,6 +257,8 @@ recent output at `CURATED_HOUR=7` in `TZ` by default, after Scout's 05:30 local 
   missing or stale producer as a distinct status for ops alerting. Scout owns feed retrieval and
   public page fetching; Roger only reads the output. The 512-file scan cap covers the window at a
   proposed 15-minute collection interval (288 runs) with room for manual runs and restarts.
+  Scout currently fetches articles only when it first reports an item, so a same-page refresh does
+  not prove current state until [Scout #21](https://github.com/R055LE/scout/issues/21) lands.
 - A durable check lease admits one observation at a time, including across processes/restarts.
   The lease lasts 30 minutes and bounds the whole model workflow; an expired worker cannot claim
   a send or overwrite a newer check.
@@ -290,8 +292,15 @@ recent output at `CURATED_HOUR=7` in `TZ` by default, after Scout's 05:30 local 
   This prevents duplicate posts after a timeout or crash. The default is still one public send per
   local date; `CURATED_MAX_POSTS_PER_DAY` and `CURATED_MIN_SPACING_MINUTES` configure stream ceilings.
   Event identity currently uses the source URL without its fragment, with a lowercase host; #100
-  will extend it for developing stories. `/status` and sanitized job outcomes report allowances,
+  extends it only when `CURATED_DEVELOPING_STORIES=true`: validated story decisions may follow a
+  changed source version through the same delivery ledger. `/status` and sanitized job outcomes report allowances,
   spacing, pending deliveries, last input age, and recent check/editorial outcomes.
+- Developing-story mode keeps at most eight Scout sources in an 18,000-character model context,
+  four confirmed prior deliveries, 100 current story pointers, and 500 immutable decisions for 90
+  days. Actual coverage is derived by joining a decision to a `sent` delivery with a message ID;
+  rejected drafts and pending or uncertain sends are excluded. Every rendered field carries exact
+  excerpt citations and passes an independent review. Current mutable claims require a fresh source
+  observation. Preview uses the same checks and model budget while leaving all Curated state alone.
 
 Historical Digest and Spark usage rows remain in SQLite after those jobs and tools are retired.
 
@@ -309,6 +318,8 @@ its message reference; seen state remains intact.
 | `curated_delivery` | Item/event send claims and delivery state, counted by local date (§9) |
 | `curated_check` | Singleton observation lease and daily admission count (§9) |
 | `curated_observation` | Item-version decisions and bounded retry state, retained seven days (§9) |
+| `curated_story` | Bounded current source pointers and unresolved questions for stable source event IDs (§9) |
+| `curated_story_decision` | Immutable story actions, reasons, changes, claims, and exact source snapshots, retained 90 days (§9) |
 | `ambient_log` | Ambient own-thread memory, per user+channel (§8) |
 | `admin_log` | Owner admin conversation memory, per channel (§6) |
 | `gigabrain_log` | Owner gigabrain conversation memory, per channel (§12) |

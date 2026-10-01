@@ -63,9 +63,22 @@ class ScoutBatch:
 def _to_struct_time(value: object) -> time.struct_time | None:
     """Scout emits ISO-8601; collection sorts on ``time.struct_time`` like feedparser."""
     try:
-        return datetime.datetime.fromisoformat(str(value)).timetuple()
+        parsed = datetime.datetime.fromisoformat(str(value))
+        if parsed.tzinfo is None:
+            return None
+        return parsed.astimezone(datetime.UTC).timetuple()
     except (TypeError, ValueError):
         return None
+
+
+def _aware_datetime(value: object) -> datetime.datetime | None:
+    try:
+        parsed = datetime.datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(datetime.UTC)
 
 
 def _entry_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
@@ -88,11 +101,15 @@ def _entry_from_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "link": link,
         "summary": str(item.get("summary") or "")[:_SUMMARY_CAP],
         "published": _to_struct_time(item.get("published")),
+        "published_at": (
+            published.isoformat() if (published := _aware_datetime(item.get("published"))) else None
+        ),
         # Carried through so the model is told why an item surfaced. This is the
         # whole point of consuming a scored source instead of a raw feed.
         "relevance": int(item.get("relevance") or 0),
         "matched": item.get("matched") or [],
         "article": item.get("article") if isinstance(item.get("article"), dict) else {},
+        "observed_at": item.get("_scout_observed_at"),
     }
 
 
@@ -122,17 +139,17 @@ def _read_digests(
             # One bad digest must not cost us the readable ones.
             log.warning("skipping unreadable scout digest %s: %s", path.name, exc)
             continue
-        started = None
-        try:
-            started = datetime.datetime.fromisoformat(payload["run"]["started_at"])
-        except (KeyError, TypeError, ValueError):
-            pass
+        started = _aware_datetime((payload.get("run") or {}).get("started_at"))
         if started is not None:
             if newest_started is None:
                 newest_started = started
             if started < cutoff:
                 break
-        items.extend(payload.get("items") or [])
+        for item in payload.get("items") or []:
+            if isinstance(item, dict):
+                item = dict(item)
+                item["_scout_observed_at"] = started.isoformat() if started else None
+                items.append(item)
 
     age_hours = None
     if newest_started is not None:
@@ -148,6 +165,7 @@ async def collect_from_scout(
     limit: int,
     now: datetime.datetime | None = None,
     include_seen: bool = False,
+    prefer_latest_source: bool = False,
 ) -> ScoutBatch:
     """Collect unseen Scout items, newest and highest-scoring first.
 
@@ -156,6 +174,9 @@ async def collect_from_scout(
     eligible for the digest roundup.
     """
     now = now or datetime.datetime.now(datetime.UTC)
+    if now.tzinfo is None:
+        return ScoutBatch([], None, None, "scout observation time is invalid")
+    now = now.astimezone(datetime.UTC)
     # Off the event loop: the files are tiny, but a stalled mount would
     # otherwise block every other brain in the process.
     if not await asyncio.to_thread(digest_dir.exists):
@@ -177,13 +198,26 @@ async def collect_from_scout(
         if entry is None:
             continue
         current = best.get(entry["id"])
-        if current is None or entry["relevance"] > current["relevance"]:
+        entry_observed = _aware_datetime(entry.get("observed_at"))
+        current_observed = _aware_datetime(current.get("observed_at")) if current else None
+        latest_ok = (
+            prefer_latest_source
+            and entry["article"].get("status") == "ok"
+            and (current is None or current["article"].get("status") != "ok"
+                 or (entry_observed is not None and current_observed is not None
+                     and entry_observed > current_observed))
+        )
+        if current is None or latest_ok or (
+            not prefer_latest_source and entry["relevance"] > current["relevance"]
+        ):
             if current and current["article"].get("status") == "ok" and \
                     entry["article"].get("status") != "ok":
                 entry["article"] = current["article"]
+                entry["observed_at"] = current["observed_at"]
             best[entry["id"]] = entry
         elif current["article"].get("status") != "ok" and entry["article"].get("status") == "ok":
             current["article"] = entry["article"]
+            current["observed_at"] = entry["observed_at"]
 
     if include_seen:
         entries = list(best.values())

@@ -141,6 +141,65 @@ async def test_duplicate_across_runs_keeps_the_higher_score(tmp_path):
         await store.close()
 
 
+async def test_developing_story_collection_prefers_latest_successful_source_version(tmp_path):
+    store = await _store(tmp_path)
+    try:
+        older = _write_digest(
+            tmp_path, [_entry("dup")], run_id="2026-09-01T00:00:00Z-a", age_hours=5,
+        )
+        newer = _write_digest(
+            tmp_path, [_entry("dup")], run_id="2026-09-02T00:00:00Z-b", age_hours=1,
+        )
+        for run_id, text, relevance in ((older, "old source version", 9),
+                                         (newer, "new source version", 1)):
+            path = tmp_path / "digests" / f"{run_id}.json"
+            payload = json.loads(path.read_text())
+            payload["items"][0]["article"] = {
+                "status": "ok", "url": "https://example.org/dup", "text": text,
+            }
+            payload["items"][0]["relevance"] = relevance
+            path.write_text(json.dumps(payload))
+        batch = await collect_from_scout(
+            tmp_path / "digests", store, max_age_hours=36, limit=50,
+            include_seen=True, prefer_latest_source=True,
+        )
+        assert batch.entries[0]["article"]["text"] == "new source version"
+        assert batch.entries[0]["observed_at"] > ""
+    finally:
+        await store.close()
+
+
+async def test_article_fallback_keeps_its_actual_observation_time(tmp_path):
+    store = await _store(tmp_path)
+    try:
+        older = _write_digest(
+            tmp_path, [_entry("dup")], run_id="2026-09-01T00:00:00Z-a", age_hours=5,
+        )
+        newer = _write_digest(
+            tmp_path, [_entry("dup")], run_id="2026-09-02T00:00:00Z-b", age_hours=1,
+        )
+        old_path = tmp_path / "digests" / f"{older}.json"
+        old_payload = json.loads(old_path.read_text())
+        old_payload["items"][0]["article"] = {
+            "status": "ok", "url": "https://example.org/dup", "text": "captured old article",
+        }
+        old_path.write_text(json.dumps(old_payload))
+        new_path = tmp_path / "digests" / f"{newer}.json"
+        new_payload = json.loads(new_path.read_text())
+        new_payload["items"][0]["relevance"] = 9
+        new_path.write_text(json.dumps(new_payload))
+
+        batch = await collect_from_scout(
+            tmp_path / "digests", store, max_age_hours=36, limit=50,
+            include_seen=True, prefer_latest_source=True,
+        )
+        assert batch.entries[0]["article"]["text"] == "captured old article"
+        assert batch.entries[0]["observed_at"] == old_payload["run"]["started_at"]
+        assert batch.entries[0]["observed_at"] != new_payload["run"]["started_at"]
+    finally:
+        await store.close()
+
+
 async def test_a_damaged_digest_does_not_cost_the_readable_ones(tmp_path):
     store = await _store(tmp_path)
     try:
@@ -208,6 +267,27 @@ async def test_unparseable_published_does_not_crash_the_batch(tmp_path):
         }))
         batch = await _collect(tmp_path, store)
         assert batch.entries[0]["published"] is None
+    finally:
+        await store.close()
+
+
+async def test_published_offset_is_normalized_without_changing_the_instant(tmp_path):
+    store = await _store(tmp_path)
+    try:
+        started = datetime.datetime.now(datetime.UTC)
+        path = tmp_path / "digests"
+        path.mkdir()
+        (path / "2026-10-02T03:00:00Z.json").write_text(json.dumps({
+            "run": {"run_id": "offset", "started_at": started.isoformat()},
+            "items": [{
+                "native_id": "a", "url": "https://example.org/a", "title": "t",
+                "summary": "s", "published": "2026-10-01T23:00:00-04:00", "relevance": 3,
+                "matched": [], "extra": {"feed": "f"}, "source": "rss",
+            }],
+        }))
+        batch = await _collect(tmp_path, store)
+        assert batch.entries[0]["published_at"] == "2026-10-02T03:00:00+00:00"
+        assert batch.entries[0]["published"].tm_mday == 2
     finally:
         await store.close()
 
