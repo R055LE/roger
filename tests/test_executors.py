@@ -1659,13 +1659,17 @@ async def test_curated_preview_tool_delegates_without_a_client(monkeypatch):
 
     captured = {}
 
-    async def fake_preview(*, settings, llm, store):
-        captured.update(settings=settings, llm=llm, store=store)
+    async def fake_preview(*, settings, llm, store, developing_stories):
+        captured.update(settings=settings, llm=llm, store=store,
+                        developing_stories=developing_stories)
         return {"status": "no post-worthy items"}
 
     monkeypatch.setattr("roger.brains.curated.preview_curated_job", fake_preview)
     assert REGISTRY["preview_curated"].requires_confirm is False
     ctx = ToolContext(llm="llm", store="store", settings="settings", client="client")
     result = await preview_curated(guild=None, args=PreviewCuratedArgs(), ctx=ctx)
-    assert captured == {"settings": "settings", "llm": "llm", "store": "store"}
+    assert captured == {
+        "settings": "settings", "llm": "llm", "store": "store",
+        "developing_stories": False,
+    }
     assert result == {"status": "no post-worthy items"}

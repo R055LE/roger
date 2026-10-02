@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS curated_delivery (
     event_key  TEXT NOT NULL UNIQUE,
     status     TEXT NOT NULL,
     message_id TEXT,
+    message_url TEXT,
+    story_decision_id INTEGER,
+    story_ids_json TEXT,
     ts         REAL NOT NULL
 )
 """
@@ -73,6 +76,25 @@ CREATE TABLE IF NOT EXISTS curated_observation (
     failures    INTEGER NOT NULL,
     retry_at    REAL NOT NULL,
     ts          REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS curated_story (
+    story_id   TEXT PRIMARY KEY,
+    data_json  TEXT NOT NULL,
+    ts         REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS curated_story_decision (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    action         TEXT NOT NULL,
+    reason_json    TEXT NOT NULL,
+    change_json    TEXT NOT NULL,
+    story_ids_json TEXT NOT NULL,
+    claims_json    TEXT NOT NULL,
+    sources_json   TEXT NOT NULL,
+    event_key      TEXT,
+    correction_of  INTEGER,
+    ts             REAL NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS usage (
@@ -119,6 +141,85 @@ CREATE TABLE IF NOT EXISTS meta (
 
 CURATED_CHECK_LEASE_SECONDS = 30 * 60
 
+_CLAIM_CURATED_SQL = """
+WITH selected AS (
+    SELECT id, action, event_key, story_ids_json
+    FROM curated_story_decision
+    WHERE id = :decision_id
+)
+INSERT OR IGNORE INTO curated_delivery
+    (local_date, feed_url, entry_id, event_key, status, story_decision_id,
+     story_ids_json, ts)
+SELECT :local_date, :feed_url, :entry_id, :event_key, 'pending', :decision_id,
+       (SELECT story_ids_json FROM selected), :now
+WHERE (SELECT COUNT(*) FROM curated_delivery WHERE local_date = :local_date) < :max_posts
+  AND NOT EXISTS (SELECT 1 FROM curated_delivery WHERE ts > :spacing_cutoff)
+  AND NOT EXISTS (
+      SELECT 1 FROM curated_delivery
+      WHERE status = 'pending' AND feed_url = :feed_url AND entry_id = :entry_id
+  )
+  AND (
+      (:decision_id IS NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM curated_delivery WHERE feed_url = :feed_url AND entry_id = :entry_id
+       )
+       AND NOT EXISTS (
+           SELECT 1 FROM seen WHERE feed_url = :feed_url AND entry_id = :entry_id
+       ))
+      OR
+      (:decision_id IS NOT NULL AND EXISTS (
+          SELECT 1 FROM selected sd
+          WHERE sd.action IN ('publish', 'update', 'combine')
+            AND sd.event_key = :event_key
+            AND (sd.action != 'publish' OR NOT EXISTS (
+                SELECT 1 FROM curated_delivery covered
+                WHERE covered.status = 'sent' AND covered.message_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM json_each(sd.story_ids_json) current_story
+                      JOIN json_each(covered.story_ids_json) covered_story
+                        ON covered_story.value = current_story.value
+                  )
+            ))
+            AND NOT EXISTS (
+                SELECT 1 FROM curated_delivery pending
+                WHERE pending.status = 'pending'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM json_each(sd.story_ids_json) current_story
+                      JOIN json_each(pending.story_ids_json) pending_story
+                        ON pending_story.value = current_story.value
+                  )
+            )
+            AND (
+                (sd.action IN ('publish', 'combine')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM curated_delivery
+                     WHERE feed_url = :feed_url AND entry_id = :entry_id
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM seen WHERE feed_url = :feed_url AND entry_id = :entry_id
+                 ))
+                OR
+                (sd.action IN ('update', 'combine') AND EXISTS (
+                    SELECT 1 FROM curated_delivery covered
+                    WHERE covered.status = 'sent' AND covered.message_id IS NOT NULL
+                      AND EXISTS (
+                          SELECT 1
+                          FROM json_each(sd.story_ids_json) current_story
+                          JOIN json_each(covered.story_ids_json) covered_story
+                            ON covered_story.value = current_story.value
+                      )
+                ))
+            )
+      ))
+  )
+  AND EXISTS (
+      SELECT 1 FROM curated_check WHERE generation = :generation AND expires_at > :now
+  )
+RETURNING id
+"""
+
 
 def _today() -> str:
     return time.strftime("%Y-%m-%d")
@@ -136,7 +237,12 @@ RETENTION_DAYS: dict[str, int] = {
     "seen": 90,
     "audit": 365,
     "curated_observation": 7,
+    "curated_story": 90,
+    "curated_story_decision": 90,
 }
+
+CURATED_STORY_LIMIT = 100
+CURATED_STORY_DECISION_LIMIT = 500
 
 
 class Store:
@@ -209,6 +315,16 @@ class Store:
             )
         if not await self._has_column("audit", "request_id"):
             await self._conn.execute("ALTER TABLE audit ADD COLUMN request_id TEXT")
+        if not await self._has_column("curated_delivery", "message_url"):
+            await self._conn.execute("ALTER TABLE curated_delivery ADD COLUMN message_url TEXT")
+        if not await self._has_column("curated_delivery", "story_decision_id"):
+            await self._conn.execute(
+                "ALTER TABLE curated_delivery ADD COLUMN story_decision_id INTEGER"
+            )
+        if not await self._has_column("curated_delivery", "story_ids_json"):
+            await self._conn.execute(
+                "ALTER TABLE curated_delivery ADD COLUMN story_ids_json TEXT"
+            )
 
     async def _has_column(self, table: str, column: str) -> bool:
         # PRAGMA can't be parameterized; `table` is an internal literal, never user input.
@@ -507,6 +623,7 @@ class Store:
     async def claim_curated(
         self, local_date: str, feed_url: str, entry_id: str, *, event_key: str,
         max_posts: int, spacing_seconds: int, generation: int, now: float,
+        story_decision_id: int | None = None,
     ) -> int | None:
         """Atomically reserve capacity, spacing and item/event identity before Discord.
 
@@ -515,38 +632,139 @@ class Store:
         """
         try:
             cursor = await self._conn.execute(
-                "INSERT OR IGNORE INTO curated_delivery "
-                "(local_date, feed_url, entry_id, event_key, status, ts) "
-                "SELECT ?, ?, ?, ?, 'pending', ? WHERE "
-                "(SELECT COUNT(*) FROM curated_delivery WHERE local_date = ?) < ? "
-                "AND NOT EXISTS (SELECT 1 FROM curated_delivery WHERE ts > ?) "
-                "AND NOT EXISTS (SELECT 1 FROM curated_delivery WHERE feed_url = ? "
-                "AND entry_id = ?) AND NOT EXISTS "
-                "(SELECT 1 FROM seen WHERE feed_url = ? AND entry_id = ?) "
-                "AND EXISTS (SELECT 1 FROM curated_check "
-                "WHERE generation = ? AND expires_at > ?)",
-                (local_date, feed_url, entry_id, event_key, now, local_date, max_posts,
-                 now - spacing_seconds, feed_url, entry_id, feed_url, entry_id, generation, now),
+                _CLAIM_CURATED_SQL,
+                {
+                    "local_date": local_date, "feed_url": feed_url, "entry_id": entry_id,
+                    "event_key": event_key, "decision_id": story_decision_id, "now": now,
+                    "max_posts": max_posts, "spacing_cutoff": now - spacing_seconds,
+                    "generation": generation,
+                },
             )
-            if cursor.rowcount != 1:
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
                 await self._conn.commit()
                 return None
             await self._conn.commit()
-            return cursor.lastrowid
+            return int(row[0])
         except Exception:
             await self._conn.rollback()
             raise
 
-    async def mark_curated_sent(self, delivery_id: int, message_id: int) -> None:
+    async def mark_curated_sent(
+        self, delivery_id: int, message_id: int, *, message_url: str | None = None,
+    ) -> None:
         cursor = await self._conn.execute(
-            "UPDATE curated_delivery SET status = 'sent', message_id = ? "
+            "UPDATE curated_delivery SET status = 'sent', message_id = ?, message_url = ? "
             "WHERE id = ? AND status = 'pending'",
-            (str(message_id), delivery_id),
+            (str(message_id), message_url, delivery_id),
         )
         if cursor.rowcount != 1:
             await self._conn.rollback()
             raise RuntimeError("curated delivery claim missing")
         await self._conn.commit()
+
+    async def curated_story_context(
+        self, story_ids: list[str] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        ids = list(dict.fromkeys(story_ids or []))
+        if ids:
+            encoded_ids = json.dumps(ids)
+            cursor = await self._conn.execute(
+                "SELECT story_id, data_json, ts FROM curated_story WHERE "
+                "story_id IN (SELECT value FROM json_each(?)) OR EXISTS ("
+                "SELECT 1 FROM json_each(data_json, '$.sources') source "
+                "WHERE json_extract(source.value, '$.story_id') IN "
+                "(SELECT value FROM json_each(?))) ORDER BY ts DESC LIMIT ?",
+                (encoded_ids, encoded_ids, CURATED_STORY_LIMIT),
+            )
+        else:
+            cursor = await self._conn.execute(
+                "SELECT story_id, data_json, ts FROM curated_story ORDER BY ts DESC LIMIT ?",
+                (CURATED_STORY_LIMIT,),
+            )
+        stories = [
+            {"story_id": row["story_id"], "data": json.loads(row["data_json"]), "ts": row["ts"]}
+            for row in await cursor.fetchall()
+        ]
+        resolved_ids = list(dict.fromkeys([*ids, *(story["story_id"] for story in stories)]))
+        base = (
+            "SELECT sd.*, d.message_id, d.message_url FROM curated_story_decision sd "
+            "JOIN curated_delivery d ON d.story_decision_id = sd.id "
+            "WHERE d.status = 'sent' AND d.message_id IS NOT NULL "
+        )
+        if ids:
+            encoded_resolved_ids = json.dumps(resolved_ids)
+            cursor = await self._conn.execute(
+                "SELECT sd.*, d.message_id, d.message_url FROM curated_story_decision sd "
+                "JOIN curated_delivery d ON d.story_decision_id = sd.id "
+                "WHERE d.status = 'sent' AND d.message_id IS NOT NULL "
+                "AND EXISTS (SELECT 1 FROM json_each(sd.story_ids_json) "
+                "WHERE value IN (SELECT value FROM json_each(?))) "
+                "ORDER BY d.ts DESC LIMIT 4",
+                (encoded_resolved_ids,),
+            )
+        else:
+            cursor = await self._conn.execute(base + "ORDER BY d.ts DESC LIMIT 4")
+        delivered = []
+        for row in await cursor.fetchall():
+            item = dict(row)
+            for key in (
+                "reason_json", "change_json", "story_ids_json", "claims_json", "sources_json",
+            ):
+                item[key.removesuffix("_json")] = json.loads(item.pop(key))
+            delivered.append(item)
+        return {"stories": stories, "delivered": delivered}
+
+    async def record_curated_story_decision(
+        self, decision: dict[str, Any], sources: list[dict[str, Any]], *, now: float,
+    ) -> int:
+        """Append an editorial decision and refresh its bounded current story pointers."""
+        cursor = await self._conn.execute(
+            "INSERT INTO curated_story_decision "
+            "(action, reason_json, change_json, story_ids_json, claims_json, sources_json, "
+            "event_key, correction_of, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (decision["action"], json.dumps(decision["reason"]), json.dumps(decision["change"]),
+             json.dumps(decision["story_ids"]), json.dumps(decision.get("claims", [])),
+             json.dumps(sources), decision.get("event_key"), decision.get("correction_of"), now),
+        )
+        decision_id = int(cursor.lastrowid)
+        citations = [*decision["reason"]["citations"], *decision["change"]["citations"]]
+        for claim in decision.get("claims", []):
+            citations.extend(claim["citations"])
+        cited = {citation["source"] - 1 for citation in citations}
+        pointer_sources = [
+            source for index, source in enumerate(sources)
+            if index in cited or source.get("story_id") in decision["story_ids"]
+        ][:8]
+        data = json.dumps({
+            "sources": pointer_sources,
+            "unresolved_questions": decision.get("unresolved_questions", []),
+            "last_decision_id": decision_id,
+        })
+        await self._conn.executemany(
+            "INSERT INTO curated_story (story_id, data_json, ts) VALUES (?, ?, ?) "
+            "ON CONFLICT(story_id) DO UPDATE SET data_json = excluded.data_json, ts = excluded.ts",
+            [(story_id, data, now) for story_id in decision["story_ids"]],
+        )
+        await self._conn.execute(
+            "DELETE FROM curated_story WHERE story_id IN (SELECT story_id FROM curated_story "
+            "ORDER BY ts DESC LIMIT -1 OFFSET ?)",
+            (CURATED_STORY_LIMIT,),
+        )
+        await self._conn.execute(
+            "DELETE FROM curated_story_decision WHERE id IN "
+            "(SELECT id FROM curated_story_decision ORDER BY ts DESC, id DESC LIMIT -1 OFFSET ?)",
+            (CURATED_STORY_DECISION_LIMIT,),
+        )
+        await self._conn.commit()
+        return decision_id
+
+    async def curated_story_decisions(self) -> list[dict[str, Any]]:
+        cursor = await self._conn.execute(
+            "SELECT * FROM curated_story_decision ORDER BY id"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
 
     # --- retention (§ backlog 1.3) ---
 

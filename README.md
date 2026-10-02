@@ -128,8 +128,13 @@ Feature-complete across the planned phases:
   `/status` shows remaining allowances, spacing, uncertain deliveries, and the last decisions.
   The owner can preview the next decision with
   `/roger preview the curated post`; that spends from the curated model budget but does not post or
-  mark the story seen. Set `CURATED_CHANNEL_ID` only after reviewing preview quality. See
-  [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md) for the Scout boundary.
+  change Curated state. Ask for `preview_curated` with `developing_stories=true` to inspect the
+  bounded story-memory path. It follows confirmed sent reports across source updates, records
+  explicit publish/update/combine/hold/skip decisions, and stays disabled until
+  `CURATED_DEVELOPING_STORIES=true`. Set `CURATED_CHANNEL_ID` only after reviewing preview quality. See
+  [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md) for the Scout boundary. Scout currently
+  fetches only newly reported items; [Scout #21](https://github.com/R055LE/scout/issues/21) tracks
+  same-page refresh evidence.
 
 Runs as a non-root, read-only-rootfs container. More than 300 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder

@@ -448,16 +448,32 @@ async def run_curated_job(
     ):
         return await result("daily observation limit reached")
 
+    story_mode = bool(getattr(settings, "curated_developing_stories", False))
     batch = await collect_from_scout(
         settings.scout_digest_path, store,
         max_age_hours=settings.scout_max_age_hours, limit=25, now=now,
+        include_seen=story_mode, prefer_latest_source=story_mode,
     )
     source = {"run_id": batch.newest_run_id, "source_age_hours": batch.age_hours}
     if batch.status:
         return await result(batch.status)
-    candidates = eligible(batch.entries, limit=25)
-    covered = await store.curated_event_keys([_event_key(entry) for entry in candidates])
-    candidates = [entry for entry in candidates if _event_key(entry) not in covered]
+    story_history: dict[str, list[dict[str, Any]]] = {"stories": [], "delivered": []}
+    story_sources: list[dict[str, Any]] = []
+    if story_mode:
+        from roger.brains import stories
+
+        candidates = batch.entries[:25]
+        story_sources = stories.prepare_sources(
+            candidates, now=now, max_age_hours=settings.scout_max_age_hours,
+        )
+        candidates = [
+            entry for entry in candidates
+            if stories.story_id(entry) in {source["story_id"] for source in story_sources}
+        ]
+    else:
+        candidates = eligible(batch.entries, limit=25)
+        covered = await store.curated_event_keys([_event_key(entry) for entry in candidates])
+        candidates = [entry for entry in candidates if _event_key(entry) not in covered]
     if not candidates:
         return await result("no post-worthy items")
     lease_started_at = clock().timestamp()
@@ -465,7 +481,23 @@ async def run_curated_job(
     if generation is None:
         return await result("observation already in progress")
     try:
-        keyed = [(_input_fingerprint(entry, settings), entry) for entry in candidates]
+        if story_mode:
+            exact_history = await store.curated_story_context(
+                [source["story_id"] for source in story_sources]
+            )
+            recent_history = await store.curated_story_context()
+            story_history = stories.related_history(
+                story_sources, exact_history, recent_history,
+            )
+            story_sources = stories.evidence_bundle(
+                candidates, story_history, now=clock(),
+                max_age_hours=settings.scout_max_age_hours,
+            )
+            keyed = [
+                (stories.input_fingerprint(story_sources, story_history, settings), candidates)
+            ]
+        else:
+            keyed = [(_input_fingerprint(entry, settings), entry) for entry in candidates]
         records = await store.curated_observations([key for key, _ in keyed])
         ready = []
         for key, entry in keyed:
@@ -501,10 +533,18 @@ async def run_curated_job(
             )
 
         observed = True
+        story_decision = None
         try:
             remaining = lease_started_at + CURATED_CHECK_LEASE_SECONDS - clock().timestamp()
             async with asyncio.timeout(max(0, remaining)):
-                post = await draft([entry for _, entry in ready], llm)
+                if story_mode:
+                    story_decision, story_sources = await stories.decide(
+                        candidates, story_history, llm, now=clock(),
+                        max_age_hours=settings.scout_max_age_hours,
+                    )
+                    post = None
+                else:
+                    post = await draft([entry for _, entry in ready], llm)
         except BudgetExceeded:
             local = clock().astimezone(timezone)
             tomorrow = datetime.datetime.combine(
@@ -523,18 +563,62 @@ async def run_curated_job(
             log.warning("curated model response rejected: %s", exc)
             await finish("rejected")
             return await result(f"unusable model response: {exc}; skipped")
-        if post is None:
+        if story_mode and story_decision is not None:
+            story_event_key = stories.event_key(story_decision, story_sources)
+            record = story_decision.record() | {"event_key": story_event_key}
+            decision_id = await store.record_curated_story_decision(
+                record, story_sources, now=clock().timestamp(),
+            )
+            if not story_decision.publishable:
+                await finish("quiet")
+                return await result(
+                    "no post-worthy items", action=story_decision.action,
+                    reason=story_decision.reason["text"], change=story_decision.change["text"],
+                    story_ids=list(story_decision.story_ids), decision_id=decision_id,
+                )
+        elif post is None:
             await finish("quiet")
             return await result("no post-worthy items")
 
-        entry = post.entry
+        if story_mode:
+            cited = [*story_decision.change["citations"]]
+            for claim in story_decision.claims:
+                cited.extend(claim["citations"])
+            cited_ids = {
+                story_sources[citation["source"] - 1]["source_id"] for citation in cited
+            }
+            current_sources = stories.prepare_sources(
+                candidates, now=clock(), max_age_hours=settings.scout_max_age_hours,
+            )
+            chosen = next(
+                (source for source in current_sources if source["source_id"] in cited_ids),
+                current_sources[0],
+            )
+            entry = next(
+                item for item in candidates
+                if item["feed_url"] == chosen["feed_url"] and item["id"] == chosen["entry_id"]
+            )
+            event_key = story_event_key
+        else:
+            entry = post.entry
+            event_key = _event_key(entry)
         publish_at = clock()
         local_date = publish_at.astimezone(timezone).date().isoformat()
+        if story_mode:
+            try:
+                prior_url = stories.prior_url(story_decision, story_history)
+                rendered = stories.embed(story_decision, story_sources, local_date, prior_url)
+            except DraftError as exc:
+                await finish("rejected")
+                return await result(f"unusable model response: {exc}; skipped")
+        else:
+            rendered = _embed(post, local_date)
         delivery_id = await store.claim_curated(
-            local_date, entry["feed_url"], entry["id"], event_key=_event_key(entry),
+            local_date, entry["feed_url"], entry["id"], event_key=event_key,
             max_posts=settings.curated_max_posts_per_day,
             spacing_seconds=settings.curated_min_spacing_minutes * 60,
             generation=generation, now=publish_at.timestamp(),
+            story_decision_id=decision_id if story_mode else None,
         )
         if delivery_id is None:
             await finish("available")
@@ -544,29 +628,69 @@ async def run_curated_job(
         status = "posted"
         try:
             message = await channel.send(
-                embed=_embed(post, local_date), allowed_mentions=discord.AllowedMentions.none()
+                embed=rendered, allowed_mentions=discord.AllowedMentions.none()
             )
-            await store.mark_curated_sent(delivery_id, message.id)
+            message_url = None
+            if story_mode:
+                message_url = (
+                    f"https://discord.com/channels/{settings.guild_id}/{channel_id}/{message.id}"
+                )
+            await store.mark_curated_sent(delivery_id, message.id, message_url=message_url)
         except Exception:
             log.exception("curated delivery outcome uncertain")
             status = "delivery uncertain; manual check required"
-        await store.finish_curated_observation(
-            [(key, "posted" if candidate is entry else "available") for key, candidate in ready],
-            generation, clock().timestamp(),
-        )
+        if story_mode:
+            await finish("posted")
+        else:
+            await store.finish_curated_observation(
+                [(key, "posted" if candidate is entry else "available")
+                 for key, candidate in ready], generation, clock().timestamp(),
+            )
         return await result(status, title=entry["title"])
     finally:
         await store.release_curated_check(generation)
 
 
-async def preview_curated_job(*, settings: Any, llm: LLM, store: Store) -> dict[str, Any]:
+async def preview_curated_job(
+    *, settings: Any, llm: LLM, store: Store, developing_stories: bool = False,
+) -> dict[str, Any]:
     """Spend a curated model call but leave delivery and seen state untouched."""
     batch = await collect_from_scout(
         settings.scout_digest_path, store,
         max_age_hours=settings.scout_max_age_hours, limit=25, include_seen=True,
+        prefer_latest_source=developing_stories,
     )
     if batch.status:
         return {"status": batch.status}
+    if developing_stories:
+        from roger.brains import stories
+
+        now = datetime.datetime.now(datetime.UTC)
+        current_sources = stories.prepare_sources(
+            batch.entries, now=now, max_age_hours=settings.scout_max_age_hours,
+        )
+        exact_history = await store.curated_story_context(
+            [source["story_id"] for source in current_sources]
+        )
+        history = stories.related_history(
+            current_sources, exact_history, await store.curated_story_context(),
+        )
+        try:
+            decision, sources = await stories.decide(
+                batch.entries, history, llm, now=now,
+                max_age_hours=settings.scout_max_age_hours,
+            )
+        except BudgetExceeded:
+            return {"status": "budget exceeded; skipped"}
+        except LLMConfigError:
+            return {"status": "curated brain not configured"}
+        except OpenAIError:
+            log.exception("developing story preview model request failed")
+            return {"status": "model request failed; skipped"}
+        except DraftError as exc:
+            log.warning("developing story preview response rejected: %s", exc)
+            return {"status": f"unusable model response: {exc}; skipped"}
+        return stories.preview(decision, sources, history) | {"run_id": batch.newest_run_id}
     try:
         post = await draft(batch.entries, llm)
     except BudgetExceeded:

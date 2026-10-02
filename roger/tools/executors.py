@@ -809,7 +809,10 @@ async def preview_curated(
         return {"status": "curated preview unavailable in this context"}
     from roger.brains.curated import preview_curated_job
 
-    return await preview_curated_job(settings=ctx.settings, llm=ctx.llm, store=ctx.store)
+    return await preview_curated_job(
+        settings=ctx.settings, llm=ctx.llm, store=ctx.store,
+        developing_stories=args.developing_stories,
+    )
 
 
 # --------------------------------------------------------------------------- toys (self / read)

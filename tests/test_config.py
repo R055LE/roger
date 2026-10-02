@@ -158,6 +158,7 @@ def test_curated_defaults(monkeypatch):
     assert settings.curated_max_posts_per_day == 1
     assert settings.curated_min_spacing_minutes == 60
     assert settings.curated_max_observations_per_day == 8
+    assert settings.curated_developing_stories is False
 
 
 @pytest.mark.parametrize("setting", ["CURATED_CHECK_INTERVAL_MINUTES",
