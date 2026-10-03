@@ -1,12 +1,14 @@
 """LLM wrapper gates — config + budget checks, retry policy, and usage/cost recording."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from openai import APIConnectionError, APIStatusError
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 
+from roger.brains import stories
 from roger.config import Settings
 from roger.llm import LLM, MAX_ATTEMPTS, BudgetExceeded, LLMConfigError, _retry_after_seconds
 from roger.store import Store
@@ -123,6 +125,7 @@ async def test_curated_story_output_ceiling_is_scoped_and_uses_shared_budget(
         assert [call["extra_body"]["models"] for call in calls] == [
             ["a/b"], ["a/b"], ["c/d"],
         ]
+        assert all("response_format" not in call for call in calls)
         assert await store.usage_today("curated") == 30
         assert await store.cost_today("curated") == pytest.approx(0.03)
     finally:
@@ -150,6 +153,92 @@ async def test_curated_story_output_ceiling_rejects_other_purposes(
         with pytest.raises(ValueError, match=message):
             await llm.complete(brain, [{"role": "user", "content": "hi"}], **options)
     finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    ("brain", "options", "tools", "message"),
+    [
+        ("admin", {"curated_story": True}, None, "only available to the curated brain"),
+        ("curated", {}, None, "only available to curated story or review calls"),
+        (
+            "curated", {"curated_story": True, "curated_review": True}, None,
+            "not available to review calls",
+        ),
+        ("curated", {"curated_story": True}, [{"type": "function"}], "not available with tools"),
+    ],
+)
+async def test_response_format_rejects_other_purposes_and_tools(
+    monkeypatch, tmp_path, brain, options, tools, message,
+):
+    _env(monkeypatch, MODEL_ADMIN="a/b", MODEL_CURATED="a/b", MODEL_CURATED_REVIEW="c/d")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        with pytest.raises(ValueError, match=message):
+            await llm.complete(
+                brain,
+                [{"role": "user", "content": "hi"}],
+                tools=tools,
+                response_format={"type": "json_schema"},
+                **options,
+            )
+    finally:
+        await store.close()
+
+
+async def test_sdk_request_serializes_strict_curated_formats_and_provider_filter(
+    monkeypatch, tmp_path,
+):
+    _env(monkeypatch, MODEL_CURATED="draft/model,fallback/model",
+         MODEL_CURATED_REVIEW="review/model")
+    store = await Store(str(tmp_path / "l.db")).open()
+    requests = []
+
+    async def handle(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "test", "object": "chat.completion", "created": 0,
+            "model": requests[-1]["model"],
+            "choices": [{
+                "index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "{}"},
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    try:
+        llm = LLM(Settings(), store)
+        await llm._client.close()
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        llm._client = AsyncOpenAI(
+            api_key="test", base_url="https://openrouter.test/api/v1",
+            max_retries=0, http_client=http_client,
+        )
+        messages = [{"role": "user", "content": "hi"}]
+        await llm.complete(
+            "curated", messages, curated_story=True,
+            response_format=stories.DECISION_RESPONSE_FORMAT,
+        )
+        await llm.complete(
+            "curated", messages, curated_review=True,
+            response_format=stories.REVIEW_RESPONSE_FORMAT,
+        )
+
+        assert [request["model"] for request in requests] == ["draft/model", "review/model"]
+        assert [request["models"] for request in requests] == [
+            ["draft/model", "fallback/model"], ["review/model"],
+        ]
+        assert [request["max_tokens"] for request in requests] == [4096, 900]
+        assert [request["response_format"] for request in requests] == [
+            stories.DECISION_RESPONSE_FORMAT, stories.REVIEW_RESPONSE_FORMAT,
+        ]
+        assert all(
+            request["provider"] == {"require_parameters": True} for request in requests
+        )
+    finally:
+        if "llm" in locals():
+            await llm._client.close()
         await store.close()
 
 

@@ -113,6 +113,7 @@ class LLM:
         *,
         curated_review: bool = False,
         curated_story: bool = False,
+        response_format: dict[str, Any] | None = None,
     ) -> Any:
         if curated_review and brain != "curated":
             raise ValueError("curated review is only available to the curated brain")
@@ -120,6 +121,12 @@ class LLM:
             raise ValueError("curated story output is only available to the curated brain")
         if curated_story and curated_review:
             raise ValueError("curated story output is not available to review calls")
+        if response_format is not None and (
+            brain != "curated" or curated_story == curated_review
+        ):
+            raise ValueError("response format is only available to curated story or review calls")
+        if response_format is not None and tools:
+            raise ValueError("response format is not available with tools")
         chain = self._curated_review_models if curated_review else self._chains[brain]
         if not chain:
             setting = "MODEL_CURATED_REVIEW" if curated_review else f"MODEL_{brain.upper()}"
@@ -139,8 +146,8 @@ class LLM:
                 raise BudgetExceeded(brain, spent, usd_cap, unit="usd")
 
         extra_body: dict[str, Any] = {"models": chain}
-        if tools:
-            # Never route to a provider endpoint that silently lacks tool support.
+        if tools or response_format is not None:
+            # Never route to a provider endpoint that silently lacks a required request feature.
             extra_body["provider"] = {"require_parameters": True}
         effort = self._reasoning_effort.get(brain)
         if effort:
@@ -155,6 +162,8 @@ class LLM:
         }
         if tools:
             kwargs["tools"] = tools
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         metrics.LLM_REQUESTS.labels(brain).inc()
         try:
