@@ -98,6 +98,61 @@ async def test_curated_review_uses_its_model_and_shared_budget(monkeypatch, tmp_
         await store.close()
 
 
+async def test_curated_story_output_ceiling_is_scoped_and_uses_shared_budget(
+    monkeypatch, tmp_path,
+):
+    _env(monkeypatch, MODEL_CURATED="a/b", MODEL_CURATED_REVIEW="c/d")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        calls = []
+
+        async def fake_create(**kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=6, completion_tokens=4, cost=0.01)
+            )
+
+        monkeypatch.setattr(llm._client.chat.completions, "create", fake_create)
+        messages = [{"role": "user", "content": "hi"}]
+        await llm.complete("curated", messages)
+        await llm.complete("curated", messages, curated_story=True)
+        await llm.complete("curated", messages, curated_review=True)
+
+        assert [call["max_tokens"] for call in calls] == [900, 4096, 900]
+        assert [call["extra_body"]["models"] for call in calls] == [
+            ["a/b"], ["a/b"], ["c/d"],
+        ]
+        assert await store.usage_today("curated") == 30
+        assert await store.cost_today("curated") == pytest.approx(0.03)
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    ("brain", "options", "message"),
+    [
+        ("admin", {"curated_story": True}, "only available to the curated brain"),
+        (
+            "curated",
+            {"curated_story": True, "curated_review": True},
+            "not available to review calls",
+        ),
+    ],
+)
+async def test_curated_story_output_ceiling_rejects_other_purposes(
+    monkeypatch, tmp_path, brain, options, message,
+):
+    _env(monkeypatch, MODEL_ADMIN="a/b", MODEL_CURATED="a/b", MODEL_CURATED_REVIEW="c/d")
+    store = await Store(str(tmp_path / "l.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        with pytest.raises(ValueError, match=message):
+            await llm.complete(brain, [{"role": "user", "content": "hi"}], **options)
+    finally:
+        await store.close()
+
+
 async def test_budget_exceeded_before_network(monkeypatch, tmp_path):
     _env(monkeypatch, MODEL_ADMIN="a/b", DAILY_TOKENS_ADMIN="10")
     store = await Store(str(tmp_path / "l.db")).open()

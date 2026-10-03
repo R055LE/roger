@@ -136,21 +136,25 @@ class FakeLLM:
         self.responses = [decision, _review(decision)]
         self.calls = []
 
-    async def complete(self, brain, messages, *, curated_review=False):
-        self.calls.append((brain, curated_review, messages))
+    async def complete(self, brain, messages, *, curated_review=False, curated_story=False):
+        self.calls.append((brain, curated_review, curated_story, messages))
         value = self.responses.pop(0)
         content = json.dumps(value)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content), finish_reason="stop",
+        )])
 
 
 class QueueLLM:
     def __init__(self, *values):
         self.values = list(values)
 
-    async def complete(self, brain, messages, *, curated_review=False):
+    async def complete(self, brain, messages, *, curated_review=False, curated_story=False):
         value = self.values.pop(0)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(value)))]
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=json.dumps(value)), finish_reason="stop",
+            )]
         )
 
 
@@ -159,9 +163,11 @@ class RecordingQueueLLM(QueueLLM):
         super().__init__(*values)
         self.calls = []
 
-    async def complete(self, brain, messages, *, curated_review=False):
-        self.calls.append((brain, curated_review, messages))
-        return await super().complete(brain, messages, curated_review=curated_review)
+    async def complete(self, brain, messages, *, curated_review=False, curated_story=False):
+        self.calls.append((brain, curated_review, curated_story, messages))
+        return await super().complete(
+            brain, messages, curated_review=curated_review, curated_story=curated_story,
+        )
 
 
 @pytest.mark.parametrize(
@@ -264,6 +270,126 @@ async def test_historical_captured_source_previews(
         for citation in claim["citations"]:
             source = result["sources"][citation["source"] - 1]
             assert citation["quote"] in source["excerpt"]
+
+
+async def test_story_accepts_complete_citation_response_larger_than_old_ceiling():
+    quote_a = (
+        "The synthetic benchmark reports complete measurements for the staged cohort, including "
+        "the workload definition, observed result, comparison scope, and explicit limitations."
+    )
+    quote_b = (
+        "The independent fixture confirms the same staged result and states that the comparison "
+        "does not establish performance outside the documented workload and test environment."
+    )
+    entries = [_entry("a", quote_a), _entry("b", quote_b)]
+    ids = [_sid("a"), _sid("b")]
+    decision = _decision(
+        "combine", ids, [(1, quote_a), (2, quote_b)],
+        headline="Two fixture sources document one bounded benchmark result",
+        fact="The sources report a staged benchmark result with explicit scope limits.",
+        why="The independent source makes the result useful without extending its stated scope.",
+    )
+    citations = [_citation(1, quote_a), _citation(2, quote_b)]
+    decision["claims"].extend([
+        {"field": "fact", "text": "The workload definition is part of the reported evidence.",
+         "citations": citations, "mutable": False},
+        {"field": "fact", "text": "The result applies to the documented test environment.",
+         "citations": citations, "mutable": False},
+        {"field": "fact", "text": "The sources state limits on broader comparisons.",
+         "citations": citations, "mutable": False},
+        {"field": "take", "text": "The explicit scope is the useful part of this result.",
+         "citations": citations, "mutable": False},
+    ])
+    encoded = json.dumps(decision)
+    assert len(encoded) > 5_000
+
+    llm = FakeLLM(decision)
+    actual, sources = await stories.decide(
+        entries, {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+    assert actual.publishable
+    assert [(call[1], call[2]) for call in llm.calls] == [(False, True), (True, False)]
+    review_payload = json.loads(llm.calls[1][3][-1]["content"])
+    assert review_payload["decision"]["citation_pool"] == citations
+    assert review_payload["sources"] == stories._source_metadata(sources)
+    assert all("excerpt" not in source for source in review_payload["sources"])
+
+
+@pytest.mark.parametrize("truncated_call", range(4))
+async def test_provider_truncation_stops_each_story_completion_stage(truncated_call):
+    entry = _entry("release", SYNTH_FIRST)
+    decision = _decision("publish", [_sid("release")], [(1, SYNTH_FIRST)])
+    rejected = _review(decision) | {"material_change": False}
+    sequence = [decision, rejected, decision, _review(decision)]
+
+    class TruncatingLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def complete(
+            self, brain, messages, *, curated_review=False, curated_story=False,
+        ):
+            call = len(self.calls)
+            self.calls.append((curated_review, curated_story))
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=json.dumps(sequence[call])),
+                finish_reason="length" if call == truncated_call else "stop",
+            )])
+
+    llm = TruncatingLLM()
+    with pytest.raises(DraftError, match="response was truncated by provider"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+    assert llm.calls == [
+        (False, True), (True, False), (False, True), (True, False),
+    ][:truncated_call + 1]
+
+
+async def test_truncated_story_preview_does_not_review_or_write_state(tmp_path, monkeypatch):
+    entry = _entry("release", SYNTH_FIRST, production=True)
+
+    async def collect(*args, **kwargs):
+        return ScoutBatch([entry], "fixture-run", 1.0, "")
+
+    class TruncatedLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def complete(
+            self, brain, messages, *, curated_review=False, curated_story=False,
+        ):
+            self.calls.append((curated_review, curated_story))
+            decision = _decision("publish", [_sid("release")], [(1, SYNTH_FIRST)])
+            return SimpleNamespace(choices=[SimpleNamespace(
+                message=SimpleNamespace(content=json.dumps(decision)), finish_reason="length",
+            )])
+
+    monkeypatch.setattr("roger.brains.curated.collect_from_scout", collect)
+    llm = TruncatedLLM()
+    store = await Store(str(tmp_path / "roger.db")).open()
+    settings = SimpleNamespace(
+        scout_digest_path=tmp_path, scout_max_age_hours=36,
+        curated_models=["draft"], curated_review_models=["review"],
+    )
+    try:
+        result = await preview_curated_job(
+            settings=settings, llm=llm, store=store, developing_stories=True,
+        )
+        assert result["status"] == (
+            "unusable model response: developing story response was truncated by provider; skipped"
+        )
+        assert llm.calls == [(False, True)]
+        for table in (
+            "curated_story", "curated_story_decision", "curated_delivery", "seen",
+            "curated_observation",
+        ):
+            cursor = await store._conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+            assert (await cursor.fetchone())[0] == 0
+    finally:
+        await store.close()
 
 
 async def test_correction_names_confirmed_error_keeps_history_and_links_prior_message(tmp_path):
@@ -612,6 +738,42 @@ def test_untrusted_unhashable_model_shapes_raise_draft_error(mutation):
         stories.parse_decision(json.dumps(decision), sources, {"stories": [], "delivered": []})
 
 
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("source_id", "invalid citation"),
+        ("plural_facts", "invalid story claim field"),
+        ("uncited_headline_stage", "invalid citations"),
+        ("update_without_history", "update lacks confirmed prior coverage"),
+        ("update_two_ids", "update covers one distinct story"),
+    ],
+)
+def test_observed_invalid_story_shapes_fail_closed(mutation, message):
+    sources = stories.prepare_captured_sources(
+        [_entry("first", SYNTH_FIRST), _entry("second", SYNTH_SECOND)],
+        now=NOW, max_age_hours=36,
+    )
+    decision = _decision("publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)])
+    if mutation == "source_id":
+        decision["reason"]["citations"][0] = {
+            "source_id": sources[0]["source_id"], "quote": SYNTH_FIRST,
+        }
+    elif mutation == "plural_facts":
+        decision["claims"][2]["field"] = "facts"
+    elif mutation == "uncited_headline_stage":
+        decision["claims"][0]["citations"] = []
+        decision["claims"][1]["citations"] = []
+    elif mutation == "update_without_history":
+        decision["action"] = "update"
+    else:
+        decision["action"] = "update"
+        decision["story_ids"].append(sources[1]["story_id"])
+    with pytest.raises(DraftError, match=message):
+        stories.parse_decision(
+            json.dumps(decision), sources, {"stories": [], "delivered": []},
+        )
+
+
 def test_story_identity_dedupes_url_aliases_and_hashes_long_fallbacks():
     first = _entry("a", JEV, url="https://EXAMPLE.test/story#one")
     mirror = {**_entry("different-native-id", JEV, url="https://example.test/story#two"),
@@ -688,7 +850,7 @@ async def test_review_receives_the_exact_cited_span_and_blocks_irrelevant_suppor
         [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
         captured_source_preview=True,
     )
-    review_payload = json.loads(llm.calls[1][2][-1]["content"])
+    review_payload = json.loads(llm.calls[1][3][-1]["content"])
     assert review_payload["decision"]["citation_pool"] == [
         {"source": 1, "quote": irrelevant}
     ]
@@ -751,6 +913,8 @@ def test_max_length_retained_sources_fit_projected_model_history():
     bundle = stories.evidence_bundle(entries, history, now=NOW, max_age_hours=36)
     payload = stories._model_input(bundle, history)
     assert stories._messages(stories.SYSTEM, payload)
+    assert [source["number"] for source in payload["sources"]] == [1, 2, 3]
+    assert all("source_id" not in source for source in payload["sources"])
     source_quotes = [(index, source["excerpt"][:500])
                      for index, source in enumerate(bundle, start=1)]
     decision = stories.parse_decision(
@@ -760,12 +924,111 @@ def test_max_length_retained_sources_fit_projected_model_history():
     )
     projected = stories._decision_projection(decision)
     assert stories._messages(stories.REVIEW, {
-        "decision": projected, "sources": bundle,
+        "decision": projected, "sources": stories._source_metadata(bundle),
         "confirmed_sent": stories._delivered_view(history),
     })
     assert stories._messages(stories.REVISION, {
         "input": payload, "rejected_decision": projected, "review": _review(decision.record()),
     })
+
+
+def test_eight_max_length_current_sources_fit_draft_request_limit():
+    spans = [
+        f"Evidence span {index}: ".ljust(180, chr(ord("A") + index))
+        for index in range(6)
+    ]
+    first_excerpt = "\\" + " ".join(spans) + "z" * 600
+    entries = []
+    for index in range(stories.MAX_SOURCES):
+        entry_id = f"arxiv-se:oai:arXiv.org:2610.{index:05d}v1"
+        entry = _entry(
+            entry_id, first_excerpt if index == 0 else f"Evidence {index} \\" + "x" * 1_700,
+            observed_at="2026-10-02T05:30:28.871599+00:00",
+            published="2026-10-02", url=f"https://arxiv.org/abs/2610.{index:05d}",
+        )
+        entry["feed_url"] = "scout:arxiv-se"
+        entries.append(entry)
+    sources = stories.prepare_sources(
+        entries, now=datetime.datetime(2026, 10, 3, tzinfo=datetime.UTC), max_age_hours=36,
+    )
+    history = {"stories": [], "delivered": []}
+
+    old_projection = {
+        "sources": [
+            {"number": index, **{key: value for key, value in source.items()
+                                  if key != "source_id"}}
+            for index, source in enumerate(sources, 1)
+        ],
+        "stories": [],
+        "confirmed_sent": [],
+    }
+    assert len(stories.SYSTEM) + len(json.dumps(old_projection)) == 18_547
+
+    payload = stories._model_input(sources, history)
+    messages = stories._messages(stories.SYSTEM, payload)
+    assert len(messages[0]["content"]) + len(messages[1]["content"]) == 17_899
+    assert {"source_id", "feed_url", "entry_id"}.issubset(sources[0])
+    assert all(
+        not {"source_id", "feed_url", "entry_id"}.intersection(source)
+        for source in payload["sources"]
+    )
+
+    draft = _decision("publish", [sources[0]["story_id"]], [(1, spans[0])])
+    for value, quote in zip(
+        [draft["reason"], draft["change"], *draft["claims"]], spans, strict=True,
+    ):
+        value["citations"] = [_citation(1, quote)]
+    decision = stories.parse_decision(
+        json.dumps(draft), sources, history,
+    )
+    projected = stories._decision_projection(decision)
+    assert projected["citation_pool"] == [
+        {"source": 1, "quote": quote} for quote in spans
+    ]
+    review = stories._messages(stories.REVIEW, {
+        "decision": projected, "sources": stories._source_metadata(sources),
+        "confirmed_sent": [],
+    })
+    assert len(review[0]["content"]) + len(review[1]["content"]) == 5_263
+    assert all("excerpt" not in source for source in json.loads(review[1]["content"])["sources"])
+    revision_input = stories._revision_input(payload, decision)
+    assert [source["number"] for source in revision_input["sources"]] == [1]
+    assert revision_input["sources"][0]["excerpt"] == sources[0]["excerpt"]
+    revision = stories._messages(stories.REVISION, {
+        "input": revision_input, "rejected_decision": projected,
+        "review": _review(decision.record()),
+    })
+    assert len(revision[0]["content"]) + len(revision[1]["content"]) == 5_951
+
+    noncontiguous_draft = _decision(
+        "publish", [sources[2]["story_id"]], [(8, sources[7]["excerpt"][:180])],
+    )
+    noncontiguous = stories.parse_decision(
+        json.dumps(noncontiguous_draft), sources, history,
+    )
+    noncontiguous_input = stories._revision_input(payload, noncontiguous)
+    assert [source["number"] for source in noncontiguous_input["sources"]] == [3, 8]
+    assert stories._messages(stories.REVISION, {
+        "input": noncontiguous_input,
+        "rejected_decision": stories._decision_projection(noncontiguous),
+        "review": _review(noncontiguous.record()),
+    })
+    reindexed = json.loads(json.dumps(noncontiguous_draft))
+    for value in [reindexed["reason"], reindexed["change"], *reindexed["claims"]]:
+        value["citations"][0]["source"] = 2
+    with pytest.raises(DraftError, match="not an exact source excerpt"):
+        stories.parse_decision(json.dumps(reindexed), sources, history)
+
+    skip = stories.parse_decision(
+        json.dumps(_decision("skip", [], [], reason="No useful development.")), sources, history,
+    )
+    skip_input = stories._revision_input(payload, skip)
+    assert len(skip_input["sources"]) == stories.MAX_SOURCES
+    skip_revision = stories._messages(stories.REVISION, {
+        "input": skip_input, "rejected_decision": stories._decision_projection(skip),
+        "review": _review(skip.record()),
+    })
+    assert len(skip_revision[0]["content"]) + len(skip_revision[1]["content"]) == 17_253
 
 
 def test_related_history_does_not_match_only_on_url_protocol():

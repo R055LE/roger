@@ -31,6 +31,7 @@ log = logging.getLogger("roger.llm")
 # Sampling + output ceilings per brain (§11).
 _TEMPERATURE = {"admin": 0.1, "ambient": 0.8, "gigabrain": 0.3, "curated": 0.3}
 _MAX_TOKENS = {"admin": 1024, "ambient": 300, "gigabrain": 2048, "curated": 900}
+_CURATED_STORY_MAX_TOKENS = 4096
 
 # Retry policy. The SDK maps every status >= 500 to InternalServerError, so that one type covers all
 # 5xx. A hung request must not sit on a deferred Discord interaction, hence the hard timeout too.
@@ -111,9 +112,14 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         *,
         curated_review: bool = False,
+        curated_story: bool = False,
     ) -> Any:
         if curated_review and brain != "curated":
             raise ValueError("curated review is only available to the curated brain")
+        if curated_story and brain != "curated":
+            raise ValueError("curated story output is only available to the curated brain")
+        if curated_story and curated_review:
+            raise ValueError("curated story output is not available to review calls")
         chain = self._curated_review_models if curated_review else self._chains[brain]
         if not chain:
             setting = "MODEL_CURATED_REVIEW" if curated_review else f"MODEL_{brain.upper()}"
@@ -144,7 +150,7 @@ class LLM:
             "model": chain[0],
             "messages": messages,
             "temperature": _TEMPERATURE[brain],
-            "max_tokens": _MAX_TOKENS[brain],
+            "max_tokens": _CURATED_STORY_MAX_TOKENS if curated_story else _MAX_TOKENS[brain],
             "extra_body": extra_body,
         }
         if tools:

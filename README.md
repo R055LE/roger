@@ -131,7 +131,10 @@ Feature-complete across the planned phases:
   change Curated state. Ask for `preview_curated` with `developing_stories=true` to inspect the
   bounded story-memory path. It follows confirmed sent reports across source updates, records
   explicit publish/update/combine/hold/skip decisions, and stays disabled until
-  `CURATED_DEVELOPING_STORIES=true`. Set `CURATED_CHANNEL_ID` only after reviewing preview quality. See
+  `CURATED_DEVELOPING_STORIES=true`. Story drafts and the one allowed revision have a fixed 4,096
+  token output ceiling; legacy Curated drafts and reviews keep the 900-token ceiling, and every
+  call spends from the same Curated daily token and dollar budgets. Set `CURATED_CHANNEL_ID` only
+  after reviewing preview quality. See
   [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md) for the Scout boundary. Scout currently
   fetches only newly reported items; [Scout #21](https://github.com/R055LE/scout/issues/21) tracks
   same-page refresh evidence.
