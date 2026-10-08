@@ -1,0 +1,477 @@
+{
+  "schema_version": 1,
+  "label_status": "author_expected_pending_human_review",
+  "fixed_now": "2026-10-08T12:00:00+00:00",
+  "matrix": {
+    "writer_profiles": ["astra", "sol", "sonnet", "gemini"],
+    "reviewer_profiles": ["sol", "sonnet"],
+    "repeats": 2
+  },
+  "human_rubric": {
+    "rating_scale": {
+      "0": "Unusable: absent, materially wrong, unsupported, or misleading.",
+      "1": "Major edit: the right subject is visible but a substantial rewrite or evidence repair is needed.",
+      "2": "Minor edit: accurate and useful, with a limited clarity, focus, or completeness edit needed.",
+      "3": "Ready: accurate, focused, complete for the evidence, and publishable as written."
+    },
+    "dimensions": {
+      "useful_detail": "Names the concrete capability, limit, availability, or result a reader can act on.",
+      "story_focus": "Covers one development, or a cited relationship for combine, without a distractor.",
+      "what_changed": "States the cited new event, finding, correction, or supported hold reason.",
+      "grounded_commentary": "Separates source facts from interpretation and preserves every qualifier.",
+      "honest_uncertainty": "Names material unknowns and does not convert marketing or silence into fact.",
+      "readable_public_copy": "Uses concise, specific language whose importance is clear on one read."
+    },
+    "hard_failures": [
+      "Any unsupported public fact or material dropped qualifier.",
+      "Wrong action, story identity, delivery history, or correction target.",
+      "Combining an unrelated distractor or inventing a relationship.",
+      "Publishing duplicate or stale evidence as a material change.",
+      "Holding or skipping a case marked reportable."
+    ],
+    "acceptance": "No hard failure and every dimension scores at least 2; ready without edits requires every dimension to score 3.",
+    "rules": [
+      "A parser or reviewer pass is not human acceptance.",
+      "A false hold on a reportable case fails the case.",
+      "Labels and reference decisions were authored for this fixture and still require human review."
+    ]
+  },
+  "cases": [
+    {
+      "id": "straight_release",
+      "now": "2026-10-08T12:00:00+00:00",
+      "description": "A straightforward generally available release.",
+      "max_age_hours": 48,
+      "entries": [
+        {
+          "feed_url": "scout:release.example.test",
+          "id": "atlas-2-release",
+          "published_at": "2026-10-08T09:00:00+00:00",
+          "observed_at": "2026-10-08T09:10:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://release.example.test/atlas-2",
+            "text": "Atlas 2.0 became generally available on October 8, 2026, with signed Linux packages and an offline migration command. The release notes describe the migration command as a local conversion step for existing project files. They list packages for x86-64 and arm64 Linux systems and include checksums beside every download. The maintainers say macOS and Windows packages are still being tested, without promising a date. The document does not compare performance with other tools and gives no adoption figures. Operators can keep Atlas 1.x installed while validating a converted copy."
+          }
+        }
+      ],
+      "history": {"stories": [], "delivered": []},
+      "expected": {
+        "reportable": true,
+        "action": "publish",
+        "supported_conclusions": ["Atlas 2.0 is generally available with signed Linux packages and an offline migration command."],
+        "forbidden_inferences": ["Atlas 2.0 is faster than competitors.", "Windows packages are available."]
+      },
+      "reference_decision": {
+        "action": "publish",
+        "reason": {"text": "Atlas 2.0 is now generally available for Linux.", "citations": [{"source": 1, "quote": "Atlas 2.0 became generally available on October 8, 2026, with signed Linux packages and an offline migration command."}]},
+        "change": {"text": "The release adds signed Linux packages and an offline migration path.", "citations": [{"source": 1, "quote": "Atlas 2.0 became generally available on October 8, 2026, with signed Linux packages and an offline migration command."}]},
+        "story_ids": ["url:a52cb8d5c3e329d711d5d974e9f29901396fe2844f83fef54d48ebf8087acd56"],
+        "claims": [
+          {"field": "headline", "text": "Atlas 2.0 ships for Linux", "citations": [{"source": 1, "quote": "Atlas 2.0 became generally available on October 8, 2026, with signed Linux packages and an offline migration command."}], "mutable": true},
+          {"field": "stage", "text": "rollout", "citations": [{"source": 1, "quote": "Atlas 2.0 became generally available on October 8, 2026, with signed Linux packages and an offline migration command."}], "mutable": true},
+          {"field": "fact", "text": "Signed Linux packages cover x86-64 and arm64.", "citations": [{"source": 1, "quote": "They list packages for x86-64 and arm64 Linux systems and include checksums beside every download."}], "mutable": true},
+          {"field": "why", "text": "Operators can keep Atlas 1.x installed while validating a converted copy.", "citations": [{"source": 1, "quote": "Operators can keep Atlas 1.x installed while validating a converted copy."}], "mutable": false}
+        ],
+        "unresolved_questions": ["When will macOS and Windows packages be ready?"],
+        "correction_of": null
+      }
+    },
+    {
+      "id": "skeptical_marketing",
+      "now": "2026-10-08T12:00:00+00:00",
+      "description": "A useful preview wrapped in an unsupported comparison.",
+      "max_age_hours": 48,
+      "entries": [
+        {
+          "feed_url": "scout:marketing.example.test",
+          "id": "northstar-cache-preview",
+          "published_at": "2026-10-08T08:00:00+00:00",
+          "observed_at": "2026-10-08T08:15:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://marketing.example.test/northstar-cache-preview",
+            "text": "Northstar introduced a preview of its cache controls on October 8, 2026, and published configuration examples for opt-in testing. The controls let testers set a per-project retention window and clear individual cache namespaces. Northstar says its preview is twice as fast as every competing cache, but the post provides no benchmark data or comparison method. The preview is disabled by default and the company asks users to report eviction bugs. General availability, pricing, and compatibility outside the listed Linux test image remain unannounced. The configuration examples use only synthetic projects."
+          }
+        }
+      ],
+      "history": {"stories": [], "delivered": []},
+      "expected": {
+        "reportable": true,
+        "action": "publish",
+        "supported_conclusions": ["Northstar released an opt-in preview with retention and namespace controls."],
+        "forbidden_inferences": ["Northstar is twice as fast as competitors.", "The preview is generally available."]
+      },
+      "reference_decision": {
+        "action": "publish",
+        "reason": {"text": "Northstar has a concrete opt-in cache-control preview worth testing.", "citations": [{"source": 1, "quote": "Northstar introduced a preview of its cache controls on October 8, 2026, and published configuration examples for opt-in testing."}]},
+        "change": {"text": "Testers can now configure retention and clear separate cache namespaces.", "citations": [{"source": 1, "quote": "The controls let testers set a per-project retention window and clear individual cache namespaces."}]},
+        "story_ids": ["url:b5a853bae17844018fea3ec6e1ce329f1cf50f4ffb7ec31cff2f068d9c8dd5d5"],
+        "claims": [
+          {"field": "headline", "text": "Northstar previews cache controls", "citations": [{"source": 1, "quote": "Northstar introduced a preview of its cache controls on October 8, 2026, and published configuration examples for opt-in testing."}], "mutable": true},
+          {"field": "stage", "text": "preview", "citations": [{"source": 1, "quote": "The preview is disabled by default and the company asks users to report eviction bugs."}], "mutable": true},
+          {"field": "fact", "text": "The preview adds per-project retention and namespace clearing.", "citations": [{"source": 1, "quote": "The controls let testers set a per-project retention window and clear individual cache namespaces."}], "mutable": true},
+          {"field": "why", "text": "The broad speed claim has no benchmark data or comparison method.", "citations": [{"source": 1, "quote": "Northstar says its preview is twice as fast as every competing cache, but the post provides no benchmark data or comparison method."}], "mutable": false}
+        ],
+        "unresolved_questions": ["How does the preview perform under a disclosed benchmark?"],
+        "correction_of": null
+      }
+    },
+    {
+      "id": "material_update",
+      "now": "2026-10-08T12:00:00+00:00",
+      "description": "A previously reported project adds a material platform rollout.",
+      "max_age_hours": 48,
+      "entries": [
+        {
+          "feed_url": "scout:updates.example.test",
+          "id": "river-windows-ga",
+          "published_at": "2026-10-08T07:00:00+00:00",
+          "observed_at": "2026-10-08T07:10:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://updates.example.test/river-windows",
+            "text": "River's Windows client became generally available on October 8, 2026, after the Linux client shipped on October 1. The Windows build supports the same encrypted workspace format and can open workspaces created by the Linux release. The vendor documents Windows 11 as the supported operating system and provides signed installer checksums. Windows 10 is not listed. The announcement makes no claim about mobile support or market adoption. Existing Linux workspaces do not need conversion before they are opened on Windows. A seven-day preview preceded this release."
+          }
+        }
+      ],
+      "history": {
+        "stories": [
+          {
+            "story_id": "url:d69b5b52a6a8018d8a2697d1d95cbca0e4bfe8d1b0e3baab028474d436381171",
+            "ts": 1790856000.0,
+            "data": {
+              "last_decision_id": 301,
+              "unresolved_questions": ["When will the Windows client leave preview?"],
+              "sources": [
+                {
+                  "story_id": "url:d69b5b52a6a8018d8a2697d1d95cbca0e4bfe8d1b0e3baab028474d436381171",
+                  "source_id": "river-linux-prior",
+                  "feed_url": "scout:updates.example.test",
+                  "entry_id": "river-linux-ga",
+                  "url": "https://updates.example.test/river-windows",
+                  "published_at": "2026-10-01T07:00:00+00:00",
+                  "observed_at": "2026-10-01T07:10:00+00:00",
+                  "fresh": false,
+                  "excerpt": "River's Linux client became generally available on October 1, 2026. The signed package supports encrypted workspaces on two Linux architectures. The announcement said a Windows build remained in preview and did not give a final release date. Existing preview users could keep their workspace data. The release notes documented installer checksums and an uninstall path. No macOS or mobile build was announced, and the vendor made no claim about market adoption or comparative performance."
+                }
+              ]
+            }
+          }
+        ],
+        "delivered": [
+          {
+            "id": 301,
+            "action": "publish",
+            "reason": {"text": "River shipped its Linux client."},
+            "change": {"text": "Linux became generally available."},
+            "story_ids": ["url:d69b5b52a6a8018d8a2697d1d95cbca0e4bfe8d1b0e3baab028474d436381171"],
+            "claims": [{"field": "headline", "text": "River ships on Linux"}],
+            "correction_of": null,
+            "ts": 1790856000.0,
+            "message_id": "example-message-301",
+            "message_url": "https://discord.example.invalid/channels/example/301",
+            "sources": [
+              {
+                "story_id": "url:d69b5b52a6a8018d8a2697d1d95cbca0e4bfe8d1b0e3baab028474d436381171",
+                "source_id": "river-linux-prior",
+                "feed_url": "scout:updates.example.test",
+                "entry_id": "river-linux-ga",
+                "url": "https://updates.example.test/river-windows",
+                "published_at": "2026-10-01T07:00:00+00:00",
+                "observed_at": "2026-10-01T07:10:00+00:00",
+                "fresh": false,
+                "excerpt": "River's Linux client became generally available on October 1, 2026. The signed package supports encrypted workspaces on two Linux architectures. The announcement said a Windows build remained in preview and did not give a final release date. Existing preview users could keep their workspace data. The release notes documented installer checksums and an uninstall path. No macOS or mobile build was announced, and the vendor made no claim about market adoption or comparative performance."
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "reportable": true,
+        "action": "update",
+        "supported_conclusions": ["River added a generally available Windows 11 client after its Linux release."],
+        "forbidden_inferences": ["Windows shipped before Linux.", "Windows 10 is supported."]
+      },
+      "reference_decision": {
+        "action": "update",
+        "reason": {"text": "River added a generally available Windows client to its earlier Linux release.", "citations": [{"source": 1, "quote": "River's Windows client became generally available on October 8, 2026, after the Linux client shipped on October 1."}]},
+        "change": {"text": "Windows 11 is now supported and opens existing Linux workspaces without conversion.", "citations": [{"source": 1, "quote": "The vendor documents Windows 11 as the supported operating system and provides signed installer checksums."}, {"source": 1, "quote": "Existing Linux workspaces do not need conversion before they are opened on Windows."}]},
+        "story_ids": ["url:d69b5b52a6a8018d8a2697d1d95cbca0e4bfe8d1b0e3baab028474d436381171"],
+        "claims": [
+          {"field": "headline", "text": "River adds a Windows client", "citations": [{"source": 1, "quote": "River's Windows client became generally available on October 8, 2026, after the Linux client shipped on October 1."}], "mutable": true},
+          {"field": "stage", "text": "rollout", "citations": [{"source": 1, "quote": "River's Windows client became generally available on October 8, 2026, after the Linux client shipped on October 1."}], "mutable": true},
+          {"field": "fact", "text": "The signed Windows client supports Windows 11.", "citations": [{"source": 1, "quote": "The vendor documents Windows 11 as the supported operating system and provides signed installer checksums."}], "mutable": true},
+          {"field": "why", "text": "Teams can move the same encrypted workspaces between Linux and Windows.", "citations": [{"source": 1, "quote": "The Windows build supports the same encrypted workspace format and can open workspaces created by the Linux release."}], "mutable": false}
+        ],
+        "unresolved_questions": ["Will River support Windows 10?"],
+        "correction_of": null
+      }
+    },
+    {
+      "id": "correction",
+      "now": "2026-10-08T12:00:00+00:00",
+      "description": "Fresh evidence corrects a confirmed prior capacity claim.",
+      "max_age_hours": 48,
+      "entries": [
+        {
+          "feed_url": "scout:corrections.example.test",
+          "id": "pine-cap-correction",
+          "published_at": "2026-10-08T06:00:00+00:00",
+          "observed_at": "2026-10-08T06:05:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://corrections.example.test/pine-cap",
+            "text": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post. The company says the earlier number counted archived projects and has updated the pricing table. Active projects beyond 60 require the enterprise plan. The correction does not change the storage allowance, user limit, or launch date. Customers who created more than 60 active projects during the first day will receive direct guidance. No other plan limits were revised. The corrected pricing page was observed on October 8, 2026."
+          }
+        }
+      ],
+      "history": {
+        "stories": [
+          {
+            "story_id": "url:f26629c29a623279c70fba3ad8616b003b027b03f960cf386707a78c62a419fb",
+            "ts": 1791374400.0,
+            "data": {
+              "last_decision_id": 401,
+              "unresolved_questions": [],
+              "sources": [
+                {
+                  "story_id": "url:f26629c29a623279c70fba3ad8616b003b027b03f960cf386707a78c62a419fb",
+                  "source_id": "pine-launch-prior",
+                  "feed_url": "scout:corrections.example.test",
+                  "entry_id": "pine-launch",
+                  "url": "https://corrections.example.test/pine-cap",
+                  "published_at": "2026-10-07T06:00:00+00:00",
+                  "observed_at": "2026-10-07T06:05:00+00:00",
+                  "fresh": true,
+                  "excerpt": "Pine launched its team plan on October 7, 2026. The original pricing table stated that the plan supported 100 active projects, ten users, and a fixed storage allowance. The launch page described archived projects separately but did not explain whether they counted toward the active-project limit. Enterprise pricing remained contact-only. The post included no performance comparison or adoption claim. A linked launch summary repeated the stated 100-project limit."
+                }
+              ]
+            }
+          }
+        ],
+        "delivered": [
+          {
+            "id": 401,
+            "action": "publish",
+            "reason": {"text": "Pine launched a team plan."},
+            "change": {"text": "The launch post listed 100 active projects."},
+            "story_ids": ["url:f26629c29a623279c70fba3ad8616b003b027b03f960cf386707a78c62a419fb"],
+            "claims": [{"field": "fact", "text": "The plan supports 100 active projects."}],
+            "correction_of": null,
+            "ts": 1791374400.0,
+            "message_id": "example-message-401",
+            "message_url": "https://discord.example.invalid/channels/example/401",
+            "sources": [
+              {
+                "story_id": "url:f26629c29a623279c70fba3ad8616b003b027b03f960cf386707a78c62a419fb",
+                "source_id": "pine-launch-prior",
+                "feed_url": "scout:corrections.example.test",
+                "entry_id": "pine-launch",
+                "url": "https://corrections.example.test/pine-cap",
+                "published_at": "2026-10-07T06:00:00+00:00",
+                "observed_at": "2026-10-07T06:05:00+00:00",
+                "fresh": true,
+                "excerpt": "Pine launched its team plan on October 7, 2026. The original pricing table stated that the plan supported 100 active projects, ten users, and a fixed storage allowance. The launch page described archived projects separately but did not explain whether they counted toward the active-project limit. Enterprise pricing remained contact-only. The post included no performance comparison or adoption claim. A linked launch summary repeated the stated 100-project limit."
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "reportable": true,
+        "action": "update",
+        "correction_of": 401,
+        "supported_conclusions": ["Pine corrected the active-project limit from 100 to 60."],
+        "forbidden_inferences": ["The storage allowance also changed.", "The corrected limit is 160."]
+      },
+      "reference_decision": {
+        "action": "update",
+        "reason": {"text": "Pine corrected a material limit in its confirmed launch report.", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}]},
+        "change": {"text": "The active-project limit is 60 rather than the previously reported 100.", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}]},
+        "story_ids": ["url:f26629c29a623279c70fba3ad8616b003b027b03f960cf386707a78c62a419fb"],
+        "claims": [
+          {"field": "headline", "text": "Pine corrects its team plan limit", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}], "mutable": true},
+          {"field": "stage", "text": "demonstrated", "citations": [{"source": 1, "quote": "The company says the earlier number counted archived projects and has updated the pricing table."}], "mutable": true},
+          {"field": "fact", "text": "The team plan permits 60 active projects.", "citations": [{"source": 1, "quote": "Active projects beyond 60 require the enterprise plan."}], "mutable": true},
+          {"field": "why", "text": "The active-project capacity changed; storage, users, and launch date did not.", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}, {"source": 1, "quote": "The correction does not change the storage allowance, user limit, or launch date."}], "mutable": false}
+        ],
+        "unresolved_questions": [],
+        "correction_of": 401
+      }
+    },
+    {
+      "id": "legitimate_combine",
+      "now": "2026-10-08T12:00:00+00:00",
+      "description": "Two independently sourced parts of one protocol rollout plus an unrelated distractor.",
+      "max_age_hours": 48,
+      "entries": [
+        {
+          "feed_url": "scout:combine.example.test",
+          "id": "lumen-protocol",
+          "published_at": "2026-10-08T05:00:00+00:00",
+          "observed_at": "2026-10-08T05:10:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://combine.example.test/lumen-protocol",
+            "text": "Lumen published version 1.0 of the Lantern synchronization protocol on October 8, 2026. The specification defines the wire format, conflict markers, and a compatibility test suite. Lumen's announcement names Orbit as the first independent client to pass that public suite. The protocol repository includes fixtures under a permissive license and records the exact suite revision used for the result. Passing the suite does not establish performance, security, or broad adoption. Lumen says two draft sections remain informational and are not required for compatibility."
+          }
+        },
+        {
+          "feed_url": "scout:combine.example.test",
+          "id": "orbit-client",
+          "published_at": "2026-10-08T05:20:00+00:00",
+          "observed_at": "2026-10-08T05:25:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://combine.example.test/orbit-client",
+            "text": "Orbit released an independent Lantern 1.0 client and links to its passing result for Lumen's public compatibility suite. The client can exchange the suite's fixture documents with Lumen's reference implementation. Orbit labels the build a developer preview and advises against production data. Its post does not claim that Lumen sponsored the client or that either project acquired the other. Performance and security review remain outside the compatibility suite. Source code and reproducible build instructions are available for the preview."
+          }
+        },
+        {
+          "feed_url": "scout:distractor.example.test",
+          "id": "ceramic-keyboard",
+          "published_at": "2026-10-08T04:00:00+00:00",
+          "observed_at": "2026-10-08T04:10:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://distractor.example.test/ceramic-keyboard",
+            "text": "Ceramic Keys announced a compact mechanical keyboard with a glazed case and replaceable switches. Preorders open later in October and shipping is estimated for December. The vendor lists three switch options and two case colors. No review samples or independent measurements are available. The case uses a two-piece ceramic shell with a brass mounting plate, while the firmware supports remapping over a wired connection. Replacement switches use a standard hot-swap socket. Regional prices and final shipping quantities remain unannounced."
+          }
+        }
+      ],
+      "history": {"stories": [], "delivered": []},
+      "expected": {
+        "reportable": true,
+        "action": "combine",
+        "supported_conclusions": ["Lumen published Lantern 1.0 and Orbit released an independent client that passed its public suite."],
+        "forbidden_inferences": ["Lumen acquired Orbit.", "The keyboard is part of Lantern."]
+      },
+      "reference_decision": {
+        "action": "combine",
+        "reason": {"text": "The Lantern 1.0 specification and its first independently tested client are one development.", "citations": [{"source": 1, "quote": "Lumen's announcement names Orbit as the first independent client to pass that public suite."}, {"source": 2, "quote": "Orbit released an independent Lantern 1.0 client and links to its passing result for Lumen's public compatibility suite."}]},
+        "change": {"text": "Lantern reached 1.0 with a public suite that Orbit's preview client passed.", "citations": [{"source": 1, "quote": "Lumen published version 1.0 of the Lantern synchronization protocol on October 8, 2026."}, {"source": 2, "quote": "The client can exchange the suite's fixture documents with Lumen's reference implementation."}]},
+        "story_ids": ["url:8a37ed47d48d359e1aa575095bb9bc9afb8c96c28950b7d19a398cf5123ffebd", "url:6782db64ca26f1128b8676730fbe44979b5d747a4041d72c6b187ed6a547a72a"],
+        "claims": [
+          {"field": "headline", "text": "Lantern 1.0 gets an independent client", "citations": [{"source": 1, "quote": "Lumen's announcement names Orbit as the first independent client to pass that public suite."}, {"source": 2, "quote": "Orbit released an independent Lantern 1.0 client and links to its passing result for Lumen's public compatibility suite."}], "mutable": true},
+          {"field": "stage", "text": "demonstrated", "citations": [{"source": 2, "quote": "The client can exchange the suite's fixture documents with Lumen's reference implementation."}], "mutable": true},
+          {"field": "fact", "text": "Orbit passed Lumen's public Lantern compatibility suite.", "citations": [{"source": 1, "quote": "Lumen's announcement names Orbit as the first independent client to pass that public suite."}, {"source": 2, "quote": "Orbit released an independent Lantern 1.0 client and links to its passing result for Lumen's public compatibility suite."}], "mutable": true},
+          {"field": "why", "text": "The compatibility result does not establish performance or security.", "citations": [{"source": 2, "quote": "Performance and security review remain outside the compatibility suite."}], "mutable": false}
+        ],
+        "unresolved_questions": ["Will another independent client pass the suite?"],
+        "correction_of": null
+      }
+    },
+    {
+      "id": "duplicate_stale_hold",
+      "now": "2026-10-08T12:00:00+00:00",
+      "description": "A rewrite of confirmed coverage plus stale, insufficient speculation.",
+      "max_age_hours": 48,
+      "entries": [
+        {
+          "feed_url": "scout:duplicates.example.test",
+          "id": "atlas-guide-rewrite",
+          "published_at": "2026-10-08T03:00:00+00:00",
+          "observed_at": "2026-10-08T03:10:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://duplicates.example.test/atlas-guide",
+            "text": "A community guide walks through the Atlas offline conversion command and installation of the signed Linux packages. It adds screenshots of each terminal step and recommends validating a converted copy before removing Atlas 1.x. The author is a community member and does not cite a new maintainer release, availability change, evaluation, or correction. The guide uses the package checksums and commands from the October 7 maintainer documentation. It presents no measured result, new compatibility claim, or later product event."
+          }
+        },
+        {
+          "feed_url": "scout:stale.example.test",
+          "id": "atlas-rumor",
+          "published_at": "2026-09-20T03:00:00+00:00",
+          "observed_at": "2026-09-20T03:10:00+00:00",
+          "article": {
+            "status": "ok",
+            "url": "https://stale.example.test/atlas-rumor",
+            "text": "An undated forum summary speculates that Atlas might add mobile packages someday, but it cites no maintainer statement, repository change, release artifact, or schedule. The post repeats a user's guess that mobile support would be convenient and discusses possible touch-screen layouts. No build, preview, test result, issue milestone, or availability change is linked. Replies ask whether the maintainers have commented, but none supplies a source. The page snapshot contains no date beyond the forum thread metadata recorded by the collector."
+          }
+        }
+      ],
+      "history": {
+        "stories": [
+          {
+            "story_id": "url:a00ed055ce4af9fc637a4760311c56eaf1106cd8c85a480586dbbbfe15b9f863",
+            "ts": 1791374400.0,
+            "data": {
+              "last_decision_id": 601,
+              "unresolved_questions": ["Will Atlas support another platform?"],
+              "sources": [
+                {
+                  "story_id": "url:a00ed055ce4af9fc637a4760311c56eaf1106cd8c85a480586dbbbfe15b9f863",
+                  "source_id": "atlas-guide-prior",
+                  "feed_url": "scout:duplicates.example.test",
+                  "entry_id": "atlas-guide-original",
+                  "url": "https://duplicates.example.test/atlas-guide",
+                  "published_at": "2026-10-07T03:00:00+00:00",
+                  "observed_at": "2026-10-07T03:10:00+00:00",
+                  "fresh": true,
+                  "excerpt": "Atlas published an offline migration guide on October 7, 2026. The guide described the conversion command, signed Linux packages, and a validation step performed on a copied project. It advised keeping Atlas 1.x installed while checking the converted copy. The source made no mobile announcement and did not promise another platform. It included no benchmark or adoption number. Package checksums and commands were listed beside the Linux installation steps."
+                }
+              ]
+            }
+          }
+        ],
+        "delivered": [
+          {
+            "id": 601,
+            "action": "publish",
+            "reason": {"text": "Atlas published its migration guide."},
+            "change": {"text": "Offline migration instructions became available."},
+            "story_ids": ["url:a00ed055ce4af9fc637a4760311c56eaf1106cd8c85a480586dbbbfe15b9f863"],
+            "claims": [{"field": "fact", "text": "Atlas documents offline conversion."}],
+            "correction_of": null,
+            "ts": 1791374400.0,
+            "message_id": "example-message-601",
+            "message_url": "https://discord.example.invalid/channels/example/601",
+            "sources": [
+              {
+                "story_id": "url:a00ed055ce4af9fc637a4760311c56eaf1106cd8c85a480586dbbbfe15b9f863",
+                "source_id": "atlas-guide-prior",
+                "feed_url": "scout:duplicates.example.test",
+                "entry_id": "atlas-guide-original",
+                "url": "https://duplicates.example.test/atlas-guide",
+                "published_at": "2026-10-07T03:00:00+00:00",
+                "observed_at": "2026-10-07T03:10:00+00:00",
+                "fresh": true,
+                "excerpt": "Atlas published an offline migration guide on October 7, 2026. The guide described the conversion command, signed Linux packages, and a validation step performed on a copied project. It advised keeping Atlas 1.x installed while checking the converted copy. The source made no mobile announcement and did not promise another platform. It included no benchmark or adoption number. Package checksums and commands were listed beside the Linux installation steps."
+              }
+            ]
+          }
+        ]
+      },
+      "expected": {
+        "reportable": false,
+        "action": "hold",
+        "supported_conclusions": ["The guide is duplicate coverage and the mobile rumor is stale and unsupported."],
+        "forbidden_inferences": ["Atlas announced mobile packages.", "A rewrite is a material update."]
+      },
+      "reference_decision": {
+        "action": "hold",
+        "reason": {"text": "The fresh item repeats confirmed coverage, while the mobile speculation is stale and unsupported.", "citations": [{"source": 1, "quote": "The author is a community member and does not cite a new maintainer release, availability change, evaluation, or correction."}, {"source": 2, "quote": "No build, preview, test result, issue milestone, or availability change is linked."}]},
+        "change": {"text": "", "citations": []},
+        "story_ids": ["url:a00ed055ce4af9fc637a4760311c56eaf1106cd8c85a480586dbbbfe15b9f863"],
+        "claims": [],
+        "unresolved_questions": ["Will Atlas publish maintainer-backed evidence for another platform?"],
+        "correction_of": null
+      }
+    }
+  ],
+  "reviewer_fixtures": [
+    {"id": "good_release", "case_id": "straight_release", "seed": "none", "expected": {"review_accept": true, "failing_gates": []}},
+    {"id": "good_skeptical_marketing", "case_id": "skeptical_marketing", "seed": "none", "expected": {"review_accept": true, "failing_gates": []}},
+    {"id": "good_update", "case_id": "material_update", "seed": "none", "expected": {"review_accept": true, "failing_gates": []}},
+    {"id": "good_correction", "case_id": "correction", "seed": "none", "expected": {"review_accept": true, "failing_gates": []}},
+    {"id": "good_combine", "case_id": "legitimate_combine", "seed": "none", "expected": {"review_accept": true, "failing_gates": []}},
+    {"id": "good_hold", "case_id": "duplicate_stale_hold", "seed": "none", "expected": {"review_accept": true, "failing_gates": []}},
+    {"id": "unsupported_claim", "case_id": "straight_release", "seed": "unsupported_claim", "expected": {"review_accept": false, "failing_gates": ["supported"]}},
+    {"id": "dropped_qualifier", "case_id": "skeptical_marketing", "seed": "dropped_qualifier", "expected": {"review_accept": false, "failing_gates": ["supported"]}},
+    {"id": "invented_relationship", "case_id": "legitimate_combine", "seed": "invented_relationship", "expected": {"review_accept": false, "failing_gates": ["supported", "relationship_supported"]}},
+    {"id": "chronology_error", "case_id": "material_update", "seed": "chronology_error", "expected": {"review_accept": false, "failing_gates": ["supported", "chronology_supported"]}},
+    {"id": "stale_claim", "case_id": "duplicate_stale_hold", "seed": "stale_claim", "expected": {"review_accept": false, "failing_gates": ["freshness_supported", "material_change"]}},
+    {"id": "incorrect_correction", "case_id": "correction", "seed": "incorrect_correction", "expected": {"review_accept": false, "failing_gates": ["supported", "correction_supported"]}}
+  ]
+}
