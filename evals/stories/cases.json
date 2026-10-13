@@ -293,7 +293,7 @@
         "claims": [
           {"field": "headline", "text": "Pine corrects its team plan limit", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}], "mutable": true},
           {"field": "stage", "text": "announcement", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}, {"source": 1, "quote": "The company says the earlier number counted archived projects and has updated the pricing table."}], "mutable": true},
-          {"field": "fact", "text": "The team plan permits 60 active projects.", "citations": [{"source": 1, "quote": "Active projects beyond 60 require the enterprise plan."}], "mutable": true},
+          {"field": "fact", "text": "The team plan permits 60 active projects.", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}], "mutable": true},
           {"field": "why", "text": "The reported active-project limit was corrected; storage, users, and launch date did not change.", "citations": [{"source": 1, "quote": "Correction: Pine's team plan supports 60 active projects, not the 100 projects stated in the October 7 launch post."}, {"source": 1, "quote": "The correction does not change the storage allowance, user limit, or launch date."}], "mutable": false}
         ],
         "unresolved_questions": [],
@@ -451,7 +451,7 @@
       },
       "reference_decision": {
         "action": "hold",
-        "reason": {"text": "The fresh item repeats confirmed coverage, while the mobile speculation is stale and unsupported.", "citations": [{"source": 1, "quote": "The author is a community member and does not cite a new maintainer release, availability change, evaluation, or correction."}, {"source": 2, "quote": "An undated forum summary speculates that Atlas might add mobile packages someday, but it cites no maintainer statement, repository change, release artifact, or schedule."}]},
+        "reason": {"text": "The fresh item repeats confirmed coverage, while the mobile speculation is stale and unsupported.", "citations": [{"source": 1, "quote": "The author is a community member and does not cite a new maintainer release, availability change, evaluation, or correction."}, {"source": 1, "quote": "The guide uses the package checksums and commands from the October 7 maintainer documentation. It presents no measured result, new compatibility claim, or later product event."}, {"source": 2, "quote": "An undated forum summary speculates that Atlas might add mobile packages someday, but it cites no maintainer statement, repository change, release artifact, or schedule."}]},
         "change": {"text": "", "citations": []},
         "story_ids": ["url:a00ed055ce4af9fc637a4760311c56eaf1106cd8c85a480586dbbbfe15b9f863"],
         "claims": [],
