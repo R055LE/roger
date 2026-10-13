@@ -1,0 +1,76 @@
+{
+  "checked_at": "2026-10-08",
+  "source": "OpenRouter public model and endpoint catalogs; no paid completion was sent",
+  "profiles": {
+    "astra": {
+      "model": "openai/gpt-6-astra-20260903",
+      "returned_models": [
+        "openai/gpt-6-astra-20260903",
+        "openai/gpt-6-astra"
+      ],
+      "provider": "openai",
+      "provider_display_name": "OpenAI",
+      "service_tier": "default",
+      "pricing_usd_per_million": {"prompt": 10, "completion": 50},
+      "reasoning_effort": "medium",
+      "writer_max_tokens": 16384,
+      "reviewer_max_tokens": 8192,
+      "available": true,
+      "note": "Strong capability baseline."
+    },
+    "sol": {
+      "model": "openai/gpt-6.1-sol-20260929",
+      "returned_models": [
+        "openai/gpt-6.1-sol-20260929",
+        "openai/gpt-6.1-sol"
+      ],
+      "provider": "openai",
+      "provider_display_name": "OpenAI",
+      "service_tier": "default",
+      "pricing_usd_per_million": {"prompt": 2, "completion": 10},
+      "reasoning_effort": "medium",
+      "writer_max_tokens": 16384,
+      "reviewer_max_tokens": 8192,
+      "available": true,
+      "note": "Balanced OpenAI candidate."
+    },
+    "sonnet": {
+      "model": "anthropic/claude-sonnet-5.5-20260928",
+      "returned_models": [
+        "anthropic/claude-sonnet-5.5-20260928",
+        "anthropic/claude-sonnet-5.5"
+      ],
+      "provider": "anthropic",
+      "provider_display_name": "Anthropic",
+      "service_tier": "default",
+      "pricing_usd_per_million": {"prompt": 2, "completion": 10},
+      "reasoning_effort": "medium",
+      "writer_max_tokens": 16384,
+      "reviewer_max_tokens": 8192,
+      "available": true,
+      "note": "Cross-provider writing and judgment candidate."
+    },
+    "gemini": {
+      "model": "google/gemini-3.8-flash-20260902",
+      "returned_models": [
+        "google/gemini-3.8-flash-20260902",
+        "google/gemini-3.8-flash"
+      ],
+      "provider": "google-ai-studio",
+      "provider_display_name": "Google AI Studio",
+      "service_tier": "default",
+      "pricing_usd_per_million": {"prompt": 0.75, "completion": 3.75},
+      "reasoning_effort": "medium",
+      "writer_max_tokens": 16384,
+      "reviewer_max_tokens": 8192,
+      "available": true,
+      "note": "Catalog endpoint status -2 is recorded but uninterpreted; recheck before paid run."
+    }
+  },
+  "notes": [
+    "Every request pins one dated model and one first-party provider, disables fallback, and accepts only the dated ID or its verified canonical base ID.",
+    "Input is reserved at 32768 tokens per call. Output reservations include reasoning tokens and are rounded up to cents per call.",
+    "The Gemini provider choice must be rechecked before a paid run; google-vertex/global requires a separately recorded preflight choice.",
+    "The initial 96-call writer and reviewer matrix has a $28 proposed cap. Two selected pairings allow at most 96 more calls with a $64 proposed cap. Reserve four more calls for separately reviewed held-out current evidence; the exact reservation is 196 calls and $92.60 within a proposed $100 envelope."
+  ]
+}
