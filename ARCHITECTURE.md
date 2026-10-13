@@ -274,7 +274,13 @@ recent output at `CURATED_HOUR=7` in `TZ` by default, after Scout's 05:30 local 
 - A separate reviewer checks every fact against its paired quote. A negative verdict allows one
   revision of the same article, followed by strict parsing and a fresh support review. A malformed
   response or a second negative verdict stops before any delivery claim. All calls share the
-  Curated budget, and failure statuses include a sanitized reason.
+  Curated budget, and failure statuses include a sanitized reason. In developing-story mode, the
+  same review call also sees the exact public embed content and bounded excerpts for the selected
+  stories. It rejects omitted evidence only when the omission changes a rendered claim's identity,
+  scope, conditions, relationship, or strength; concise posts need not repeat unrelated source
+  details. Each omission needs an exact source quote. Missing or invalid completeness evidence
+  fails closed. A revision cannot keep a rejected item unchanged, and its final review must catch
+  dropped material distinctions unless the related public claim was removed or narrowed.
 - The public post contains the chosen title, facts, why it matters, optional light take and natural
   question, plus a source link. Discord mentions are suppressed. The owner can call
   `preview_curated` to inspect the decision and supporting quotes without posting or marking an

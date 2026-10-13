@@ -53,6 +53,16 @@ _CLAIM_SCHEMA = {
     "required": ["field", "text", "citations", "mutable"],
     "additionalProperties": False,
 }
+_MISSING_MATERIAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "concern": {"type": "string"},
+        "source": {"type": "integer"},
+        "quote": {"type": "string"},
+    },
+    "required": ["concern", "source", "quote"],
+    "additionalProperties": False,
+}
 DECISION_RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
@@ -97,11 +107,16 @@ REVIEW_RESPONSE_FORMAT = {
                 "relationship_supported": {"type": "boolean"},
                 "freshness_supported": {"type": "boolean"},
                 "correction_supported": {"type": "boolean"},
+                "materially_complete": {"type": "boolean"},
+                "missing_material": {
+                    "type": "array",
+                    "items": _MISSING_MATERIAL_SCHEMA,
+                },
             },
             "required": [
                 "supported", "material_change", "action_supported",
                 "chronology_supported", "relationship_supported", "freshness_supported",
-                "correction_supported",
+                "correction_supported", "materially_complete", "missing_material",
             ],
             "additionalProperties": False,
         },
@@ -152,23 +167,32 @@ REVIEW = (
     "arrival or compatibility does not establish copying, superiority, adoption, or displacement. "
     "A correction must identify a confirmed prior sent decision, its error, and fresh evidence for "
     "the corrected claim. The decision citation_pool contains each exact quote once; each item "
-    "cites 1-based entries from that pool. Source metadata contains no other excerpt text; judge "
-    "only the cited spans and do not find replacement support. Return "
-    "only schema-valid JSON. supported has one boolean for reason, change, then each claim."
+    "cites 1-based entries from that pool. In completeness_evidence, [cited span N] means the "
+    "verbatim citation_pool entry N was removed there only to avoid duplication. For supported, "
+    "judge an item only from its cited spans; "
+    "completeness_evidence must never rescue an unsupported item. Separately review rendered_post "
+    "as the public reader sees it. Set materially_complete=false only when omitted evidence "
+    "changes "
+    "the apparent identity, scope, conditions, relationship, or strength of a rendered claim. "
+    "Do not require every source detail, unrelated caveat, or discarded vendor claim. For up to "
+    "four material omissions, return a concern of at most 300 characters plus a 40-500 "
+    "character exact quote and its "
+    "original source number from completeness_evidence or citation_pool. A complete post has an "
+    "empty missing_material list. A hold/skip has no public post and is materially_complete with "
+    "no missing_material. Return only schema-valid JSON. supported has one boolean for reason, "
+    "change, then each claim."
 )
 
 _REVISION_RULES = (
-    "Use input story_ids; source=input.sources[].number, never list position. Public "
-    "reason/change/claims "
-    "need exact quotes. Mutable needs fresh "
-    "source. Public: one headline/stage/why, fact+, <=1 take/question; "
+    "Use supplied IDs/source numbers. Exact citations; mutable claims need fresh sources. "
+    "Public: one headline/stage/why, fact+, <=1 take/question; "
     "stage=announcement|preview|rollout|demonstrated|uncertainty. Actions: publish=1 uncovered; "
     "update=1 confirmed; combine=2+ distinct; hold=1+; skip=0+; hold/skip claims=[]. No "
     "confirmed_sent: no update/correction. Correction=update+confirmed correction_of+"
-    "fresh cited change naming old/new. One development; combine needs cited links beyond "
-    "topic/feed; no roundup. Publish change=cited new finding/event. Drop rejected; hold if "
-    "unsupported; "
-    "invent nothing. "
+    "fresh change naming old/new. One development; combine needs a cited link beyond topic. "
+    "Publish change=cited event. Repair or remove rejected items; invent nothing. Keep needed "
+    "distinctions public unless their claim is removed/narrowed. Address missing_material publicly "
+    "or remove/narrow its claim; hold if unsupported. "
     + _OUTPUT_LIMITS
 )
 REVISION = ROGER_IDENTITY + " " + (
@@ -696,53 +720,225 @@ def _decision_projection(decision: StoryDecision) -> dict[str, Any]:
     return {"citation_pool": citation_pool, **projected}
 
 
+def _rendered_content(
+    decision: StoryDecision,
+    sources: list[dict[str, Any]],
+    earlier_report: str | None,
+) -> dict[str, Any] | None:
+    if not decision.publishable:
+        return None
+    by_field: dict[str, list[str]] = {}
+    for claim in decision.claims:
+        by_field.setdefault(claim["field"], []).append(claim["text"])
+    title = discord.utils.escape_mentions(by_field["headline"][0])
+    if len(title) > 256:
+        raise DraftError("developing story headline exceeds Discord limit")
+    parts = [f"Stage: {by_field['stage'][0]}"]
+    if decision.action in {"update", "combine"}:
+        parts.append(f"What changed: {decision.change['text']}")
+    parts.extend(by_field["fact"])
+    parts.append(f"Why it matters: {by_field['why'][0]}")
+    if by_field.get("take"):
+        parts.append(f"Roger's take: {by_field['take'][0]}")
+    description = discord.utils.escape_mentions("\n\n".join(parts))
+    if len(description) > 4096:
+        raise DraftError("developing story description exceeds Discord limit")
+    cited = [*decision.change["citations"]]
+    for claim in decision.claims:
+        cited.extend(claim["citations"])
+    source_numbers = list(dict.fromkeys(item["source"] for item in cited))
+    primary = source_numbers[0] if source_numbers else 1
+    fields = []
+    if by_field.get("question"):
+        fields.append({"name": "Discuss", "value": discord.utils.escape_mentions(
+            by_field["question"][0]
+        ), "inline": False})
+    if earlier_report:
+        label = "Earlier report corrected" if decision.correction_of else (
+            "Earlier confirmed report"
+        )
+        fields.append({"name": label, "value": earlier_report, "inline": False})
+    source_links = "\n".join(f"<{sources[number - 1]['url']}>" for number in source_numbers)
+    if not source_links or len(source_links) > 1024:
+        raise DraftError("developing story source links exceed Discord limit")
+    fields.append({"name": "Sources", "value": source_links, "inline": False})
+    return {
+        "title": title,
+        "url": sources[primary - 1]["url"],
+        "description": description,
+        "fields": fields,
+    }
+
+
+def _completeness_evidence(
+    decision: StoryDecision,
+    sources: list[dict[str, Any]],
+    projected: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if not decision.publishable:
+        return []
+    selected = set(decision.story_ids)
+    cited_numbers = {
+        citation["source"] for citation in projected["citation_pool"]
+    }
+    evidence = []
+    for number, source in enumerate(sources, 1):
+        if source["story_id"] not in selected and number not in cited_numbers:
+            continue
+        excerpt = source["excerpt"]
+        for index, citation in sorted(
+            enumerate(projected["citation_pool"], 1),
+            key=lambda item: len(item[1]["quote"]),
+            reverse=True,
+        ):
+            if citation["source"] == number:
+                excerpt = excerpt.replace(citation["quote"], f"[cited span {index}]")
+        evidence.append({
+            "number": number,
+            "story_id": source["story_id"],
+            "published_at": source.get("published_at"),
+            "observed_at": source.get("observed_at"),
+            "fresh": source.get("fresh"),
+            "excerpt": excerpt,
+        })
+    return evidence
+
+
+def review_payload(
+    decision: StoryDecision,
+    sources: list[dict[str, Any]],
+    history: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Build the one production review payload used by runtime and evaluation."""
+    projected = _decision_projection(decision)
+    return {
+        "decision": projected,
+        "rendered_post": _rendered_content(decision, sources, prior_url(decision, history)),
+        "sources": _source_metadata(sources),
+        "completeness_evidence": _completeness_evidence(decision, sources, projected),
+        "confirmed_sent": _delivered_view(history),
+    }
+
+
+def parse_review(
+    text: str,
+    decision: StoryDecision,
+    sources: list[dict[str, Any]],
+) -> tuple[bool, dict[str, Any], list[str]]:
+    """Validate a review and return its decision, canonical verdict, and failed gates."""
+    verdict = _json_object(text)
+    if not isinstance(verdict, dict) or not {
+        "materially_complete", "missing_material",
+    }.issubset(verdict):
+        raise DraftError("developing story review lacks completeness evidence")
+    expected = {
+        "supported", "material_change", "action_supported", "chronology_supported",
+        "relationship_supported", "freshness_supported", "correction_supported",
+        "materially_complete", "missing_material",
+    }
+    projected = _decision_projection(decision)
+    supported = verdict.get("supported")
+    bool_fields = expected - {"supported", "missing_material"}
+    if (
+        set(verdict) != expected
+        or not isinstance(supported, list)
+        or len(supported) != len(projected["items"])
+        or any(type(value) is not bool for value in supported)
+        or any(type(verdict[key]) is not bool for key in bool_fields)
+        or not isinstance(verdict["missing_material"], list)
+        or len(verdict["missing_material"]) > 4
+    ):
+        raise DraftError("invalid developing story review")
+
+    evidence_numbers = {
+        item["number"] for item in _completeness_evidence(decision, sources, projected)
+    }
+    missing = []
+    try:
+        for item in verdict["missing_material"]:
+            if not isinstance(item, dict) or set(item) != {"concern", "source", "quote"}:
+                raise DraftError("invalid missing material item")
+            if type(item["source"]) is not int or item["source"] not in evidence_numbers:
+                raise DraftError("missing material source is outside completeness evidence")
+            citation = _citations(
+                [{"source": item["source"], "quote": item["quote"]}],
+                sources,
+                required=True,
+            )[0]
+            missing.append({
+                "concern": _text(item["concern"], "missing material concern"),
+                **citation,
+            })
+    except DraftError as exc:
+        raise DraftError(f"invalid developing story completeness evidence: {exc}") from exc
+    complete = verdict["materially_complete"]
+    if complete is bool(missing) or (not decision.publishable and (not complete or missing)):
+        raise DraftError(
+            "invalid developing story completeness evidence: verdict conflicts with evidence"
+        )
+    verdict = {**verdict, "missing_material": missing}
+    gates = sorted(expected - {"supported", "material_change", "missing_material"})
+    material = verdict["material_change"] is decision.publishable
+    failed = ([] if all(supported) else ["supported"])
+    failed.extend(key for key in gates if not verdict[key])
+    if not material:
+        failed.append("material_change")
+    return not failed, verdict, failed
+
+
+def _semantic_item_signatures(decision: StoryDecision) -> list[tuple[Any, ...]]:
+    values = [decision.reason, decision.change, *decision.claims]
+    return [
+        (
+            value["text"],
+            tuple(sorted({(citation["source"], citation["quote"])
+                          for citation in value["citations"]})),
+        )
+        for value in values
+    ]
+
+
+def _has_unchanged_rejected_item(
+    rejected: StoryDecision,
+    revision: StoryDecision,
+    verdict: dict[str, Any],
+) -> bool:
+    rejected_items = {
+        signature for signature, supported in zip(
+            _semantic_item_signatures(rejected), verdict["supported"], strict=True,
+        ) if not supported
+    }
+    return bool(rejected_items.intersection(_semantic_item_signatures(revision)))
+
+
+def _revision_feedback(verdict: dict[str, Any], failed: list[str]) -> dict[str, Any]:
+    return {
+        "unsupported_items": [
+            index for index, supported in enumerate(verdict["supported"], 1)
+            if not supported
+        ],
+        "failed_gates": failed,
+        "missing_material": verdict["missing_material"],
+    }
+
+
 async def _review(
     decision: StoryDecision,
     sources: list[dict[str, Any]],
     history: dict[str, list[dict[str, Any]]],
     llm: LLM,
-) -> tuple[bool, dict[str, Any]]:
-    projected = _decision_projection(decision)
-    items = projected["items"]
+) -> tuple[bool, dict[str, Any], list[str]]:
     response = await llm.complete(
         "curated",
         _messages(
             REVIEW,
-            {
-                "decision": projected, "sources": _source_metadata(sources),
-                "confirmed_sent": _delivered_view(history),
-            },
+            review_payload(decision, sources, history),
             REVIEW_RESPONSE_FORMAT,
         ),
         curated_review=True,
         response_format=REVIEW_RESPONSE_FORMAT,
     )
-    verdict = _json_object(_story_response_text(response))
-    expected = {
-        "supported",
-        "material_change",
-        "action_supported",
-        "chronology_supported",
-        "relationship_supported",
-        "freshness_supported",
-        "correction_supported",
-    }
-    supported = verdict.get("supported")
-    if (
-        set(verdict) != expected
-        or not isinstance(supported, list)
-        or len(supported) != len(items)
-        or (
-            any(type(value) is not bool for value in supported)
-            or any(type(verdict[key]) is not bool for key in expected - {"supported"})
-        )
-    ):
-        raise DraftError("invalid developing story review")
-    gates = [
-        verdict[key] for key in expected - {"supported", "material_change"}
-    ]
-    material = verdict["material_change"] is decision.publishable
-    return all(supported) and all(gates) and material, verdict
+    return parse_review(_story_response_text(response), decision, sources)
 
 
 async def decide(
@@ -779,14 +975,14 @@ async def decide(
             "validation_error": str(exc),
         }
     else:
-        accepted, verdict = await _review(decision, sources, history, llm)
+        accepted, verdict, failed = await _review(decision, sources, history, llm)
         if accepted:
             return decision, sources
         revision_system = REVISION
         revision_payload = {
             "input": _revision_input(model_input, decision),
             "rejected_decision": _decision_projection(decision),
-            "review": verdict,
+            "review": _revision_feedback(verdict, failed),
         }
     response = await llm.complete(
         "curated",
@@ -794,10 +990,24 @@ async def decide(
         curated_story=True,
         response_format=DECISION_RESPONSE_FORMAT,
     )
-    decision = parse_decision(_story_response_text(response), sources, history)
-    accepted, _ = await _review(decision, sources, history, llm)
+    revised = parse_decision(_story_response_text(response), sources, history)
+    if revision_system == REVISION and _has_unchanged_rejected_item(
+        decision, revised, verdict,
+    ):
+        raise DraftError("developing story revision left a rejected item unchanged")
+    if (
+        revision_system == REVISION
+        and not verdict["materially_complete"]
+        and _rendered_content(decision, sources, prior_url(decision, history))
+        == _rendered_content(revised, sources, prior_url(revised, history))
+    ):
+        raise DraftError("developing story revision left the incomplete public post unchanged")
+    decision = revised
+    accepted, _, failed = await _review(decision, sources, history, llm)
     if not accepted:
-        raise DraftError("developing story evidence review rejected the revision")
+        raise DraftError(
+            "developing story evidence review rejected the revision: " + ", ".join(failed)
+        )
     return decision, sources
 
 
@@ -846,49 +1056,14 @@ def embed(
     local_date: str,
     prior_url: str | None = None,
 ) -> discord.Embed:
-    by_field: dict[str, list[str]] = {}
-    for claim in decision.claims:
-        by_field.setdefault(claim["field"], []).append(claim["text"])
-    title = discord.utils.escape_mentions(by_field["headline"][0])
-    if len(title) > 256:
-        raise DraftError("developing story headline exceeds Discord limit")
-    parts = [f"Stage: {by_field['stage'][0]}"]
-    if decision.action in {"update", "combine"}:
-        parts.append(f"What changed: {decision.change['text']}")
-    parts.extend(by_field["fact"])
-    parts.append(f"Why it matters: {by_field['why'][0]}")
-    if by_field.get("take"):
-        parts.append(f"Roger's take: {by_field['take'][0]}")
-    cited = [*decision.change["citations"]]
-    for claim in decision.claims:
-        cited.extend(claim["citations"])
-    source_numbers = list(dict.fromkeys(item["source"] for item in cited))
-    primary = source_numbers[0] if source_numbers else 1
-    description = discord.utils.escape_mentions("\n\n".join(parts))
-    if len(description) > 4096:
-        raise DraftError("developing story description exceeds Discord limit")
+    content = _rendered_content(decision, sources, prior_url)
+    if content is None:
+        raise DraftError("cannot render a no-post developing story decision")
     post = discord.Embed(
-        title=title,
-        url=sources[primary - 1]["url"],
-        description=description,
+        title=content["title"], url=content["url"], description=content["description"],
     )
-    if by_field.get("question"):
-        post.add_field(
-            name="Discuss",
-            value=discord.utils.escape_mentions(by_field["question"][0]),
-            inline=False,
-        )
-    if prior_url:
-        label = "Earlier report corrected" if decision.correction_of else "Earlier confirmed report"
-        post.add_field(name=label, value=prior_url, inline=False)
-    source_links = "\n".join(f"<{sources[number - 1]['url']}>" for number in source_numbers)
-    if not source_links or len(source_links) > 1024:
-        raise DraftError("developing story source links exceed Discord limit")
-    post.add_field(
-        name="Sources",
-        value=source_links,
-        inline=False,
-    )
+    for field in content["fields"]:
+        post.add_field(**field)
     post.set_footer(text=f"Roger's developing story · {local_date}")
     return post
 
