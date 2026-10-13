@@ -94,6 +94,11 @@ Reviewer calibration has six supported references and six single-fault drafts.
 Any false accept, false reject, malformed review, incomplete run, or missing
 fixture repeat fails its reference gate. Reference labels are still pending
 human confirmation, so this gate alone cannot select a reviewer.
+Reviewer requests are built and verdicts are parsed by the production helpers. They include the
+actual public embed fields plus bounded selected-story evidence for material-omission review;
+broader evidence cannot substitute for a proposed item's own cited spans.
+The repository's regressions are derived synthetic reproductions. Exact captured outputs stay in
+their immutable evaluation bundle.
 
 The API cache is disabled so repeated requests remain real repeats. Artifacts
 contain the complete visible response text, an allowlisted routing-metadata

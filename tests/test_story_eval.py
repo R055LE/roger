@@ -1,3 +1,4 @@
+import copy
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -87,6 +88,8 @@ def _review(accepted=True, item_count=6):
         "relationship_supported": True,
         "freshness_supported": True,
         "correction_supported": True,
+        "materially_complete": True,
+        "missing_material": [],
     })
 
 
@@ -485,6 +488,18 @@ async def test_request_error_has_one_attempt_and_sanitized_durable_error(tmp_pat
 def test_reviewer_report_matches_production_validation_rules():
     _, cases, reviews = _fixture_data()
     fixture = reviews["good_release"]
+    sources = story_eval._case_sources(cases["straight_release"])
+    decision = stories.parse_decision(
+        json.dumps(cases["straight_release"]["reference_decision"]),
+        sources,
+        cases["straight_release"]["history"],
+    )
+    spec = story_eval._reviewer_spec(
+        fixture, cases, story_eval.load_profiles()["sol"], 1,
+    )
+    assert json.loads(spec.messages[-1]["content"]) == stories.review_payload(
+        decision, sources, cases["straight_release"]["history"],
+    )
     accepted = story_eval._review_verdict(
         {"content": _review()}, fixture, cases["straight_release"]
     )
@@ -535,7 +550,9 @@ async def test_actual_production_workflow_uses_two_three_or_four_calls(contents,
     elif contents == "local_revision":
         queue = ["{}", good, _review()]
     else:
-        queue = [good, _review(accepted=False), good, _review()]
+        repaired = copy.deepcopy(case["reference_decision"])
+        repaired["reason"]["text"] = "Atlas 2.0 is now available with documented Linux packages."
+        queue = [good, _review(accepted=False), json.dumps(repaired), _review()]
     runner = _QueueRunner(queue)
     profiles = story_eval.load_profiles()
     llm = story_eval.WorkflowLLM(runner, profiles["sol"], profiles["sonnet"], case["id"], 1)
