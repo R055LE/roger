@@ -185,14 +185,15 @@ REVIEW = (
 )
 
 _REVISION_RULES = (
-    "Use supplied IDs/source numbers. Exact citations; mutable claims need fresh sources. "
-    "Public: one headline/stage/why, fact+, <=1 take/question; "
+    "Input IDs/source numbers. Publish/update/combine: reason/change/claims need exact quotes for "
+    "each premise/relation. Mutable needs fresh source. Public: 1 headline/stage/why, fact+, "
+    "<=1 take/question; "
     "stage=announcement|preview|rollout|demonstrated|uncertainty. Actions: publish=1 uncovered; "
     "update=1 confirmed; combine=2+ distinct; hold=1+; skip=0+; hold/skip claims=[]. No "
-    "confirmed_sent: no update/correction. Correction=update+confirmed correction_of+"
-    "fresh change naming old/new. One development; combine needs a cited link beyond topic. "
-    "Publish change=cited event. Repair or remove rejected items; invent nothing. Keep needed "
-    "distinctions public unless their claim is removed/narrowed. Address missing_material publicly "
+    "confirmed_sent: no update/correction. Correction=update+confirmed correction_of+fresh change "
+    "naming old/new. One development; combine needs cited links beyond topic. "
+    "Publish change=cited event. Repair/remove rejected items; invent nothing. Keep needed "
+    "distinctions public unless claims are removed/narrowed. Fix missing_material publicly "
     "or remove/narrow its claim; hold if unsupported. "
     + _OUTPUT_LIMITS
 )
