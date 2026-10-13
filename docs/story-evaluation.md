@@ -32,11 +32,12 @@ Sol or Sonnet reviews. Two such pairing ledgers reserve 96 calls and $62.40.
 No single ledger enforces the aggregate allowance across other artifact
 directories.
 
-No paid comparison has been approved or run. Recheck the model catalog,
-endpoint, provider and rates in `evals/stories/models.json` before proposing a
-run. In particular, the Google endpoint's catalog status is recorded without
-interpreting it. Do not substitute another provider or service tier under the
-same approval.
+Every paid comparison requires explicit owner approval for its finite call and
+cost allowance, plus a new immutable ledger in its own artifact directory.
+Recheck the model catalog, endpoint, provider and rates in
+`evals/stories/models.json` before proposing a run. In particular, the Google
+endpoint's catalog status is recorded without interpreting it. Do not
+substitute another provider or service tier under the same approval.
 
 ## Inspect the plan
 
@@ -84,6 +85,11 @@ bills it. A missing returned service tier is recorded as unknown and limits
 latency comparisons, while an explicitly different tier fails closed. Provider
 truncation, refusal, content filtering, pipeline interference, local parsing,
 reviewer rejection and human editorial quality remain separate outcomes.
+The exact pass-only OpenAI moderation annotation with `flagged: false` is
+recorded as structured routing metadata and may proceed. Any extra action,
+redaction or unknown field, a flagged result, an unknown stage, or a modifying
+stage such as response healing, context compression, a plugin or server tools
+stops the run.
 Reviewer calibration has six supported references and six single-fault drafts.
 Any false accept, false reject, malformed review, incomplete run, or missing
 fixture repeat fails its reference gate. Reference labels are still pending

@@ -462,6 +462,48 @@ def _request_record(spec: CallSpec) -> dict[str, Any]:
     }
 
 
+def _is_passed_moderation(stage: Any) -> bool:
+    if not isinstance(stage, dict) or set(stage) != {"type", "name", "summary", "data"}:
+        return False
+    data = stage["data"]
+    return (
+        stage["type"] == "guardrail"
+        and stage["name"] == "moderation"
+        and stage["summary"] == "Content passed OpenAI moderation"
+        and isinstance(data, dict)
+        and set(data) == {"engine", "flagged", "moderator_ids"}
+        and data["engine"] == "openai-moderations"
+        and data["flagged"] is False
+        and data["moderator_ids"] == ["OpenAIOmniModerator"]
+    )
+
+
+def _pipeline_annotation(stage: Any) -> dict[str, Any]:
+    if not isinstance(stage, dict):
+        return {"type": str(stage), "recognized_pass_only": False}
+    annotation = {
+        key: stage[key]
+        for key in ("type", "name", "summary")
+        if isinstance(stage.get(key), str)
+    }
+    data = stage.get("data")
+    if isinstance(data, dict):
+        clean_data = {}
+        if isinstance(data.get("engine"), str):
+            clean_data["engine"] = data["engine"]
+        if isinstance(data.get("flagged"), bool):
+            clean_data["flagged"] = data["flagged"]
+        moderator_ids = data.get("moderator_ids")
+        if isinstance(moderator_ids, list) and all(
+            isinstance(value, str) for value in moderator_ids
+        ):
+            clean_data["moderator_ids"] = moderator_ids
+        if clean_data:
+            annotation["data"] = clean_data
+    annotation["recognized_pass_only"] = _is_passed_moderation(stage)
+    return annotation
+
+
 def _route_metadata(response: Any) -> dict[str, Any] | None:
     raw = getattr(response, "openrouter_metadata", None)
     if raw is None:
@@ -480,11 +522,14 @@ def _route_metadata(response: Any) -> dict[str, Any] | None:
                 })
     pipeline = raw.get("pipeline")
     if isinstance(pipeline, list):
-        pipeline_stages = [str(stage) for stage in pipeline]
-    elif isinstance(pipeline, dict):
-        pipeline_stages = [str(key) for key, value in pipeline.items() if value]
-    else:
+        pipeline_stages = [_pipeline_annotation(stage) for stage in pipeline]
+        pipeline_pass_only = all(_is_passed_moderation(stage) for stage in pipeline)
+    elif pipeline is None:
         pipeline_stages = []
+        pipeline_pass_only = True
+    else:
+        pipeline_stages = [{"type": "invalid", "recognized_pass_only": False}]
+        pipeline_pass_only = False
     attempts = raw.get("attempts")
     return {
         "requested": raw.get("requested"),
@@ -493,13 +538,29 @@ def _route_metadata(response: Any) -> dict[str, Any] | None:
         "attempt_count": len(attempts) if isinstance(attempts, list) else None,
         "available": clean_endpoints,
         "pipeline_stages": pipeline_stages,
+        "pipeline_pass_only": pipeline_pass_only,
     }
 
 
 def _visible_response(response: Any) -> dict[str, Any]:
-    choice = response.choices[0]
-    message = choice.message
-    return {
+    choices = getattr(response, "choices", None)
+    shape_error = None
+    if choices is None:
+        choice = None
+        shape_error = "null_choices"
+    elif not isinstance(choices, list) or not choices:
+        choice = None
+        shape_error = "empty_choices" if choices == [] else "invalid_choices"
+    else:
+        choice = choices[0]
+        if choice is None:
+            shape_error = "null_choice"
+        elif len(choices) != 1:
+            shape_error = "multiple_choices"
+    message = getattr(choice, "message", None) if choice is not None else None
+    if choice is not None and message is None:
+        shape_error = "missing_message"
+    visible = {
         "model": getattr(response, "model", None),
         "finish_reason": getattr(choice, "finish_reason", None),
         "content": getattr(message, "content", None),
@@ -507,6 +568,9 @@ def _visible_response(response: Any) -> dict[str, Any]:
         "service_tier": getattr(response, "service_tier", None),
         "route_metadata": _route_metadata(response),
     }
+    if shape_error is not None:
+        visible["shape_error"] = shape_error
+    return visible
 
 
 def _usage(response: Any) -> dict[str, int | Decimal | None] | None:
@@ -541,6 +605,8 @@ def _usage(response: Any) -> dict[str, int | Decimal | None] | None:
 
 
 def _response_status(visible: dict[str, Any], profile: ModelProfile) -> str:
+    if visible.get("shape_error") is not None:
+        return "malformed_response"
     if visible["model"] not in profile.returned_models:
         return "model_mismatch"
     if visible["service_tier"] is not None and visible["service_tier"] != profile.service_tier:
@@ -558,7 +624,7 @@ def _response_status(visible: dict[str, Any], profile: ModelProfile) -> str:
         return "missing_route_metadata"
     if metadata["requested"] != profile.model or metadata["attempt"] != 1:
         return "route_metadata_mismatch"
-    if metadata["pipeline_stages"]:
+    if not metadata["pipeline_pass_only"]:
         return "pipeline_interference"
     if metadata["attempt_count"] not in (None, 1):
         return "routing_multiple_attempts"
@@ -606,9 +672,9 @@ class Runner:
         visible = _visible_response(response)
         usage = _usage(response)
         status = _response_status(visible, spec.profile)
-        if usage is None:
+        if usage is None and status != "malformed_response":
             status = "missing_usage_or_cost"
-        elif (
+        elif usage is not None and (
             usage["input_tokens"] > _INPUT_TOKEN_RESERVE
             or usage["output_tokens"] > spec.max_tokens
             or (
@@ -722,12 +788,16 @@ def _validate_decision_output(
 
 def _source_inventory(case: dict[str, Any]) -> list[dict[str, Any]]:
     prepared = _case_sources(case)
-    by_url = {source["url"]: source for source in prepared}
+    by_identity = {}
+    for source in prepared:
+        identity = (source.get("feed_url"), source.get("entry_id"), source.get("url"))
+        by_identity.setdefault(identity, source)
     inventory = []
     for entry in case["entries"]:
         article = entry.get("article") or {}
         text = str(article.get("text") or "")
-        source = by_url.get(article.get("url"))
+        identity = (entry.get("feed_url"), entry.get("id"), article.get("url"))
+        source = by_identity.get(identity)
         delivered_chars = len(source["excerpt"]) if source else 0
         inventory.append({
             "url": article.get("url"),

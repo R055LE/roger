@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletion
 
 from roger import story_eval
 from roger.brains import stories
@@ -62,6 +63,19 @@ def _response(content):
             message=SimpleNamespace(content=content, refusal=None),
         )]
     )
+
+
+def _passed_moderation():
+    return {
+        "type": "guardrail",
+        "name": "moderation",
+        "summary": "Content passed OpenAI moderation",
+        "data": {
+            "engine": "openai-moderations",
+            "flagged": False,
+            "moderator_ids": ["OpenAIOmniModerator"],
+        },
+    }
 
 
 def _review(accepted=True, item_count=6):
@@ -134,6 +148,24 @@ def test_fixture_history_targets_are_confirmed_and_first_four():
         for delivered in case["history"]["delivered"]:
             assert delivered["message_id"].startswith("example-message-")
             assert delivered["message_url"].startswith("https://discord.example.invalid/")
+
+
+def test_source_inventory_matches_current_versions_and_reports_real_truncation():
+    _, cases, _ = _fixture_data()
+    for case_id in ("material_update", "correction", "duplicate_stale_hold"):
+        inventory = story_eval._source_inventory(cases[case_id])
+        assert all(row["omitted_chars"] == 0 for row in inventory)
+        assert all(
+            row["delivered_excerpt_chars"] == row["original_chars"]
+            for row in inventory
+        )
+
+    long_case = json.loads(json.dumps(cases["straight_release"]))
+    long_case["entries"][0]["article"]["text"] = "x" * 1700
+    inventory = story_eval._source_inventory(long_case)
+    assert inventory[0]["original_chars"] == 1700
+    assert inventory[0]["delivered_excerpt_chars"] == 1600
+    assert inventory[0]["omitted_chars"] == 100
 
 
 def test_offline_plan_does_not_construct_client(monkeypatch):
@@ -236,6 +268,7 @@ def test_run_directory_is_exclusive(tmp_path):
     ("response", "expected"),
     [
         (_completion("{}", include_usage=False), "missing_usage_or_cost"),
+        (_completion("{}", cost=Decimal("-0.01")), "missing_usage_or_cost"),
         (_completion("{}", cost=Decimal("2")), "overspend"),
         (_completion("{}", pipeline=["response_healing"]), "pipeline_interference"),
     ],
@@ -260,6 +293,64 @@ async def test_failed_accounting_and_pipeline_keep_reservation(tmp_path, respons
     await client.close()
     assert ledger.data["reserved_calls"] == 1
     assert ledger.data["calls"][0]["status"] == expected
+
+
+@pytest.mark.asyncio
+async def test_passed_moderation_pipeline_is_recorded_and_allowed(tmp_path):
+    _, cases, _ = _fixture_data()
+    spec = story_eval._writer_spec(
+        cases["straight_release"], story_eval.load_profiles()["sol"], 1
+    )
+    response = ChatCompletion.model_validate(
+        _completion("{}", pipeline=[_passed_moderation()])
+    )
+
+    async def create(**kwargs):
+        return response
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    ledger = story_eval.Ledger(
+        tmp_path / "ledger.json", max_calls=1, max_cost_usd=Decimal("1")
+    )
+    responses = tmp_path / "responses"
+    responses.mkdir()
+
+    await story_eval.Runner(client, ledger, responses).call(spec)
+
+    artifact = json.loads(next(responses.iterdir()).read_text())
+    metadata = artifact["response"]["route_metadata"]
+    assert artifact["status"] == "completed"
+    assert metadata["pipeline_pass_only"] is True
+    assert metadata["pipeline_stages"] == [
+        {**_passed_moderation(), "recognized_pass_only": True}
+    ]
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [
+        [{**_passed_moderation(), "unknown": "field"}],
+        [{**_passed_moderation(), "data": {**_passed_moderation()["data"], "flagged": True}}],
+        [{**_passed_moderation(), "data": {**_passed_moderation()["data"], "flagged": 0}}],
+        [{**_passed_moderation(), "data": {**_passed_moderation()["data"], "action": "allow"}}],
+        [{**_passed_moderation(), "data": {**_passed_moderation()["data"], "redact": False}}],
+        [{"type": "response_healing", "name": "response-healing", "data": {}}],
+        [{"type": "context_compression", "name": "context-compression", "data": {}}],
+        [{"type": "plugin", "name": "web-search", "data": {}}],
+        [{"type": "server_tools", "name": "server-tools", "data": {}}],
+        [{"type": "future_stage", "name": "unknown", "data": {}}],
+    ],
+)
+def test_pipeline_rejects_modified_or_unknown_stages(pipeline):
+    response = ChatCompletion.model_validate(_completion("{}", pipeline=pipeline))
+    visible = story_eval._visible_response(response)
+
+    assert visible["route_metadata"]["pipeline_pass_only"] is False
+    assert story_eval._response_status(
+        visible, story_eval.load_profiles()["sol"]
+    ) == "pipeline_interference"
 
 
 @pytest.mark.asyncio
@@ -288,6 +379,78 @@ async def test_missing_optional_reasoning_usage_stays_unknown(tmp_path):
     await client.close()
     assert ledger.data["calls"][0]["status"] == "completed"
     assert ledger.data["calls"][0]["reasoning_tokens"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("choices", "shape_error", "include_usage"),
+    [
+        (None, "null_choices", True),
+        ([], "empty_choices", False),
+        ([SimpleNamespace(finish_reason="stop")], "missing_message", True),
+    ],
+)
+async def test_malformed_sdk_response_persists_safe_artifacts_and_accounting(
+    tmp_path, choices, shape_error, include_usage
+):
+    _, cases, _ = _fixture_data()
+    spec = story_eval._writer_spec(
+        cases["straight_release"], story_eval.load_profiles()["sol"], 1
+    )
+    usage = None
+    if include_usage:
+        usage = SimpleNamespace(
+            prompt_tokens=100,
+            completion_tokens=25,
+            cost=0.01,
+            completion_tokens_details=SimpleNamespace(reasoning_tokens=11),
+        )
+    response = ChatCompletion.model_construct(
+        id="eval-response",
+        object="chat.completion",
+        created=1,
+        model="openai/gpt-6.1-sol",
+        service_tier="default",
+        choices=choices,
+        usage=usage,
+        openrouter_metadata=_completion("{}")["openrouter_metadata"],
+    )
+    calls = 0
+
+    async def create(**kwargs):
+        nonlocal calls
+        calls += 1
+        return response
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
+    )
+    ledger = story_eval.Ledger(
+        tmp_path / "ledger.json", max_calls=1, max_cost_usd=Decimal("1")
+    )
+    responses = tmp_path / "responses"
+    responses.mkdir()
+
+    with pytest.raises(story_eval.EvaluationError, match="call stopped: malformed_response"):
+        await story_eval.Runner(client, ledger, responses).call(spec)
+
+    assert calls == 1
+    durable = json.loads((tmp_path / "ledger.json").read_text())
+    row = durable["calls"][0]
+    assert row["status"] == "malformed_response"
+    assert durable["reserved_calls"] == 1
+    assert durable["used_calls"] == (1 if include_usage else 0)
+    assert durable["reserved_cost_usd"] == "0.23"
+    assert durable["used_cost_usd"] == ("0.01" if include_usage else "0")
+
+    artifact = json.loads(next(responses.iterdir()).read_text())
+    assert artifact["status"] == "malformed_response"
+    assert artifact["response"]["shape_error"] == shape_error
+    assert artifact["response"]["model"] == "openai/gpt-6.1-sol"
+    assert artifact["response"]["route_metadata"]["attempt"] == 1
+    assert (artifact["accounting"] is not None) is include_usage
+    assert "choices" not in artifact["response"]
+    assert "reasoning" not in artifact["response"]
 
 
 @pytest.mark.asyncio
