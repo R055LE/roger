@@ -140,6 +140,13 @@ def _request_chars(messages, response_format):
     )
 
 
+def _revision_sources(model_input):
+    return [
+        dict(zip(model_input["source_fields"], row, strict=True))
+        for row in model_input["sources"]
+    ]
+
+
 def _validation_retry_fixture():
     excerpt = "V" * 800
     entry = _entry("validation-retry", excerpt)
@@ -1144,6 +1151,137 @@ async def test_final_review_rejects_revision_that_drops_a_supported_material_dis
     assert len(llm.calls) == 4
 
 
+# Synthetic analogue derived from the held-out four-call stage failure. Captured output remains in
+# the immutable evaluation bundle.
+def _synthetic_stage_revision_case():
+    observed = (
+        "In testing, the 9B model completed inference on eight of nine synthetic hardware targets."
+    )
+    setup = (
+        "The team built a firewalled cluster of eight Android emulator nodes for the exercise."
+    )
+    unresolved = (
+        "The report leaves end-to-end autonomous replication unresolved under real-world network "
+        "controls."
+    )
+    upper_bound = (
+        "The evaluation used an unauthenticated port, making measured success an upper bound on "
+        "real-world replication."
+    )
+    entry = _entry("stage-grounding", " ".join((observed, setup, unresolved, upper_bound)))
+    draft = _decision(
+        "publish", [_sid("stage-grounding")], [(1, observed)],
+        headline="Testing shows bounded heterogeneous-hardware inference",
+        fact="A 9B model completed inference on eight of nine synthetic hardware targets.",
+        why="The setup proves autonomous replication works under real-world controls.",
+        stage="demonstrated",
+    )
+    draft["reason"]["text"] = (
+        "The report demonstrates autonomous replication across heterogeneous hardware."
+    )
+    draft["claims"][3]["citations"] = [_citation(1, upper_bound)]
+    rejected = _review(draft)
+    rejected["supported"][0] = False
+    rejected["supported"][5] = False
+    return entry, draft, rejected, observed, setup, unresolved, upper_bound
+
+
+async def test_final_review_rejects_revision_that_grounds_demonstrated_in_setup_only():
+    entry, draft, rejected, observed, setup, _, upper_bound = _synthetic_stage_revision_case()
+    revision = copy.deepcopy(draft)
+    revision["reason"] = _grounded(
+        "The report gives a bounded heterogeneous-hardware inference result.", 1, observed,
+    )
+    revision["claims"][1]["citations"] = [_citation(1, setup)]
+    revision["claims"][3] = {
+        "field": "why",
+        "text": "The unauthenticated port makes the replication evaluation an upper bound.",
+        "citations": [_citation(1, upper_bound)],
+        "mutable": False,
+    }
+    final_review = _review(revision)
+    final_review["supported"][3] = False
+    llm = RecordingQueueLLM(draft, rejected, revision, final_review)
+
+    with pytest.raises(DraftError, match="rejected the revision: supported"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+
+    revision_request = llm.calls[2][3]
+    revision_payload = json.loads(revision_request[-1]["content"])
+    assert _revision_sources(revision_payload["input"])[0]["excerpt"] == entry["article"]["text"]
+    assert "source_fields columns" in revision_request[0]["content"]
+    assert len(llm.calls) == 4
+
+
+async def test_stage_revision_preserves_supported_demonstration_evidence():
+    entry, draft, rejected, observed, _, _, upper_bound = _synthetic_stage_revision_case()
+    revision = copy.deepcopy(draft)
+    revision["reason"] = _grounded(
+        "The report gives a bounded heterogeneous-hardware inference result.", 1, observed,
+    )
+    revision["claims"][3] = {
+        "field": "why",
+        "text": "The unauthenticated port makes the replication evaluation an upper bound.",
+        "citations": [_citation(1, upper_bound)],
+        "mutable": False,
+    }
+    llm = RecordingQueueLLM(draft, rejected, revision, _review(revision))
+
+    decision, sources = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+
+    assert decision.claims[1] == draft["claims"][1]
+    assert observed in decision.claims[1]["citations"][0]["quote"]
+    assert "eight of nine synthetic hardware targets" in (
+        stories._rendered_content(decision, sources, None)["description"]
+    )
+    assert len(llm.calls) == 4
+
+
+async def test_stage_revision_can_narrow_to_cited_uncertainty():
+    entry, draft, rejected, observed, _, unresolved, upper_bound = (
+        _synthetic_stage_revision_case()
+    )
+    revision = copy.deepcopy(draft)
+    revision["reason"] = _grounded(
+        "The report leaves real-world autonomous replication unresolved.", 1, unresolved,
+    )
+    revision["claims"][0] = {
+        "field": "headline",
+        "text": "Real-world autonomous replication remains unresolved",
+        "citations": [_citation(1, unresolved)],
+        "mutable": False,
+    }
+    revision["claims"][1] = {
+        "field": "stage", "text": "uncertainty",
+        "citations": [_citation(1, unresolved)], "mutable": False,
+    }
+    revision["claims"][3] = {
+        "field": "why",
+        "text": "The unauthenticated port makes the replication evaluation an upper bound.",
+        "citations": [_citation(1, upper_bound)],
+        "mutable": False,
+    }
+    llm = RecordingQueueLLM(draft, rejected, revision, _review(revision))
+
+    decision, _ = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+
+    assert decision.claims[1]["text"] == "uncertainty"
+    assert decision.claims[1]["citations"] == [_citation(1, unresolved)]
+    assert decision.claims[2] == draft["claims"][2]
+    assert "full rogue replicator" not in entry["article"]["text"]
+    assert observed in decision.claims[2]["citations"][0]["quote"]
+    assert len(llm.calls) == 4
+
+
 def test_marketing_completeness_tracks_only_caveats_needed_by_the_rendered_claim():
     preview = (
         "Northstar introduced an opt-in preview with per-project retention controls and namespace "
@@ -1601,8 +1739,10 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
             "source": 1, "quote": quote,
         }
     revision_input = stories._revision_input(payload, decision)
-    assert [source["number"] for source in revision_input["sources"]] == [1]
-    assert revision_input["sources"][0]["excerpt"] == sources[0]["excerpt"]
+    assert revision_input["source_fields"] == [
+        "number", "story_id", "url", "published_at", "observed_at", "fresh", "excerpt",
+    ]
+    assert _revision_sources(revision_input) == [payload["sources"][0]]
     revision = stories._messages(
         stories.REVISION,
         {
@@ -1620,7 +1760,9 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
         json.dumps(noncontiguous_draft), sources, history,
     )
     noncontiguous_input = stories._revision_input(payload, noncontiguous)
-    assert [source["number"] for source in noncontiguous_input["sources"]] == [3, 8]
+    unpacked = _revision_sources(noncontiguous_input)
+    assert [source["number"] for source in unpacked] == [3, 8]
+    assert unpacked == [payload["sources"][2], payload["sources"][7]]
     assert stories._messages(
         stories.REVISION,
         {
@@ -1641,6 +1783,7 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     )
     skip_input = stories._revision_input(payload, skip)
     assert len(skip_input["sources"]) == stories.MAX_SOURCES
+    assert _revision_sources(skip_input) == payload["sources"]
     rejected_skip = _review(skip.record())
     rejected_skip["supported"] = [False, False]
     for gate in (
