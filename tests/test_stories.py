@@ -37,6 +37,9 @@ DOTS_REPEAT = (
 SYNTH_FIRST = "The synthetic release is available to every test account in this fixture."
 SYNTH_SECOND = "The synthetic release now limits access to a staged test cohort."
 SYNTH_FILLER = " Synthetic fixture context is intentionally long enough for production admission."
+# Synthetic analogues of held-out stage prose; captured responses remain in the private bundle.
+SYNTH_STAGE_SENTENCE = "Demonstrated inference on low-cost synthetic streaming boxes."
+SYNTH_STAGE_PREFIX = "Demonstrated: inference across fifteen synthetic streaming boxes."
 JEV_URL = "https://typesafe.ai/blog/introducing-system-one-models-and-jev"
 KEV_URL = (
     "https://github.com/jaredpalmer/kev/blob/"
@@ -158,6 +161,18 @@ def _validation_retry_fixture():
     invalid["reason"]["text"] = "r" * 541
     invalid["reason"]["citations"][0]["quote"] = excerpt[:501]
     invalid["claims"][1]["citations"] = []
+    return entry, invalid, corrected
+
+
+def _stage_validation_retry_fixture():
+    excerpt = "S" * 800
+    entry = _entry("stage-validation-retry", excerpt)
+    corrected = _decision(
+        "publish", [_sid("stage-validation-retry")], [(1, excerpt[:80])],
+        stage="demonstrated",
+    )
+    invalid = copy.deepcopy(corrected)
+    invalid["claims"][1]["text"] = SYNTH_STAGE_SENTENCE
     return entry, invalid, corrected
 
 
@@ -891,6 +906,48 @@ def test_observed_invalid_story_shapes_fail_closed(mutation, message):
 
 
 @pytest.mark.parametrize(
+    "stage",
+    [
+        SYNTH_STAGE_SENTENCE,
+        SYNTH_STAGE_PREFIX,
+        "Stage: demonstrated",
+        "Demonstrated",
+    ],
+)
+def test_stage_prose_prefixes_and_case_variants_fail_closed(stage):
+    sources = stories.prepare_captured_sources(
+        [_entry("stage-label", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision(
+        "publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)], stage=stage,
+    )
+    with pytest.raises(
+        DraftError,
+        match="invalid evidence stage; use exactly one of: "
+        "announcement\\|preview\\|rollout\\|demonstrated\\|uncertainty",
+    ):
+        stories.parse_decision(
+            json.dumps(decision), sources, {"stories": [], "delivered": []},
+        )
+
+
+@pytest.mark.parametrize(
+    "stage", ["announcement", "preview", "rollout", "demonstrated", "uncertainty"],
+)
+def test_exact_stage_labels_are_accepted(stage):
+    sources = stories.prepare_captured_sources(
+        [_entry("stage-label", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision(
+        "publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)], stage=stage,
+    )
+    parsed = stories.parse_decision(
+        json.dumps(decision), sources, {"stories": [], "delivered": []},
+    )
+    assert parsed.claims[1]["text"] == stage
+
+
+@pytest.mark.parametrize(
     ("reason", "message"),
     [("", "reason is empty"), ("r" * 301, "reason exceeds 300 characters")],
 )
@@ -1472,6 +1529,44 @@ async def test_initial_local_validation_failure_gets_one_fresh_revision_and_revi
     ]
 
 
+async def test_invalid_stage_gets_one_exact_label_revision_and_independent_review():
+    entry, invalid, corrected = _stage_validation_retry_fixture()
+    llm = RecordingQueueLLM(invalid, corrected, _review(corrected))
+
+    decision, _ = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+
+    assert decision.claims[1]["text"] == "demonstrated"
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (False, True), (True, False),
+    ]
+    revision_payload = json.loads(llm.calls[1][3][-1]["content"])
+    assert revision_payload["validation_error"] == (
+        "invalid evidence stage; use exactly one of: " + stories._STAGE_LABELS
+    )
+    assert stories._STAGE_LABELS in stories.SYSTEM
+    assert stories._STAGE_LABELS in stories.VALIDATION_REVISION
+
+
+async def test_repeated_invalid_stage_stops_before_review():
+    entry, invalid, _ = _stage_validation_retry_fixture()
+    still_invalid = copy.deepcopy(invalid)
+    still_invalid["claims"][1]["text"] = SYNTH_STAGE_PREFIX
+    llm = RecordingQueueLLM(invalid, still_invalid)
+
+    with pytest.raises(DraftError, match="invalid evidence stage"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (False, True),
+    ]
+
+
 async def test_invalid_validation_revision_stops_after_two_calls():
     entry, invalid, _ = _validation_retry_fixture()
     llm = RecordingQueueLLM(invalid, invalid)
@@ -1703,9 +1798,18 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
         not {"source_id", "feed_url", "entry_id"}.intersection(source)
         for source in payload["sources"]
     )
+    draft = _decision("publish", [sources[0]["story_id"]], [(1, spans[0])])
+    for value, quote in zip(
+        [draft["reason"], draft["change"], *draft["claims"]], spans, strict=True,
+    ):
+        value["citations"] = [_citation(1, quote)]
+    invalid_stage = copy.deepcopy(draft)
+    invalid_stage["claims"][1]["text"] = SYNTH_STAGE_SENTENCE
+    with pytest.raises(DraftError, match="invalid evidence stage") as stage_error:
+        stories.parse_decision(json.dumps(invalid_stage), sources, history)
     validation_revision = stories._messages(
         stories.VALIDATION_REVISION,
-        {"input": payload, "validation_error": "reason exceeds 300 characters"},
+        {"input": payload, "validation_error": str(stage_error.value)},
         stories.DECISION_RESPONSE_FORMAT,
     )
     assert _request_chars(
@@ -1713,11 +1817,6 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     ) <= stories.MAX_CONTEXT_CHARS
     assert len(json.loads(validation_revision[1]["content"])["input"]["sources"]) == 8
 
-    draft = _decision("publish", [sources[0]["story_id"]], [(1, spans[0])])
-    for value, quote in zip(
-        [draft["reason"], draft["change"], *draft["claims"]], spans, strict=True,
-    ):
-        value["citations"] = [_citation(1, quote)]
     decision = stories.parse_decision(
         json.dumps(draft), sources, history,
     )

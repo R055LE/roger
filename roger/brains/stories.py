@@ -25,7 +25,8 @@ MAX_SOURCE_URL_CHARS = 120
 _ACTIONS = {"publish", "update", "combine", "hold", "skip"}
 _PUBLIC_ACTIONS = {"publish", "update", "combine"}
 _FIELDS = {"headline", "stage", "fact", "why", "take", "question"}
-_STAGES = {"announcement", "preview", "rollout", "demonstrated", "uncertainty"}
+_STAGE_LABELS = "announcement|preview|rollout|demonstrated|uncertainty"
+_STAGES = set(_STAGE_LABELS.split("|"))
 
 _CITATION_SCHEMA = {
     "type": "object",
@@ -127,9 +128,9 @@ _OUTPUT_LIMITS = (
     "quotes 40-500 chars."
 )
 _STAGE_RULES = (
-    "Stage's own quote must match the rendered development: announcement/preview/rollout need "
-    "status evidence; demonstrated needs an observed result, not setup alone; uncertainty needs "
-    "a cited unresolved limit. "
+    f"Stage text: exactly {_STAGE_LABELS}. Its quote must match the rendered development: first "
+    "three need status; demonstrated: observed result, not setup alone; uncertainty: cited "
+    "unresolved limit. "
 )
 
 SYSTEM = (
@@ -506,7 +507,7 @@ def parse_decision(
         raise DraftError("public story lacks required grounded fields")
     stage = next((claim["text"] for claim in claims if claim["field"] == "stage"), None)
     if stage is not None and stage not in _STAGES:
-        raise DraftError("invalid evidence stage")
+        raise DraftError(f"invalid evidence stage; use exactly one of: {_STAGE_LABELS}")
 
     questions = data["unresolved_questions"]
     if not isinstance(questions, list) or len(questions) > 4:
