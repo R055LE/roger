@@ -8,8 +8,12 @@ the digest, budgets, and ambient memory respectively.
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import time
+import uuid
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any
 
@@ -106,6 +110,28 @@ CREATE TABLE IF NOT EXISTS usage (
     PRIMARY KEY (date, brain)
 );
 
+CREATE TABLE IF NOT EXISTS curated_model_attempt (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workflow_id TEXT NOT NULL,
+    admission_day TEXT NOT NULL,
+    role TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    reserved_input INTEGER NOT NULL,
+    reserved_output INTEGER NOT NULL,
+    reserved_cost_units INTEGER NOT NULL,
+    state TEXT NOT NULL DEFAULT 'reserved',
+    actual_input INTEGER,
+    actual_output INTEGER,
+    actual_cost_usd TEXT,
+    actual_cost_units INTEGER,
+    settled_day TEXT,
+    created_at REAL NOT NULL,
+    deadline REAL NOT NULL,
+    settled_at REAL
+);
+CREATE INDEX IF NOT EXISTS curated_attempt_workflow ON curated_model_attempt(workflow_id);
+CREATE INDEX IF NOT EXISTS curated_attempt_day ON curated_model_attempt(admission_day);
+
 CREATE TABLE IF NOT EXISTS ambient_log (
     id         INTEGER PRIMARY KEY,
     ts         REAL    NOT NULL,
@@ -140,6 +166,107 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 CURATED_CHECK_LEASE_SECONDS = 30 * 60
+
+_USD_UNITS = 1_000_000_000
+
+
+def _cost_units(value: Any, rounding: str = ROUND_CEILING) -> int:
+    try:
+        amount = Decimal(str(value))
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("cost must be finite and nonnegative")
+        units = int((amount * _USD_UNITS).to_integral_value(rounding=rounding))
+        if units > 2**63 - 1:
+            raise ValueError("cost exceeds storage limit")
+        return units
+    except (InvalidOperation, TypeError) as exc:
+        raise ValueError("invalid cost") from exc
+
+
+def _curated_attempt_params(
+    *, workflow_id: str, role: str, profile: str, input_tokens: int, output_tokens: int,
+    cost_usd: Any, token_cap: int, usd_cap: Any, max_attempts: int, max_workflows: int,
+    timeout_seconds: float, now: float | None = None,
+) -> dict[str, Any]:
+    for name, value in (("workflow_id", workflow_id), ("profile", profile)):
+        if not isinstance(value, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", value):
+            raise ValueError(f"invalid {name}")
+    if role not in {"writer", "reviewer"}:
+        raise ValueError("invalid curated role")
+    for value in (input_tokens, output_tokens, token_cap, max_attempts, max_workflows):
+        if type(value) is not int or not 0 <= value <= 2**31 - 1:
+            raise ValueError("token and attempt limits must be nonnegative integers")
+    if not 0 < input_tokens <= 32_768 or not 0 < output_tokens <= 16_384:
+        raise ValueError("invalid curated token reservation")
+    now = time.time() if now is None else now
+    if not math.isfinite(now) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("invalid curated reservation deadline")
+    return {
+        "workflow_id": workflow_id, "role": role, "profile": profile,
+        "input_tokens": input_tokens, "output_tokens": output_tokens,
+        "cost_units": _cost_units(cost_usd), "token_cap": token_cap,
+        "usd_cap_units": _cost_units(usd_cap, ROUND_FLOOR),
+        "max_attempts": max_attempts, "max_workflows": max_workflows,
+        "day": _today(), "now": now, "deadline": now + timeout_seconds,
+    }
+
+
+_CURATED_BUDGET_SQL = """
+WITH ledger AS (
+    SELECT *, MAX(reserved_input, COALESCE(actual_input, 0))
+            + MAX(reserved_output, COALESCE(actual_output, 0)) AS exposure_tokens,
+           MAX(reserved_cost_units, COALESCE(actual_cost_units, 0)) AS exposure_cost_units
+    FROM curated_model_attempt
+), budget AS (
+    SELECT
+      COALESCE((SELECT tokens_in + tokens_out FROM usage
+                WHERE brain = 'curated' AND date = :day), 0)
+        + COALESCE(SUM(CASE WHEN state = 'settled' AND settled_day = :day
+                           THEN actual_input + actual_output ELSE 0 END), 0) AS used_tokens,
+      curated_cost_units(COALESCE((SELECT cost_usd FROM usage
+                                  WHERE brain = 'curated' AND date = :day), 0))
+        + COALESCE(SUM(CASE WHEN state = 'settled' AND settled_day = :day
+                           THEN actual_cost_units ELSE 0 END), 0) AS used_cost_units,
+      COALESCE((SELECT cost_usd FROM usage WHERE brain = 'curated' AND date = :day), 0)
+        + COALESCE(SUM(CASE WHEN state = 'settled' AND settled_day = :day
+                           THEN CAST(actual_cost_usd AS REAL) ELSE 0 END), 0) AS used_usd,
+      COALESCE(SUM(CASE WHEN state = 'reserved' AND deadline > :now
+                       THEN exposure_tokens ELSE 0 END), 0) AS reserved_tokens,
+      COALESCE(SUM(CASE WHEN state = 'reserved' AND deadline > :now
+                       THEN exposure_cost_units ELSE 0 END), 0) AS reserved_cost_units,
+      COALESCE(SUM(CASE WHEN state IN ('uncertain', 'overrun')
+                            OR (state = 'reserved' AND deadline <= :now)
+                       THEN exposure_tokens ELSE 0 END), 0) AS unknown_tokens,
+      COALESCE(SUM(CASE WHEN state IN ('uncertain', 'overrun')
+                            OR (state = 'reserved' AND deadline <= :now)
+                       THEN exposure_cost_units ELSE 0 END), 0) AS unknown_cost_units,
+      COUNT(CASE WHEN state IN ('uncertain', 'overrun')
+                      OR (state = 'reserved' AND deadline <= :now) THEN 1 END) AS unknown_attempts,
+      COUNT(CASE WHEN state = 'overrun' THEN 1 END) AS overrun_attempts,
+      COUNT(CASE WHEN admission_day = :day THEN 1 END) AS attempts_today,
+      COUNT(DISTINCT CASE WHEN admission_day = :day THEN workflow_id END) AS workflows_today,
+      COUNT(CASE WHEN workflow_id = :workflow_id THEN 1 END) AS workflow_attempts,
+      COUNT(CASE WHEN workflow_id = :workflow_id AND admission_day = :day THEN 1 END)
+        AS workflow_attempts_today
+    FROM ledger
+)
+"""
+
+_CURATED_DENIAL_SQL = """
+CASE
+  WHEN overrun_attempts > 0 THEN 'reservation_overrun'
+  WHEN :token_cap <= 0 OR :usd_cap_units <= 0 OR :max_attempts <= 0 OR :max_workflows <= 0
+    THEN 'disabled'
+  WHEN workflow_attempts >= 4 THEN 'workflow_attempts'
+  WHEN attempts_today >= :max_attempts THEN 'daily_attempts'
+  WHEN workflow_attempts_today = 0 AND workflows_today >= :max_workflows THEN 'daily_workflows'
+  WHEN used_tokens + reserved_tokens + unknown_tokens + :input_tokens + :output_tokens > :token_cap
+    THEN 'tokens'
+  WHEN used_cost_units + reserved_cost_units + unknown_cost_units + :cost_units > :usd_cap_units
+    THEN 'usd'
+  ELSE NULL
+END
+"""
 
 _CLAIM_CURATED_SQL = """
 WITH selected AS (
@@ -249,21 +376,34 @@ class Store:
     def __init__(self, path: str) -> None:
         self._path = path
         self._db: aiosqlite.Connection | None = None
+        self._curated_db: aiosqlite.Connection | None = None
 
     async def open(self) -> Store:
         parent = os.path.dirname(self._path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self._db = await aiosqlite.connect(self._path)
+        memory = self._path == ":memory:"
+        path = f"file:roger-{uuid.uuid4().hex}?mode=memory&cache=shared" if memory else self._path
+        self._db = await aiosqlite.connect(path, uri=memory)
         self._db.row_factory = aiosqlite.Row
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA foreign_keys=ON")
         await self._db.executescript(_SCHEMA + _CURATED_DELIVERY_SCHEMA + ";")
         await self._migrate()
         await self._db.commit()
+        # Legacy methods can roll back the shared connection between awaits. The
+        # admission ledger must commit independently before any provider request starts.
+        self._curated_db = await aiosqlite.connect(path, uri=memory, isolation_level=None)
+        self._curated_db.row_factory = aiosqlite.Row
+        await self._curated_db.create_function(
+            "curated_cost_units", 1, _cost_units, deterministic=True,
+        )
         return self
 
     async def close(self) -> None:
+        if self._curated_db is not None:
+            await self._curated_db.close()
+            self._curated_db = None
         if self._db is not None:
             await self._db.close()
             self._db = None
@@ -273,6 +413,12 @@ class Store:
         if self._db is None:
             raise RuntimeError("Store used before open()")
         return self._db
+
+    @property
+    def _curated_conn(self) -> aiosqlite.Connection:
+        if self._curated_db is None:
+            raise RuntimeError("Store used before open()")
+        return self._curated_db
 
     async def _migrate(self) -> None:
         """Additive, idempotent migrations for columns ``CREATE TABLE IF NOT EXISTS`` can't add.
@@ -378,6 +524,8 @@ class Store:
 
     async def usage_today(self, brain: str) -> int:
         """Total (in + out) tokens recorded for ``brain`` today. Drives the budget gate."""
+        if brain == "curated":
+            return int((await self.curated_budget_state())["used_tokens"])
         cursor = await self._conn.execute(
             "SELECT tokens_in + tokens_out FROM usage WHERE date = ? AND brain = ?",
             (_today(), brain),
@@ -401,11 +549,97 @@ class Store:
 
     async def cost_today(self, brain: str) -> float:
         """Actual USD charged for ``brain`` today (OpenRouter-reported cost, summed)."""
+        if brain == "curated":
+            return float((await self.curated_budget_state())["used_usd"])
         cursor = await self._conn.execute(
             "SELECT cost_usd FROM usage WHERE date = ? AND brain = ?", (_today(), brain)
         )
         row = await cursor.fetchone()
         return float(row[0]) if row and row[0] is not None else 0.0
+
+    async def reserve_curated_attempt(self, **request: Any) -> int | None:
+        """Commit a bound before provider I/O. All unresolved days count against today's caps.
+
+        ``_curated_attempt_params`` defines the admission fields. Admission and settlement
+        use the existing host-local budget day, independently of the posting timezone.
+        The separate connection commits the conditional INSERT before returning its ID.
+        """
+        params = _curated_attempt_params(**request)
+        rows = await self._curated_conn.execute_fetchall(
+            _CURATED_BUDGET_SQL  # noqa: S608 - only code-owned SQL fragments
+            + """
+            INSERT INTO curated_model_attempt
+                (workflow_id, admission_day, role, profile, reserved_input, reserved_output,
+                 reserved_cost_units, created_at, deadline)
+            SELECT :workflow_id, :day, :role, :profile, :input_tokens, :output_tokens,
+                   :cost_units, :now, :deadline FROM budget
+            WHERE (""" + _CURATED_DENIAL_SQL + ") IS NULL RETURNING id", params,
+        )
+        return int(rows[0][0]) if rows else None
+
+    async def finish_curated_attempt(
+        self, attempt_id: int, *, input_tokens: Any = None, output_tokens: Any = None,
+        cost_usd: Any = None, uncertain: bool = False, now: float | None = None,
+    ) -> str | None:
+        """Settle once, or keep uncertain exposure. A known overrun retains the larger charge.
+
+        Callers supply only trustworthy provider usage, even when the content was rejected.
+        Partial valid usage is retained without releasing any unaccounted reservation.
+        Like the legacy usage totals, this payload-free ledger is not automatically pruned.
+        """
+        actual_input = (input_tokens if type(input_tokens) is int
+                        and 0 <= input_tokens <= 2**63 - 1 else None)
+        actual_output = (output_tokens if type(output_tokens) is int
+                         and 0 <= output_tokens <= 2**63 - 1 else None)
+        try:
+            actual_cost_units = _cost_units(cost_usd)
+            actual_cost = str(Decimal(str(cost_usd)))
+        except ValueError:
+            actual_cost_units, actual_cost = None, None
+        complete = all(value is not None for value in (
+            actual_input, actual_output, actual_cost_units,
+        ))
+        rows = await self._curated_conn.execute_fetchall(
+            """UPDATE curated_model_attempt SET
+                 state = CASE WHEN :input > reserved_input OR :output > reserved_output
+                                   OR :cost_units > reserved_cost_units THEN 'overrun'
+                              WHEN NOT :complete OR :uncertain THEN 'uncertain'
+                              ELSE 'settled' END,
+                 actual_input = :input, actual_output = :output,
+                 actual_cost_usd = :cost, actual_cost_units = :cost_units,
+                 settled_day = :day, settled_at = :now
+               WHERE id = :id AND state = 'reserved' RETURNING state""",
+            {"id": attempt_id, "complete": complete, "uncertain": uncertain, "input": actual_input,
+             "output": actual_output, "cost": actual_cost, "cost_units": actual_cost_units,
+             "day": _today(), "now": time.time() if now is None else now},
+        )
+        return str(rows[0][0]) if rows else None
+
+    async def mark_curated_attempt_uncertain(self, attempt_id: int) -> str | None:
+        return await self.finish_curated_attempt(attempt_id)
+
+    async def curated_budget_state(
+        self, *, now: float | None = None, request: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Used, reserved, and unknown exposure; optionally diagnose a refused request.
+
+        A diagnosis reflects this snapshot. Concurrent settlement may clear the gate after
+        a refusal. Deadline expiry only changes the displayed category, never the liability.
+        """
+        params = {"day": _today(), "now": time.time() if now is None else now, "workflow_id": ""}
+        if request is not None:
+            params = _curated_attempt_params(**request)
+            if now is not None:
+                params["now"] = now
+        rows = await self._curated_conn.execute_fetchall(
+            _CURATED_BUDGET_SQL + "SELECT *, "  # noqa: S608 - only code-owned SQL fragments
+            + (_CURATED_DENIAL_SQL if request is not None else "NULL")
+            + " AS denial_reason FROM budget", params,
+        )
+        state = dict(rows[0])
+        state["reserved_usd"] = state["reserved_cost_units"] / _USD_UNITS
+        state["unknown_usd"] = state["unknown_cost_units"] / _USD_UNITS
+        return state
 
     # --- small key/value bot state (presence outfit, etc.) ---
 

@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     daily_usd_ambient: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     daily_usd_gigabrain: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     daily_usd_curated: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    # Selected profiles require explicit workflow and provider-attempt allowances.
+    daily_attempts_curated: int = Field(default=0, ge=0, le=2**31 - 1)
+    daily_workflows_curated: int = Field(default=0, ge=0, le=2**31 - 1)
 
     # --- admin tool loop bounds (§2.9) ---
     admin_max_tool_calls: int = Field(default=10, gt=0)
@@ -145,6 +148,14 @@ class Settings(BaseSettings):
     def _curated_profile_requires_stories(self) -> Settings:
         if self.curated_request_profile != "legacy" and not self.curated_developing_stories:
             raise ValueError("CURATED_REQUEST_PROFILE requires CURATED_DEVELOPING_STORIES")
+        if self.curated_request_profile != "legacy" and (
+            self.daily_usd_curated <= 0 or self.daily_attempts_curated <= 0
+            or self.daily_workflows_curated <= 0
+        ):
+            raise ValueError(
+                "CURATED_REQUEST_PROFILE requires positive DAILY_USD_CURATED, "
+                "DAILY_ATTEMPTS_CURATED, and DAILY_WORKFLOWS_CURATED"
+            )
         return self
 
     @property

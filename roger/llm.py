@@ -12,6 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from decimal import Decimal
 from typing import Any
 
 from openai import (
@@ -40,6 +44,17 @@ _RETRYABLE = (APIConnectionError, APITimeoutError, RateLimitError, InternalServe
 REQUEST_TIMEOUT_S = 60.0
 MAX_ATTEMPTS = 3
 _BASE_BACKOFF_S = 0.5
+_curated_workflow_id: ContextVar[str | None] = ContextVar("curated_workflow_id", default=None)
+
+
+@asynccontextmanager
+async def curated_workflow():
+    """One editorial evaluation, including its review and optional revision."""
+    token = _curated_workflow_id.set(uuid.uuid4().hex)
+    try:
+        yield _curated_workflow_id.get()
+    finally:
+        _curated_workflow_id.reset(token)
 
 
 def _retry_after_seconds(exc: Exception) -> float | None:
@@ -69,8 +84,13 @@ class CuratedModelError(RuntimeError):
 
 
 class BudgetExceeded(RuntimeError):
-    def __init__(self, brain: str, used: float, cap: float, *, unit: str = "tokens") -> None:
-        if unit == "usd":
+    def __init__(
+        self, brain: str, used: float, cap: float, *, unit: str = "tokens",
+        reason: str | None = None,
+    ) -> None:
+        if reason is not None:
+            message = f"{brain} reservation denied: {reason}"
+        elif unit == "usd":
             message = f"{brain} daily $ budget exceeded (${used:.4f} >= ${cap:.4f})"
         else:
             message = f"{brain} daily token budget exceeded ({used} >= {cap})"
@@ -79,6 +99,7 @@ class BudgetExceeded(RuntimeError):
         self.used = used
         self.cap = cap
         self.unit = unit
+        self.reason = reason
 
 
 class LLM:
@@ -98,6 +119,8 @@ class LLM:
             "curated": settings.curated_models,
         }
         self._curated_profile = settings.curated_request_profile
+        self._curated_attempt_cap = settings.daily_attempts_curated
+        self._curated_workflow_cap = settings.daily_workflows_curated
         self._curated_review_models = settings.curated_review_models
         self._curated_public = settings.curated_channel_id is not None
         self._caps = {
@@ -204,6 +227,9 @@ class LLM:
         self, messages: list[dict[str, Any]], response_format: dict[str, Any], *, review: bool,
     ) -> Any:
         profile = curated_protocol.CURATED_REVIEWER if review else curated_protocol.CURATED_WRITER
+        workflow_id = _curated_workflow_id.get()
+        if workflow_id is None:
+            raise LLMConfigError("selected Curated profile requires an editorial workflow")
         try:
             kwargs = curated_protocol.request_kwargs(
                 profile, messages, response_format, max_tokens=profile.max_tokens,
@@ -214,22 +240,45 @@ class LLM:
         input_bound = curated_protocol.input_token_upper_bound(messages, response_format)
         if input_bound > curated_protocol.MAX_INPUT_TOKENS:
             raise LLMConfigError("Curated request exceeds the input reservation maximum")
-        used = await self._store.usage_today("curated")
-        if used >= self._caps["curated"]:
-            raise BudgetExceeded("curated", used, self._caps["curated"])
-        spent = await self._store.cost_today("curated")
-        if self._usd_caps["curated"] > 0 and spent >= self._usd_caps["curated"]:
-            raise BudgetExceeded("curated", spent, self._usd_caps["curated"], unit="usd")
+        reservation = {
+            "workflow_id": workflow_id, "role": "reviewer" if review else "writer",
+            "profile": profile.name, "input_tokens": input_bound,
+            "output_tokens": profile.max_tokens,
+            "cost_usd": (
+                input_bound * max(profile.prompt_usd_per_million,
+                                  profile.prompt_cache_write_usd_per_million)
+                + profile.max_tokens * profile.completion_usd_per_million
+            ) / Decimal(1_000_000),
+            "token_cap": self._caps["curated"], "usd_cap": self._usd_caps["curated"],
+            "max_attempts": self._curated_attempt_cap, "max_workflows": self._curated_workflow_cap,
+            "timeout_seconds": profile.timeout,
+        }
+        attempt_id = await self._store.reserve_curated_attempt(**reservation)
         kwargs["extra_headers"] = curated_protocol.PROFILE_HEADERS
         diagnostic = {
             "profile": self._curated_profile, "role": "reviewer" if review else "writer",
             "model": profile.model, "status": "pending", "usage": None,
         }
+        if attempt_id is None:
+            state = await self._store.curated_budget_state(request=reservation)
+            reason = state["denial_reason"] or "budget_changed"
+            diagnostic["status"] = f"budget_{reason}"
+            await self._store.set_meta("curated_profile_last_call", json.dumps(diagnostic))
+            metrics.LLM_BUDGET_EXCEEDED.labels("curated", reason).inc()
+            raise BudgetExceeded(
+                "curated", state["used_tokens"], self._caps["curated"], reason=reason,
+            )
         await self._store.set_meta("curated_profile_last_call", json.dumps(diagnostic))
         metrics.LLM_REQUESTS.labels("curated").inc()
         try:
             response = await self._client.chat.completions.create(**kwargs)
+        except asyncio.CancelledError:
+            await self._store.mark_curated_attempt_uncertain(attempt_id)
+            diagnostic["status"] = "request_interrupted_uncertain"
+            await self._store.set_meta("curated_profile_last_call", json.dumps(diagnostic))
+            raise
         except Exception:
+            await self._store.mark_curated_attempt_uncertain(attempt_id)
             diagnostic["status"] = "request_error_uncertain"
             await self._store.set_meta("curated_profile_last_call", json.dumps(diagnostic))
             metrics.LLM_ERRORS.labels("curated", "request_error_uncertain").inc()
@@ -243,11 +292,22 @@ class LLM:
               or (usage["reasoning_tokens"] is not None
                   and usage["reasoning_tokens"] > usage["output_tokens"])):
             status = "invalid_usage_accounting"
-        else:
-            await self._store.add_usage(
-                "curated", usage["input_tokens"], usage["output_tokens"],
-                cost_usd=float(usage["cost_usd"]),
-            )
+        # Content rejection can still have trustworthy accounting. Verify the route
+        # independently because the response classifier checks content failures first.
+        accounting_route = curated_protocol._response_status(
+            {**visible, "content": "accounting", "finish_reason": "stop", "refusal": None},
+            profile,
+        )
+        raw_usage = getattr(response, "usage", None)
+        settled = await self._store.finish_curated_attempt(
+            attempt_id, input_tokens=getattr(raw_usage, "prompt_tokens", None),
+            output_tokens=getattr(raw_usage, "completion_tokens", None),
+            cost_usd=getattr(raw_usage, "cost", None),
+            uncertain=(usage is None or accounting_route != "completed"
+                       or status == "invalid_usage_accounting"),
+        )
+        if settled == "overrun":
+            status = "reservation_overrun"
         cache = visible["usage_details"]
         if status == "completed" and any(
             cache[key] is not None and cache[key] > 0

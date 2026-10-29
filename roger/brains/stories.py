@@ -14,7 +14,7 @@ import discord
 
 from roger.brains.curated import DraftError, _json_object, _response_text, _safe_link
 from roger.identity import ROGER_IDENTITY
-from roger.llm import LLM
+from roger.llm import LLM, curated_workflow
 
 MAX_SOURCES = 8
 SOURCE_EXCERPT_CAP = 1_600
@@ -959,6 +959,7 @@ async def _review(
     return parse_review(_story_response_text(response), decision, sources)
 
 
+@curated_workflow()
 async def decide(
     entries: list[dict[str, Any]],
     history: dict[str, list[dict[str, Any]]],

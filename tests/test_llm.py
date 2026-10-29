@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import httpx
@@ -19,6 +20,7 @@ from roger.llm import (
     CuratedModelError,
     LLMConfigError,
     _retry_after_seconds,
+    curated_workflow,
 )
 from roger.store import Store
 
@@ -38,6 +40,9 @@ _REQUIRED = {
 
 
 def _env(monkeypatch, **extra):
+    if extra.get("CURATED_REQUEST_PROFILE") == "sol-astra-v1":
+        extra = {"DAILY_USD_CURATED": "2", "DAILY_ATTEMPTS_CURATED": "8",
+                 "DAILY_WORKFLOWS_CURATED": "2", **extra}
     for key, value in {**_REQUIRED, **extra}.items():
         monkeypatch.setenv(key, value)
 
@@ -571,6 +576,7 @@ async def test_curated_budget_exceeded_before_network(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("review", [False, True])
+@curated_workflow()
 async def test_selected_curated_profile_uses_evaluated_output_limits(monkeypatch, tmp_path, review):
     _env(monkeypatch, MODEL_CURATED="legacy/writer", MODEL_CURATED_REVIEW="legacy/reviewer",
          CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
@@ -627,6 +633,7 @@ def test_production_curated_profiles_match_evaluated_contract():
 
 
 @pytest.mark.parametrize("review", [False, True])
+@curated_workflow()
 async def test_production_profile_serializes_exact_request(monkeypatch, tmp_path, review):
     _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
     store = await Store(str(tmp_path / "wire.db")).open()
@@ -684,6 +691,7 @@ async def test_production_profile_serializes_exact_request(monkeypatch, tmp_path
     ("cache_write", "prompt_cache_policy_mismatch"), ("wrong_model", "model_mismatch"),
     ("blank", "blank_response"),
 ])
+@curated_workflow()
 async def test_profile_response_failures_preserve_safe_usage(
     monkeypatch, tmp_path, kind, status,
 ):
@@ -719,12 +727,16 @@ async def test_profile_response_failures_preserve_safe_usage(
         assert json.loads(diagnostic)["status"] == status
         assert "private source text" not in diagnostic
         assert "unexpected/private-model" not in diagnostic
-        assert await store.cost_today("curated") == (0 if kind == "missing_usage" else 0.01)
+        uncertain = kind in {"missing_usage", "null_choices", "empty_choices", "wrong_model"}
+        assert await store.cost_today("curated") == (0 if uncertain else 0.01)
+        state = await store.curated_budget_state()
+        assert state["unknown_attempts"] == int(uncertain)
     finally:
         await llm._client.close()
         await store.close()
 
 
+@curated_workflow()
 async def test_profile_transport_has_one_attempt_and_sanitized_uncertainty(monkeypatch, tmp_path):
     _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
     store = await Store(str(tmp_path / "transport.db")).open()
@@ -781,6 +793,214 @@ async def test_profile_preflight_checks_effective_pair_not_legacy_chains(monkeyp
     monkeypatch.setattr(llm._client, "get", get)
     try:
         assert await llm.preflight() == []
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+async def _profile_call(llm, *, content="finding"):
+    return await llm.complete(
+        "curated", [{"role": "user", "content": content}], curated_story=True,
+        response_format=stories.DECISION_RESPONSE_FORMAT,
+    )
+
+
+@pytest.mark.parametrize("gate", ["tokens", "usd"])
+@curated_workflow()
+async def test_profile_reserves_full_request_before_first_network_call(monkeypatch, tmp_path, gate):
+    profile = curated_protocol.CURATED_WRITER
+    bound = curated_protocol.input_token_upper_bound(
+        [{"role": "user", "content": "finding"}], stories.DECISION_RESPONSE_FORMAT,
+    )
+    # This would cover ordinary input pricing, but not the declared cache-write price.
+    base_cost = (bound * profile.prompt_usd_per_million
+                 + profile.max_tokens * profile.completion_usd_per_million) / Decimal(1_000_000)
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true",
+         **({"DAILY_TOKENS_CURATED": str(bound + profile.max_tokens - 1)} if gate == "tokens"
+            else {"DAILY_USD_CURATED": str(base_cost)}))
+    store = await Store(str(tmp_path / "preflight-reservation.db")).open()
+    llm = LLM(Settings(), store)
+
+    async def create(**kwargs):
+        raise AssertionError("denied reservation must not call provider")
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        with pytest.raises(BudgetExceeded, match=f"reservation denied: {gate}"):
+            await _profile_call(llm)
+        state = await store.curated_budget_state()
+        assert state["used_tokens"] == state["attempts_today"] == 0
+        diagnostic = json.loads(await store.get_meta("curated_profile_last_call"))
+        assert diagnostic["status"] == f"budget_{gate}"
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+async def test_profile_rejects_calls_without_a_workflow(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "context.db")).open()
+    llm = LLM(Settings(), store)
+    try:
+        with pytest.raises(LLMConfigError, match="requires an editorial workflow"):
+            await _profile_call(llm)
+        assert (await store.curated_budget_state())["attempts_today"] == 0
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+@curated_workflow()
+async def test_profile_counts_utf8_and_schema_before_reserving(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "input.db")).open()
+    llm = LLM(Settings(), store)
+    try:
+        with pytest.raises(LLMConfigError, match="input reservation maximum"):
+            await _profile_call(llm, content="é" * 15_000)
+        assert (await store.curated_budget_state())["attempts_today"] == 0
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+@curated_workflow()
+async def test_profile_fifth_call_in_one_workflow_is_denied(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "four-calls.db")).open()
+    llm = LLM(Settings(), store)
+    calls = 0
+
+    async def create(**kwargs):
+        nonlocal calls
+        calls += 1
+        return ChatCompletion.model_validate(_profile_response())
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        for _ in range(4):
+            await _profile_call(llm)
+        with pytest.raises(BudgetExceeded, match="workflow_attempts"):
+            await _profile_call(llm)
+        assert calls == 4
+        state = await store.curated_budget_state()
+        assert state["attempts_today"] == 4
+        assert state["workflows_today"] == 1
+        assert state["used_tokens"] == 600
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+async def test_profile_concurrent_workflows_have_independent_context(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true",
+         DAILY_TOKENS_CURATED="100000")
+    store = await Store(str(tmp_path / "concurrent.db")).open()
+    llm = LLM(Settings(), store)
+    both_started = asyncio.Event()
+    calls = 0
+
+    async def create(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            both_started.set()
+        await both_started.wait()
+        return ChatCompletion.model_validate(_profile_response())
+
+    async def workflow():
+        async with curated_workflow():
+            return await _profile_call(llm)
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        await asyncio.wait_for(asyncio.gather(workflow(), workflow()), timeout=5)
+        assert calls == 2
+        state = await store.curated_budget_state()
+        assert state["workflows_today"] == state["attempts_today"] == 2
+        with pytest.raises(BudgetExceeded, match="daily_workflows"):
+            await workflow()
+        assert calls == 2
+        with pytest.raises(LLMConfigError, match="editorial workflow"):
+            await _profile_call(llm)
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+async def test_profile_cancellation_keeps_reservation_after_reopen(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    path = str(tmp_path / "cancel.db")
+    store = await Store(path).open()
+    llm = LLM(Settings(), store)
+    started = asyncio.Event()
+
+    async def create(**kwargs):
+        started.set()
+        await asyncio.Future()
+
+    async def workflow():
+        async with curated_workflow():
+            return await _profile_call(llm)
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        task = asyncio.create_task(workflow())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        diagnostic = json.loads(await store.get_meta("curated_profile_last_call"))
+        assert diagnostic["status"] == "request_interrupted_uncertain"
+    finally:
+        await llm._client.close()
+        await store.close()
+    reopened = await Store(path).open()
+    try:
+        state = await reopened.curated_budget_state()
+        assert state["unknown_attempts"] == 1
+        assert state["unknown_tokens"] > 16_384
+        assert state["unknown_usd"] > 0.16384
+        assert state["attempts_today"] == state["workflows_today"] == 1
+    finally:
+        await reopened.close()
+
+
+@pytest.mark.parametrize("missing_tokens", [False, True])
+@curated_workflow()
+async def test_profile_reported_overrun_keeps_actual_cost_even_with_partial_usage(
+    monkeypatch, tmp_path, missing_tokens,
+):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "overrun.db")).open()
+    llm = LLM(Settings(), store)
+    response = ChatCompletion.model_validate(_profile_response())
+    response.usage.cost = 1.25
+    if missing_tokens:
+        response.usage.prompt_tokens = None
+    calls = 0
+
+    async def create(**kwargs):
+        nonlocal calls
+        calls += 1
+        return response
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        with pytest.raises(CuratedModelError, match="reservation_overrun"):
+            await _profile_call(llm)
+        state = await store.curated_budget_state()
+        assert state["unknown_usd"] == 1.25
+        assert state["unknown_tokens"] > 16_384
+        assert state["used_usd"] == 0
+        rows = await store._conn.execute_fetchall(
+            "SELECT actual_cost_usd FROM curated_model_attempt",
+        )
+        assert rows[0][0] == "1.25"
+        async with curated_workflow():
+            with pytest.raises(BudgetExceeded, match="reservation_overrun"):
+                await _profile_call(llm)
+        assert calls == 1
     finally:
         await llm._client.close()
         await store.close()

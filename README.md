@@ -152,9 +152,28 @@ Feature-complete across the planned phases:
 
   The scheduled job keeps its 30-minute overall lease and deadline, which can interrupt the
   four-call workflow before all per-call timeouts elapse. The selector defaults to `legacy` and
-  does not change deployed channels, schedules, or budgets. Existing budget checks compare
-  already-reported usage, so they are not hard spend reservations; [#117](https://github.com/R055LE/roger/issues/117)
-  tracks reservation enforcement before activating this profile in production.
+  does not change deployed channels, schedules, or budgets. Selecting the profile also requires
+  positive `DAILY_USD_CURATED`, `DAILY_ATTEMPTS_CURATED`, and `DAILY_WORKFLOWS_CURATED`; all three
+  default to zero. One workflow is a scheduled editorial evaluation or manual preview, with up to
+  four model attempts. These limits are independent of source observations and posted messages.
+
+  Each selected-profile attempt reserves its request-specific input bound and full output ceiling
+  before provider I/O. The input bound includes UTF-8 messages, the complete schema, and framing,
+  up to 32,768 tokens; no evidence is trimmed to fit the budget. The dollar reservation includes
+  the higher cache-write input price. Admission compares used plus outstanding amounts against
+  both daily caps, including legacy Curated usage. Trustworthy completed usage settles once;
+  malformed, interrupted, or ambiguous calls keep their reservation. Reported overruns retain the
+  larger amount and hold all further selected-profile admissions: the previous bound was wrong.
+  Higher caps, midnight, and restarts do not release that hold; explicit reconciliation is required.
+  Reservations never expire or automatically replay.
+
+  Budget days use the host-local day, as existing usage does; posting and source-observation limits
+  use `TZ`. Attempts count on admission day and actual settled charges on completion day. A workflow
+  continued after midnight counts on each day it makes a call. Unresolved reservations carry across
+  midnight and restarts until explicitly reconciled; there is no automatic release or reconciliation
+  command. `/status` shows used, reserved, and unknown amounts plus the last model or budget refusal.
+  The content-free accounting ledger follows existing usage retention and is not automatically
+  pruned. Legacy model profiles keep their existing budget behavior.
 
 Runs as a non-root, read-only-rootfs container. More than 300 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder

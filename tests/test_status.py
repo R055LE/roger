@@ -205,3 +205,58 @@ async def test_gather_status_reports_channel_and_guild_state(tmp_path):
         assert "curated: unconfigured" in body
     finally:
         await store.close()
+
+
+async def test_status_shows_curated_reserved_unknown_and_last_budget_reason(tmp_path):
+    store = await Store(str(tmp_path / "budget.db")).open()
+    request = dict(
+        role="writer", profile="sol", input_tokens=100, output_tokens=200,
+        cost_usd="0.01", token_cap=1000, usd_cap="0.1", max_attempts=8, max_workflows=2,
+        timeout_seconds=1200,
+    )
+    try:
+        settled = await store.reserve_curated_attempt(workflow_id="a", **request)
+        await store.finish_curated_attempt(
+            settled, input_tokens=10, output_tokens=20, cost_usd="0.001",
+        )
+        unknown = await store.reserve_curated_attempt(workflow_id="a", **request)
+        await store.mark_curated_attempt_uncertain(unknown)
+        await store.reserve_curated_attempt(workflow_id="b", **request)
+        await store.set_meta("curated_profile_last_call", json.dumps({"status": "budget_tokens"}))
+        body = await gather_status(
+            store=store, settings=_settings(
+                curated_request_profile="sol-astra-v1", daily_attempts_curated=8,
+                daily_workflows_curated=2,
+            ), guild=_fake_guild(channels={42: _FakeChannel()}),
+        )
+        assert "used: 30 tokens; $0.001000" in body
+        assert "reserved: 300 tokens; $0.010000" in body
+        assert "unknown: 300 tokens; $0.010000" in body
+        assert "curated model attempts: 3/8; workflows: 2/2" in body
+        assert "curated last model result: budget_tokens" in body
+        assert "host day; unresolved calls carry forward" in body
+    finally:
+        await store.close()
+
+
+async def test_status_shows_persistent_overrun_hold_without_a_new_call(tmp_path):
+    store = await Store(str(tmp_path / "overrun.db")).open()
+    try:
+        attempt = await store.reserve_curated_attempt(
+            workflow_id="a", role="writer", profile="sol", input_tokens=100, output_tokens=200,
+            cost_usd="0.01", token_cap=1000, usd_cap="0.1", max_attempts=8, max_workflows=2,
+            timeout_seconds=1200,
+        )
+        await store.finish_curated_attempt(
+            attempt, input_tokens=10, output_tokens=20, cost_usd="0.02",
+        )
+        body = await gather_status(
+            store=store, settings=_settings(
+                curated_request_profile="sol-astra-v1", daily_attempts_curated=8,
+                daily_workflows_curated=2,
+            ), guild=_fake_guild(channels={42: _FakeChannel()}),
+        )
+        assert "unknown: 300 tokens; $0.020000" in body
+        assert "curated reservation hold: reservation_overrun; reconciliation required" in body
+    finally:
+        await store.close()

@@ -10,6 +10,340 @@ from roger.request_context import request_context
 from roger.store import CURATED_CHECK_LEASE_SECONDS, RETENTION_DAYS, AuditStatus, Store
 
 
+def _attempt(workflow_id="workflow-a", **overrides):
+    args = dict(
+        workflow_id=workflow_id, role="writer", profile="sol", input_tokens=100,
+        output_tokens=200, cost_usd="0.01", token_cap=1000, usd_cap="0.1",
+        max_attempts=10, max_workflows=10, timeout_seconds=1200, now=1000,
+    )
+    args.update(overrides)
+    return args
+
+
+@pytest.mark.parametrize("shared_connection", [False, True])
+@pytest.mark.parametrize("limit", [
+    {"token_cap": 800}, {"usd_cap": "0.02"}, {"max_attempts": 1}, {"max_workflows": 1},
+])
+async def test_curated_reservations_cannot_spend_the_same_last_budget(
+    tmp_path, shared_connection, limit,
+):
+    path = str(tmp_path / "roger.db")
+    first = await Store(path).open()
+    second = first if shared_connection else await Store(path).open()
+    try:
+        await first.add_usage("curated", 400, 100, 0.01)
+        claims = await asyncio.gather(
+            first.reserve_curated_attempt(**_attempt("a", **limit)),
+            second.reserve_curated_attempt(**_attempt("b", **limit)),
+            first.add_usage("admin", 10, 20, 0.1),
+        )
+        assert sum(claim is not None for claim in claims[:2]) == 1
+        state = await first.curated_budget_state(now=1001)
+        assert state["used_tokens"] == 500
+        assert state["reserved_tokens"] == 300
+        assert state["attempts_today"] == state["workflows_today"] == 1
+    finally:
+        if second is not first:
+            await second.close()
+        await first.close()
+
+
+@pytest.mark.parametrize("settlement", [False, True])
+async def test_curated_ledger_survives_other_store_methods_rolling_back(
+    tmp_path, monkeypatch, settlement,
+):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        claim = await store.reserve_curated_attempt(**_attempt()) if settlement else None
+        await store._conn.execute("BEGIN")
+        original = store._conn.execute_fetchall
+
+        async def interleave_rollback(sql, parameters=None):
+            rows = await original(sql, parameters)
+            if "RETURNING" in sql:
+                with pytest.raises(RuntimeError, match="claim missing"):
+                    await store.mark_curated_sent(-1, 1)
+            return rows
+
+        monkeypatch.setattr(store._conn, "execute_fetchall", interleave_rollback)
+        if settlement:
+            assert await store.finish_curated_attempt(
+                claim, input_tokens=10, output_tokens=20, cost_usd="0.001",
+            ) == "settled"
+        else:
+            claim = await store.reserve_curated_attempt(**_attempt())
+            assert claim is not None
+        with pytest.raises(RuntimeError, match="claim missing"):
+            await store.mark_curated_sent(-1, 1)
+        rows = await original("SELECT state FROM curated_model_attempt WHERE id = ?", (claim,))
+        assert [row[0] for row in rows] == ["settled" if settlement else "reserved"]
+    finally:
+        await store.close()
+
+
+async def test_curated_memory_store_shares_usage_and_ledger():
+    store = await Store(":memory:").open()
+    try:
+        await store.add_usage("curated", 100, 200, 0.01)
+        assert await store.reserve_curated_attempt(**_attempt(token_cap=599)) is None
+        claim = await store.reserve_curated_attempt(**_attempt(token_cap=600))
+        assert claim is not None
+        assert (await store.curated_budget_state(now=1001))["reserved_tokens"] == 300
+        assert await store.finish_curated_attempt(
+            claim, input_tokens=10, output_tokens=20, cost_usd="0.001",
+        ) == "settled"
+        assert await store.usage_today("curated") == 330
+    finally:
+        await store.close()
+
+
+async def test_curated_status_read_cannot_hold_a_snapshot_across_admission(tmp_path, monkeypatch):
+    path = str(tmp_path / "roger.db")
+    first, second = await Store(path).open(), await Store(path).open()
+    read_started, release_read = asyncio.Event(), asyncio.Event()
+    original_execute = first._curated_conn.execute
+    original_fetchall = first._curated_conn.execute_fetchall
+
+    async def execute(sql, parameters=None):
+        cursor = await original_execute(sql, parameters)
+        if "AS denial_reason FROM budget" in sql:
+            read_started.set()
+            await release_read.wait()
+        return cursor
+
+    async def execute_fetchall(sql, parameters=None):
+        rows = await original_fetchall(sql, parameters)
+        if "AS denial_reason FROM budget" in sql:
+            read_started.set()
+            await release_read.wait()
+        return rows
+
+    monkeypatch.setattr(first._curated_conn, "execute", execute)
+    monkeypatch.setattr(first._curated_conn, "execute_fetchall", execute_fetchall)
+    status = asyncio.create_task(first.curated_budget_state(now=1001))
+    try:
+        await asyncio.wait_for(read_started.wait(), timeout=5)
+        assert await second.reserve_curated_attempt(**_attempt("other-connection")) is not None
+        assert await first.reserve_curated_attempt(**_attempt("status-connection")) is not None
+    finally:
+        release_read.set()
+        await status
+        await first.close()
+        await second.close()
+
+
+@pytest.mark.parametrize(("limit", "reason"), [
+    ({"token_cap": 299}, "tokens"), ({"usd_cap": "0.009999999999"}, "usd"),
+    ({"max_attempts": 0}, "disabled"), ({"max_workflows": 0}, "disabled"),
+    ({"token_cap": 0}, "disabled"), ({"usd_cap": 0}, "disabled"),
+])
+async def test_curated_admission_reports_the_current_gate(tmp_path, limit, reason):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        request = _attempt(**limit)
+        assert await store.reserve_curated_attempt(**request) is None
+        state = await store.curated_budget_state(request=request)
+        assert state["denial_reason"] == reason
+        assert state["attempts_today"] == 0
+    finally:
+        await store.close()
+
+
+async def test_curated_workflow_and_attempt_limits_are_independent(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        for _ in range(4):
+            claim = await store.reserve_curated_attempt(**_attempt(max_workflows=1))
+            assert claim is not None
+            assert await store.finish_curated_attempt(
+                claim, input_tokens=10, output_tokens=20, cost_usd="0.001",
+            ) == "settled"
+        request = _attempt(max_workflows=1)
+        assert await store.reserve_curated_attempt(**request) is None
+        state = await store.curated_budget_state(request=request)
+        assert state["denial_reason"] == "workflow_attempts"
+        assert state["attempts_today"] == 4
+        assert state["workflows_today"] == 1
+        request = _attempt("new-workflow", max_workflows=1)
+        assert await store.reserve_curated_attempt(**request) is None
+        assert (await store.curated_budget_state(request=request))["denial_reason"] == (
+            "daily_workflows"
+        )
+        request = _attempt("new-workflow", max_attempts=4)
+        assert await store.reserve_curated_attempt(**request) is None
+        assert (await store.curated_budget_state(request=request))["denial_reason"] == (
+            "daily_attempts"
+        )
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("shared_connection", [False, True])
+async def test_curated_settlement_is_exactly_once_and_adds_legacy_usage(
+    tmp_path, shared_connection,
+):
+    path = str(tmp_path / "roger.db")
+    first = await Store(path).open()
+    second = first if shared_connection else await Store(path).open()
+    try:
+        await first.add_usage("curated", 30, 20, 0.005)
+        claim = await first.reserve_curated_attempt(**_attempt())
+        results = await asyncio.gather(*[
+            store.finish_curated_attempt(
+                claim, input_tokens=10, output_tokens=20, cost_usd="0.00123456789",
+            ) for store in (first, second)
+        ])
+        assert sorted(str(result) for result in results) == ["None", "settled"]
+        assert await first.usage_today("curated") == 80
+        assert await first.cost_today("curated") == pytest.approx(0.00623456789)
+        state = await first.curated_budget_state(now=1001)
+        assert state["reserved_tokens"] == state["unknown_tokens"] == 0
+        assert state["used_cost_units"] == 6_234_568
+        assert await first.mark_curated_attempt_uncertain(claim) is None
+        assert await first.usage_today("admin") == 0
+    finally:
+        if second is not first:
+            await second.close()
+        await first.close()
+
+
+@pytest.mark.parametrize("usage", [
+    {}, {"input_tokens": -1, "output_tokens": 10, "cost_usd": "0.001"},
+    {"input_tokens": True, "output_tokens": 10, "cost_usd": "0.001"},
+    {"input_tokens": 10, "output_tokens": 1.5, "cost_usd": "0.001"},
+    {"input_tokens": 10, "output_tokens": 20, "cost_usd": float("nan")},
+    {"input_tokens": 10, "output_tokens": 20, "cost_usd": float("inf")},
+    {"input_tokens": 10, "output_tokens": 20, "cost_usd": -0.001},
+    {"input_tokens": 10, "output_tokens": 20, "cost_usd": "unusable"},
+    {"input_tokens": 10, "output_tokens": 20, "cost_usd": "0.001", "uncertain": True},
+])
+async def test_curated_untrustworthy_outcomes_keep_full_reservation(tmp_path, usage):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        claim = await store.reserve_curated_attempt(**_attempt())
+        assert await store.finish_curated_attempt(claim, **usage) == "uncertain"
+        assert await store.finish_curated_attempt(
+            claim, input_tokens=1, output_tokens=1, cost_usd=0,
+        ) is None
+        state = await store.curated_budget_state(now=1001)
+        assert state["used_tokens"] == state["reserved_tokens"] == 0
+        assert state["unknown_tokens"] == 300
+        assert state["unknown_usd"] == 0.01
+        assert state["unknown_attempts"] == 1
+        assert await store.reserve_curated_attempt(**_attempt("new", token_cap=599)) is None
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("usage", [
+    {"input_tokens": 150, "output_tokens": 250, "cost_usd": "0.02"},
+    {"cost_usd": "0.02"},
+])
+async def test_curated_known_overrun_never_shrinks_to_reserved_charge(tmp_path, usage):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        claim = await store.reserve_curated_attempt(**_attempt())
+        assert await store.finish_curated_attempt(claim, **usage) == "overrun"
+        state = await store.curated_budget_state(now=1001)
+        assert state["unknown_tokens"] == (400 if "input_tokens" in usage else 300)
+        assert state["unknown_usd"] == 0.02
+        assert await store.reserve_curated_attempt(**_attempt("new", usd_cap="0.029")) is None
+        rows = await store._conn.execute_fetchall(
+            "SELECT actual_cost_usd FROM curated_model_attempt WHERE id = ?", (claim,),
+        )
+        assert rows[0][0] == "0.02"
+    finally:
+        await store.close()
+
+
+async def test_curated_overrun_blocks_new_workflows_after_midnight_and_cap_increase(
+    tmp_path, monkeypatch,
+):
+    path = str(tmp_path / "roger.db")
+    monkeypatch.setattr("roger.store._today", lambda: "2026-10-01")
+    store = await Store(path).open()
+    claim = await store.reserve_curated_attempt(**_attempt())
+    assert await store.finish_curated_attempt(
+        claim, input_tokens=10, output_tokens=20, cost_usd="0.02",
+    ) == "overrun"
+    await store.close()
+    monkeypatch.setattr("roger.store._today", lambda: "2026-10-02")
+    store = await Store(path).open()
+    try:
+        request = _attempt("new-workflow", token_cap=100_000, usd_cap="10")
+        assert await store.reserve_curated_attempt(**request) is None
+        state = await store.curated_budget_state(request=request)
+        assert state["denial_reason"] == "reservation_overrun"
+        assert state["overrun_attempts"] == 1
+        assert state["attempts_today"] == 0
+        assert state["unknown_usd"] == 0.02
+    finally:
+        await store.close()
+
+
+async def test_curated_unknowns_survive_restart_midnight_and_prune(tmp_path, monkeypatch):
+    path = str(tmp_path / "roger.db")
+    monkeypatch.setattr("roger.store._today", lambda: "2026-10-01")
+    store = await Store(path).open()
+    claim = await store.reserve_curated_attempt(**_attempt("carried"))
+    pending = await store.reserve_curated_attempt(**_attempt("unknown"))
+    await store.close()
+    monkeypatch.setattr("roger.store._today", lambda: "2026-10-02")
+    store = await Store(path).open()
+    try:
+        state = await store.curated_budget_state(now=1100)
+        assert state["attempts_today"] == state["workflows_today"] == 0
+        assert state["reserved_tokens"] == 600
+        assert state["unknown_tokens"] == 0
+        state = await store.curated_budget_state(now=2200)
+        assert state["reserved_tokens"] == 0
+        assert state["unknown_tokens"] == 600
+        assert await store.reserve_curated_attempt(**_attempt("new", token_cap=899)) is None
+        assert await store.finish_curated_attempt(
+            claim, input_tokens=10, output_tokens=20, cost_usd="0.001", now=2201,
+        ) == "settled"
+        assert await store.usage_today("curated") == 30
+        assert await store.cost_today("curated") == 0.001
+        assert await store.reserve_curated_attempt(**_attempt("carried", now=2202)) is not None
+        state = await store.curated_budget_state(now=2202)
+        assert state["attempts_today"] == state["workflows_today"] == 1
+        assert state["unknown_tokens"] == 300
+        await store.prune(now=time.time() + 400 * 86400)
+        assert (await store.curated_budget_state(now=2202))["unknown_tokens"] == 300
+        assert await store.mark_curated_attempt_uncertain(pending) == "uncertain"
+    finally:
+        await store.close()
+
+
+async def test_curated_fractional_nanocharges_round_against_admission(tmp_path):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        await store.add_usage("curated", 0, 0, 0.0000000001)
+        request = _attempt(cost_usd="0.0000000001", usd_cap="0.0000000019")
+        assert await store.reserve_curated_attempt(**request) is None
+        assert (await store.curated_budget_state(request=request))["denial_reason"] == "usd"
+        request["usd_cap"] = "0.000000002"
+        assert await store.reserve_curated_attempt(**request) is not None
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("invalid", [
+    {"workflow_id": ""}, {"workflow_id": "secret/request"}, {"profile": "x" * 81},
+    {"role": "admin"}, {"input_tokens": 32_769}, {"output_tokens": 16_385},
+    {"input_tokens": True}, {"max_attempts": -1}, {"cost_usd": "NaN"},
+    {"usd_cap": -1}, {"timeout_seconds": 0}, {"now": float("inf")},
+])
+async def test_curated_invalid_reservation_cannot_create_a_ledger_row(tmp_path, invalid):
+    store = await Store(str(tmp_path / "roger.db")).open()
+    try:
+        with pytest.raises(ValueError):
+            await store.reserve_curated_attempt(**_attempt(**invalid))
+        assert (await store.curated_budget_state())["attempts_today"] == 0
+    finally:
+        await store.close()
+
+
 async def test_record_audit_persists(tmp_path):
     store = await Store(str(tmp_path / "roger.db")).open()
     try:
