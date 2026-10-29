@@ -1,4 +1,5 @@
 import copy
+import dataclasses
 import json
 from decimal import Decimal
 from types import SimpleNamespace
@@ -181,8 +182,8 @@ def test_offline_plan_does_not_construct_client(monkeypatch):
     assert plan["credentials_required"] is False
     assert plan["writer_screen"]["calls"] == 48
     assert plan["reviewer_calibration"]["calls"] == 48
-    assert plan["writer_screen"]["cost_upper_bound_usd"] == "20.40"
-    assert plan["reviewer_calibration"]["cost_upper_bound_usd"] == "7.20"
+    assert plan["writer_screen"]["cost_upper_bound_usd"] == "21.84"
+    assert plan["reviewer_calibration"]["cost_upper_bound_usd"] == "8.16"
     assert plan["selected_pair_workflow"]["maximum_calls_for_two_pairings"] == 96
 
 
@@ -200,17 +201,167 @@ def test_input_reservation_counts_utf8_bytes_and_full_schema():
     assert spec.inventory()["input_token_reserve"] == 32768
 
 
+def test_openai_reservations_cover_possible_prompt_cache_writes():
+    _, cases, reviews = _fixture_data()
+    profiles = story_eval.load_profiles()
+    writer = story_eval._writer_spec(cases["straight_release"], profiles["sol"], 1)
+    reviewer = story_eval._reviewer_spec(reviews["good_release"], cases, profiles["astra"], 1)
+
+    assert writer.reserved_cost_usd == Decimal("0.25")
+    assert reviewer.reserved_cost_usd == Decimal("0.82")
+
+
+@pytest.mark.parametrize("price", [None, True, -1, "NaN", "Infinity", "unknown"])
+def test_invalid_cache_write_price_rejects_profile(price):
+    record = copy.deepcopy(story_eval._load_json(story_eval.DEFAULT_MODELS)["profiles"]["sol"])
+    record["pricing_usd_per_million"]["prompt_cache_write"] = price
+    with pytest.raises(story_eval.EvaluationError, match="profile"):
+        story_eval.ModelProfile.from_record("sol", record)
+
+
+@pytest.mark.parametrize("field", ["prompt_cache", "prompt_cache_write"])
+def test_missing_cache_policy_or_price_rejects_profile(field):
+    record = copy.deepcopy(story_eval._load_json(story_eval.DEFAULT_MODELS)["profiles"]["sol"])
+    del (record if field == "prompt_cache" else record["pricing_usd_per_million"])[field]
+    with pytest.raises(story_eval.EvaluationError, match="prompt-cache profile"):
+        story_eval.ModelProfile.from_record("sol", record)
+
+
+def test_unsupported_cache_off_policy_rejects_profile():
+    record = copy.deepcopy(story_eval._load_json(story_eval.DEFAULT_MODELS)["profiles"]["sonnet"])
+    record["prompt_cache"] = "disabled"
+    with pytest.raises(story_eval.EvaluationError, match="invalid model profile"):
+        story_eval.ModelProfile.from_record("sonnet", record)
+
+
 @pytest.mark.asyncio
-async def test_sdk_request_is_exactly_pinned_and_has_no_retry_or_sampling(tmp_path):
+async def test_cache_write_reservation_rejects_base_price_cap_before_io(tmp_path):
     _, cases, _ = _fixture_data()
-    profile = story_eval.load_profiles()["sol"]
+    spec = story_eval._writer_spec(cases["straight_release"], story_eval.load_profiles()["sol"], 1)
+    calls = 0
+
+    async def create(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("provider called before full reservation")
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    ledger = story_eval.Ledger(tmp_path / "ledger.json", max_calls=1, max_cost_usd=Decimal("0.23"))
+    with pytest.raises(story_eval.EvaluationError, match="cost budget"):
+        await story_eval.Runner(client, ledger, tmp_path / "responses").call(spec)
+    assert calls == 0
+    assert ledger.data["reserved_calls"] == 0
+
+
+@pytest.mark.parametrize("message", [
+    {"role": "user", "content": [{"type": "text", "text": "example",
+                                  "prompt_cache_breakpoint": {"ttl": "12h"}}]},
+    {"role": "user", "content": "example", "cache_control": {"type": "ephemeral"}},
+])
+def test_unpriced_explicit_message_cache_controls_are_rejected(message):
+    _, cases, _ = _fixture_data()
+    spec = story_eval._writer_spec(cases["straight_release"], story_eval.load_profiles()["sol"], 1)
+    with pytest.raises(story_eval.EvaluationError, match="without cache controls"):
+        story_eval._request_kwargs(dataclasses.replace(spec, messages=[message]))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy,invalid_usage,expected", [
+    ("provider_default", False, "completed"),
+    ("disabled", False, "prompt_cache_policy_mismatch"),
+    ("disabled", True, "missing_usage_or_cost"),
+    ("disabled", "negative_prompt_tokens", "missing_usage_or_cost"),
+])
+async def test_cache_write_evidence_preserves_reported_cost_and_missing_usage(
+    tmp_path, policy, invalid_usage, expected
+):
+    _, cases, _ = _fixture_data()
+    profile = dataclasses.replace(story_eval.load_profiles()["sol"], prompt_cache=policy)
     spec = story_eval._writer_spec(cases["straight_release"], profile, 1)
+    payload = _completion("{}", cost=0.006)
+    payload["id"] = "gen-synthetic-cache-cost"
+    payload["usage"].update({
+        "prompt_tokens": 1600, "completion_tokens": 200, "total_tokens": 1800,
+        "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 1600,
+                                  "unexpected": "do not retain"},
+        "cost_details": {"upstream_inference_cost": 0.006,
+                         "upstream_inference_prompt_cost": 0.004,
+                         "upstream_inference_completions_cost": 0.002,
+                         "unexpected": "do not retain"},
+    })
+    if invalid_usage == "negative_prompt_tokens":
+        payload["usage"]["prompt_tokens"] = -1
+    elif invalid_usage:
+        del payload["usage"]["cost"]
+
+    async def create(**kwargs):
+        return ChatCompletion.model_validate(payload)
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    ledger = story_eval.Ledger(tmp_path / "ledger.json", max_calls=1, max_cost_usd=Decimal("1"))
+    responses = tmp_path / "responses"
+    responses.mkdir()
+    runner = story_eval.Runner(client, ledger, responses)
+    if expected == "completed":
+        await runner.call(spec)
+    else:
+        with pytest.raises(story_eval.EvaluationError, match=expected):
+            await runner.call(spec)
+    artifact = json.loads(next(responses.iterdir()).read_text())
+    assert artifact["response"]["generation_id"] == "gen-synthetic-cache-cost"
+    assert artifact["response"]["usage_details"] == {
+        "cached_tokens": 0, "cache_write_tokens": 1600,
+        "cost_details": {"upstream_inference_cost": "0.006",
+                         "upstream_inference_prompt_cost": "0.004",
+                         "upstream_inference_completions_cost": "0.002"},
+    }
+    assert artifact["response"]["prompt_cache_observation"] == "activity_reported"
+    assert "do not retain" not in json.dumps(artifact)
+    assert ledger.data["used_cost_usd"] == ("0" if invalid_usage else "0.006")
+    assert ledger.data["reserved_cost_usd"] == "0.25"
+    assert artifact["status"] == expected
+
+
+@pytest.mark.parametrize("invalid", [True, -1, "NaN", "Infinity", "private text", {}])
+def test_optional_usage_metadata_rejects_invalid_values_without_losing_cost(invalid):
+    payload = _completion("{}")
+    payload["id"] = "not a generation identifier\nprivate text"
+    response = ChatCompletion.model_construct(
+        **{**payload, "usage": SimpleNamespace(
+            cost=0.01, prompt_tokens=100, completion_tokens=25,
+            completion_tokens_details=None,
+            prompt_tokens_details={"cached_tokens": invalid, "cache_write_tokens": invalid},
+            cost_details={"upstream_inference_cost": invalid},
+        )}
+    )
+    visible = story_eval._visible_response(response)
+    assert visible["generation_id"] is None
+    assert visible["usage_details"] == {
+        "cached_tokens": None, "cache_write_tokens": None,
+        "cost_details": {"upstream_inference_cost": None,
+                         "upstream_inference_prompt_cost": None,
+                         "upstream_inference_completions_cost": None},
+    }
+    assert story_eval._usage(response)["cost_usd"] == Decimal("0.01")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile_name", ["sol", "astra"])
+async def test_sdk_request_is_exactly_pinned_and_has_no_retry_or_sampling(tmp_path, profile_name):
+    _, cases, reviews = _fixture_data()
+    profile = story_eval.load_profiles()[profile_name]
+    spec = (
+        story_eval._writer_spec(cases["straight_release"], profile, 1) if profile_name == "sol"
+        else story_eval._reviewer_spec(reviews["good_release"], cases, profile, 1)
+    )
     requests = []
 
     async def handle(request):
         requests.append(request)
         content = json.dumps(cases["straight_release"]["reference_decision"])
-        return httpx.Response(200, json=_completion(content))
+        payload = _completion(content, model=profile.returned_models[-1])
+        payload["openrouter_metadata"]["requested"] = profile.model
+        return httpx.Response(200, json=payload)
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
     client = AsyncOpenAI(
@@ -227,34 +378,45 @@ async def test_sdk_request_is_exactly_pinned_and_has_no_retry_or_sampling(tmp_pa
 
     assert len(requests) == 1
     request = json.loads(requests[0].content)
-    assert request["model"] == "openai/gpt-6.1-sol-20260929"
+    assert request["model"] == {
+        "sol": "openai/gpt-6.1-sol-20260929", "astra": "openai/gpt-6-astra-20260903"
+    }[profile_name]
     assert request["service_tier"] == "default"
-    assert request["max_tokens"] == 16384
+    assert request["max_tokens"] == (16384 if profile_name == "sol" else 8192)
     assert request["provider"] == {
         "only": ["openai"],
         "allow_fallbacks": False,
         "require_parameters": True,
-        "max_price": {"prompt": 2.0, "completion": 10.0},
+        "max_price": {"prompt": 2.0, "completion": 10.0} if profile_name == "sol" else {
+            "prompt": 10.0, "completion": 50.0
+        },
     }
     assert request["reasoning"] == {"effort": "medium", "exclude": True}
+    assert request["prompt_cache_options"] == {"mode": "explicit"}
+    assert all(set(message) == {"role", "content"} for message in request["messages"])
+    assert all(isinstance(message["content"], str) for message in request["messages"])
     assert request["response_format"]["json_schema"]["strict"] is True
     assert not {"temperature", "top_p", "models"}.intersection(request)
     assert requests[0].headers["x-openrouter-metadata"] == "enabled"
     assert requests[0].headers["x-openrouter-cache"] == "false"
+    artifact = json.loads(next(responses.iterdir()).read_text())
+    assert artifact["request"]["response_cache"] == "disabled"
+    assert artifact["request"]["prompt_cache"] == "disabled"
+    assert artifact["response"]["prompt_cache_observation"] == "unknown"
 
 
 def test_ledger_reserves_before_calls_and_enforces_both_limits(tmp_path):
     _, cases, _ = _fixture_data()
     spec = story_eval._writer_spec(cases["straight_release"], story_eval.load_profiles()["sol"], 1)
-    ledger = story_eval.Ledger(tmp_path / "ledger.json", max_calls=1, max_cost_usd=Decimal("0.23"))
+    ledger = story_eval.Ledger(tmp_path / "ledger.json", max_calls=1, max_cost_usd=Decimal("0.25"))
     ledger.reserve(spec)
     durable = json.loads((tmp_path / "ledger.json").read_text())
     assert durable["reserved_calls"] == 1
-    assert durable["reserved_cost_usd"] == "0.23"
+    assert durable["reserved_cost_usd"] == "0.25"
     with pytest.raises(story_eval.EvaluationError, match="call budget"):
         ledger.reserve(spec)
 
-    costly = story_eval.Ledger(tmp_path / "cost.json", max_calls=2, max_cost_usd=Decimal("0.22"))
+    costly = story_eval.Ledger(tmp_path / "cost.json", max_calls=2, max_cost_usd=Decimal("0.24"))
     with pytest.raises(story_eval.EvaluationError, match="cost budget"):
         costly.reserve(spec)
 
@@ -382,6 +544,11 @@ async def test_missing_optional_reasoning_usage_stays_unknown(tmp_path):
     await client.close()
     assert ledger.data["calls"][0]["status"] == "completed"
     assert ledger.data["calls"][0]["reasoning_tokens"] is None
+    artifact = json.loads(next(responses.iterdir()).read_text())
+    assert artifact["accounting"]["reasoning_tokens"] is None
+    assert artifact["response"]["usage_details"]["cached_tokens"] is None
+    assert artifact["response"]["usage_details"]["cache_write_tokens"] is None
+    assert artifact["response"]["prompt_cache_observation"] == "unknown"
 
 
 @pytest.mark.asyncio
@@ -407,9 +574,11 @@ async def test_malformed_sdk_response_persists_safe_artifacts_and_accounting(
             completion_tokens=25,
             cost=0.01,
             completion_tokens_details=SimpleNamespace(reasoning_tokens=11),
+            prompt_tokens_details=SimpleNamespace(cached_tokens=0, cache_write_tokens=10),
+            cost_details={"upstream_inference_cost": 0.01},
         )
     response = ChatCompletion.model_construct(
-        id="eval-response",
+        id="gen-malformed-response",
         object="chat.completion",
         created=1,
         model="openai/gpt-6.1-sol",
@@ -443,7 +612,7 @@ async def test_malformed_sdk_response_persists_safe_artifacts_and_accounting(
     assert row["status"] == "malformed_response"
     assert durable["reserved_calls"] == 1
     assert durable["used_calls"] == (1 if include_usage else 0)
-    assert durable["reserved_cost_usd"] == "0.23"
+    assert durable["reserved_cost_usd"] == "0.25"
     assert durable["used_cost_usd"] == ("0.01" if include_usage else "0")
 
     artifact = json.loads(next(responses.iterdir()).read_text())
@@ -451,6 +620,10 @@ async def test_malformed_sdk_response_persists_safe_artifacts_and_accounting(
     assert artifact["response"]["shape_error"] == shape_error
     assert artifact["response"]["model"] == "openai/gpt-6.1-sol"
     assert artifact["response"]["route_metadata"]["attempt"] == 1
+    assert artifact["response"]["generation_id"] == "gen-malformed-response"
+    assert artifact["response"]["usage_details"]["cache_write_tokens"] == (
+        10 if include_usage else None
+    )
     assert (artifact["accounting"] is not None) is include_usage
     assert "choices" not in artifact["response"]
     assert "reasoning" not in artifact["response"]

@@ -11,12 +11,13 @@
       "provider": "openai",
       "provider_display_name": "OpenAI",
       "service_tier": "default",
-      "pricing_usd_per_million": {"prompt": 10, "completion": 50},
+      "pricing_usd_per_million": {"prompt": 10, "completion": 50, "prompt_cache_write": 12.5},
       "reasoning_effort": "medium",
       "writer_max_tokens": 16384,
       "reviewer_max_tokens": 8192,
       "available": true,
-      "note": "Strong capability baseline."
+      "note": "Strong capability baseline.",
+      "prompt_cache": "disabled"
     },
     "sol": {
       "model": "openai/gpt-6.1-sol-20260929",
@@ -27,12 +28,13 @@
       "provider": "openai",
       "provider_display_name": "OpenAI",
       "service_tier": "default",
-      "pricing_usd_per_million": {"prompt": 2, "completion": 10},
+      "pricing_usd_per_million": {"prompt": 2, "completion": 10, "prompt_cache_write": 2.5},
       "reasoning_effort": "medium",
       "writer_max_tokens": 16384,
       "reviewer_max_tokens": 8192,
       "available": true,
-      "note": "Balanced OpenAI candidate."
+      "note": "Balanced OpenAI candidate.",
+      "prompt_cache": "disabled"
     },
     "sonnet": {
       "model": "anthropic/claude-sonnet-5.5-20260928",
@@ -43,12 +45,13 @@
       "provider": "anthropic",
       "provider_display_name": "Anthropic",
       "service_tier": "default",
-      "pricing_usd_per_million": {"prompt": 2, "completion": 10},
+      "pricing_usd_per_million": {"prompt": 2, "completion": 10, "prompt_cache_write": 2.5},
       "reasoning_effort": "medium",
       "writer_max_tokens": 16384,
       "reviewer_max_tokens": 8192,
       "available": true,
-      "note": "Cross-provider writing and judgment candidate."
+      "note": "Cross-provider writing and judgment candidate.",
+      "prompt_cache": "provider_default"
     },
     "gemini": {
       "model": "google/gemini-3.8-flash-20260902",
@@ -59,18 +62,23 @@
       "provider": "google-ai-studio",
       "provider_display_name": "Google AI Studio",
       "service_tier": "default",
-      "pricing_usd_per_million": {"prompt": 0.75, "completion": 3.75},
+      "pricing_usd_per_million": {"prompt": 0.75, "completion": 3.75, "prompt_cache_write": 0.75},
       "reasoning_effort": "medium",
       "writer_max_tokens": 16384,
       "reviewer_max_tokens": 8192,
       "available": true,
-      "note": "Catalog endpoint status -2 is recorded but uninterpreted; recheck before paid run."
+      "note": "Catalog endpoint status -2 is recorded but uninterpreted; recheck before paid run.",
+      "prompt_cache": "provider_default"
     }
   },
   "notes": [
     "Every request pins one dated model and one first-party provider, disables fallback, and accepts only the dated ID or its verified canonical base ID.",
-    "Input is reserved at 32768 tokens per call. Output reservations include reasoning tokens and are rounded up to cents per call.",
+    "Input is reserved at 32768 tokens per call using the greater of base and total cache-write input price, including when prompt caching is requested off. Output reservations include reasoning tokens and are rounded up to cents per call.",
     "The Gemini provider choice must be rechecked before a paid run; google-vertex/global requires a separately recorded preflight choice.",
-    "The initial 96-call writer and reviewer matrix has a $28 proposed cap. Two selected pairings allow at most 96 more calls with a $64 proposed cap. Reserve four more calls for separately reviewed held-out current evidence; the exact reservation is 196 calls and $92.60 within a proposed $100 envelope."
-  ]
+    "Historical initial proposal: 196 calls and $92.60 within a $100 envelope. That proposal predates cache-write-aware reservations; use the current plan for new approvals, without rewriting earlier ledgers or allowances.",
+    "Response caching is disabled separately. OpenAI prompt caching is requested off with explicit mode and no breakpoints; other providers retain their default behavior. Missing cache usage is unknown, not proof of no caching.",
+    "prompt_cache_write is the total USD input price per million tokens when writes are possible, not a storage surcharge. Sonnet uses its default five-minute write price. Gemini implicit caching adds no write/storage charge, so its value equals base input pricing. Explicit cache markers and TTLs are not supported."
+  ],
+  "cache_policy_checked_at": "2026-10-29",
+  "cache_policy_source": "https://openrouter.ai/docs/guides/best-practices/prompt-caching"
 }
