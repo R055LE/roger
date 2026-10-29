@@ -10,6 +10,7 @@ fast.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -22,7 +23,7 @@ from openai import (
     RateLimitError,
 )
 
-from roger import metrics
+from roger import curated_protocol, metrics
 from roger.config import Settings
 from roger.store import Store
 
@@ -59,6 +60,14 @@ class LLMConfigError(RuntimeError):
     """A brain was invoked with no models configured (MODEL_<BRAIN> is empty)."""
 
 
+class CuratedModelError(RuntimeError):
+    """A classified non-publishing result; never includes vendor exception text."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(status)
+
+
 class BudgetExceeded(RuntimeError):
     def __init__(self, brain: str, used: float, cap: float, *, unit: str = "tokens") -> None:
         if unit == "usd":
@@ -88,6 +97,7 @@ class LLM:
             "gigabrain": settings.gigabrain_models,
             "curated": settings.curated_models,
         }
+        self._curated_profile = settings.curated_request_profile
         self._curated_review_models = settings.curated_review_models
         self._curated_public = settings.curated_channel_id is not None
         self._caps = {
@@ -127,6 +137,12 @@ class LLM:
             raise ValueError("response format is only available to curated story or review calls")
         if response_format is not None and tools:
             raise ValueError("response format is not available with tools")
+        if brain == "curated" and self._curated_profile != "legacy":
+            if response_format is None or not (curated_story or curated_review) or tools:
+                raise LLMConfigError("selected Curated profile requires a tool-free story request")
+            return await self._complete_curated_profile(
+                messages, response_format, review=curated_review,
+            )
         chain = self._curated_review_models if curated_review else self._chains[brain]
         if not chain:
             setting = "MODEL_CURATED_REVIEW" if curated_review else f"MODEL_{brain.upper()}"
@@ -182,6 +198,72 @@ class LLM:
                 getattr(usage, "completion_tokens", 0) or 0,
                 cost_usd=float(getattr(usage, "cost", 0.0) or 0.0),
             )
+        return response
+
+    async def _complete_curated_profile(
+        self, messages: list[dict[str, Any]], response_format: dict[str, Any], *, review: bool,
+    ) -> Any:
+        profile = curated_protocol.CURATED_REVIEWER if review else curated_protocol.CURATED_WRITER
+        try:
+            kwargs = curated_protocol.request_kwargs(
+                profile, messages, response_format, max_tokens=profile.max_tokens,
+                timeout=profile.timeout,
+            )
+        except ValueError:
+            raise LLMConfigError("unsupported Curated profile request") from None
+        input_bound = curated_protocol.input_token_upper_bound(messages, response_format)
+        if input_bound > curated_protocol.MAX_INPUT_TOKENS:
+            raise LLMConfigError("Curated request exceeds the input reservation maximum")
+        used = await self._store.usage_today("curated")
+        if used >= self._caps["curated"]:
+            raise BudgetExceeded("curated", used, self._caps["curated"])
+        spent = await self._store.cost_today("curated")
+        if self._usd_caps["curated"] > 0 and spent >= self._usd_caps["curated"]:
+            raise BudgetExceeded("curated", spent, self._usd_caps["curated"], unit="usd")
+        kwargs["extra_headers"] = curated_protocol.PROFILE_HEADERS
+        diagnostic = {
+            "profile": self._curated_profile, "role": "reviewer" if review else "writer",
+            "model": profile.model, "status": "pending", "usage": None,
+        }
+        await self._store.set_meta("curated_profile_last_call", json.dumps(diagnostic))
+        metrics.LLM_REQUESTS.labels("curated").inc()
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except Exception:
+            diagnostic["status"] = "request_error_uncertain"
+            await self._store.set_meta("curated_profile_last_call", json.dumps(diagnostic))
+            metrics.LLM_ERRORS.labels("curated", "request_error_uncertain").inc()
+            raise CuratedModelError("request_error_uncertain") from None
+        visible = curated_protocol._visible_response(response)
+        usage = curated_protocol._usage(response)
+        status = curated_protocol._response_status(visible, profile)
+        if usage is None:
+            status = "missing_usage_or_cost" if status != "malformed_response" else status
+        elif (usage["input_tokens"] > input_bound or usage["output_tokens"] > profile.max_tokens
+              or (usage["reasoning_tokens"] is not None
+                  and usage["reasoning_tokens"] > usage["output_tokens"])):
+            status = "invalid_usage_accounting"
+        else:
+            await self._store.add_usage(
+                "curated", usage["input_tokens"], usage["output_tokens"],
+                cost_usd=float(usage["cost_usd"]),
+            )
+        cache = visible["usage_details"]
+        if status == "completed" and any(
+            cache[key] is not None and cache[key] > 0
+            for key in ("cached_tokens", "cache_write_tokens")
+        ):
+            status = "prompt_cache_policy_mismatch"
+        diagnostic.update(
+            status=status, generation_id=visible["generation_id"],
+            usage_details=visible["usage_details"],
+            usage={key: str(value) if value is not None else None
+                   for key, value in usage.items()} if usage else None,
+        )
+        await self._store.set_meta("curated_profile_last_call", json.dumps(diagnostic))
+        if status != "completed":
+            metrics.LLM_ERRORS.labels("curated", status).inc()
+            raise CuratedModelError(status)
         return response
 
     async def preflight(self) -> list[str]:

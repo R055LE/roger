@@ -7,9 +7,14 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from openai.types.chat import ChatCompletion
 
+from roger import curated_protocol
 from roger.brains import stories
 from roger.brains.curated import DraftError, preview_curated_job, run_curated_job
+from roger.config import Settings
+from roger.llm import LLM as ProductionLLM
+from roger.llm import CuratedModelError
 from roger.scout_source import ScoutBatch
 from roger.store import CURATED_STORY_DECISION_LIMIT, CURATED_STORY_LIMIT, Store
 
@@ -612,6 +617,121 @@ async def test_developing_preview_spends_calls_without_state_mutation(tmp_path, 
         await store.close()
 
 
+@pytest.mark.parametrize("review_failure", [False, True])
+async def test_selected_profile_real_preview_path_is_no_send(
+    tmp_path, monkeypatch, review_failure,
+):
+    now = datetime.datetime.now(datetime.UTC)
+    entry = _entry("synthetic", SYNTH_FIRST, production=True, observed_at=now.isoformat())
+
+    async def collect(*args, **kwargs):
+        return ScoutBatch([entry], "fixture-run", 1.0, "")
+
+    monkeypatch.setattr("roger.brains.curated.collect_from_scout", collect)
+    decision = _decision("publish", [_sid("synthetic")], [(1, SYNTH_FIRST)])
+    settings = Settings(
+        discord_token="test", openrouter_api_key="test", owner_id=1, guild_id=2,  # noqa: S106
+        curated_request_profile="sol-astra-v1", curated_developing_stories=True,
+        scout_digest_dir=str(tmp_path),
+    )
+    store = await Store(str(tmp_path / "profile-preview.db")).open()
+    llm = ProductionLLM(settings, store)
+    calls = []
+
+    async def create(**kwargs):
+        calls.append(kwargs)
+        review = len(calls) == 2
+        profile = curated_protocol.CURATED_REVIEWER if review else curated_protocol.CURATED_WRITER
+        return ChatCompletion.model_validate({
+            "id": "gen-offline-preview", "object": "chat.completion", "created": 1,
+            "model": profile.model, "service_tier": "default",
+            "choices": [] if review and review_failure else [{
+                "index": 0, "finish_reason": "stop", "message": {
+                    "role": "assistant", "content": json.dumps(_review(decision) if review
+                                                               else decision),
+                },
+            }],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+                      "cost": 0.01},
+            "openrouter_metadata": {
+                "requested": profile.model, "strategy": "direct", "attempt": 1,
+                "attempts": [{"provider": "OpenAI"}], "pipeline": [],
+                "endpoints": {"available": [{"provider": "OpenAI", "model": profile.model,
+                                              "selected": True}]},
+            },
+        })
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        result = await preview_curated_job(
+            settings=settings, llm=llm, store=store, developing_stories=True,
+        )
+        assert result["status"] == (
+            "model response rejected: malformed_response; skipped" if review_failure else "draft"
+        )
+        assert [call["model"] for call in calls] == [
+            curated_protocol.CURATED_WRITER.model, curated_protocol.CURATED_REVIEWER.model,
+        ]
+        assert await store.usage_today("curated") == 300
+        assert await store.cost_today("curated") == 0.02
+        for table in ("curated_story", "curated_story_decision", "curated_delivery", "seen",
+                      "curated_observation"):
+            cursor = await store._conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+            assert (await cursor.fetchone())[0] == 0
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+@pytest.mark.parametrize("error", [CuratedModelError("request_error_uncertain"), TimeoutError()])
+async def test_selected_profile_job_does_not_replay_uncertain_calls(
+    tmp_path, monkeypatch, caplog, error,
+):
+    entry = _entry("synthetic", SYNTH_FIRST, production=True)
+
+    async def collect(*args, **kwargs):
+        return ScoutBatch([entry], "fixture-run", 1.0, "")
+
+    calls = 0
+
+    async def decide(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise error
+
+    monkeypatch.setattr("roger.brains.curated.collect_from_scout", collect)
+    monkeypatch.setattr(stories, "decide", decide)
+    settings = Settings(
+        discord_token="test", openrouter_api_key="test", owner_id=1, guild_id=2,  # noqa: S106
+        curated_channel_id=42, curated_request_profile="sol-astra-v1",
+        curated_developing_stories=True, curated_min_spacing_minutes=0,
+        scout_digest_dir=str(tmp_path),
+    )
+    store = await Store(str(tmp_path / "profile-job.db")).open()
+    try:
+        async def send(**kwargs):
+            raise AssertionError("uncertain model calls must not send")
+
+        client = SimpleNamespace(get_channel=lambda _: SimpleNamespace(send=send))
+        result = await run_curated_job(
+            client=client, settings=settings, llm=None, store=store, now=NOW,
+        )
+        assert "skipped" in result["status"]
+        await run_curated_job(
+            client=client, settings=settings, llm=None, store=store,
+            now=NOW + datetime.timedelta(hours=2),
+        )
+        assert calls == 1
+        cursor = await store._conn.execute("SELECT status, retry_at FROM curated_observation")
+        rows = await cursor.fetchall()
+        assert len(rows) == 1 and tuple(rows[0]) == ("rejected", 0)
+        assert "Traceback" not in caplog.text
+        cursor = await store._conn.execute("SELECT COUNT(*) FROM curated_delivery")
+        assert (await cursor.fetchone())[0] == 0
+    finally:
+        await store.close()
+
+
 async def test_long_source_url_is_rejected_before_model_or_delivery(tmp_path, monkeypatch):
     entry = _entry(
         "long-url", SYNTH_FIRST, production=True,
@@ -752,6 +872,19 @@ def test_story_fingerprint_includes_validation_revision_prompt(monkeypatch):
     history = {"stories": [], "delivered": []}
     original = stories.input_fingerprint(sources, history, settings)
     monkeypatch.setattr(stories, "VALIDATION_REVISION", "changed validation prompt")
+    assert stories.input_fingerprint(sources, history, settings) != original
+
+
+def test_story_fingerprint_includes_profile_without_changing_legacy_fingerprint():
+    settings = SimpleNamespace(curated_models=["draft"], curated_review_models=["review"])
+    sources = stories.prepare_captured_sources(
+        [_entry("release", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    history = {"stories": [], "delivered": []}
+    original = stories.input_fingerprint(sources, history, settings)
+    settings.curated_request_profile = "legacy"
+    assert stories.input_fingerprint(sources, history, settings) == original
+    settings.curated_request_profile = "sol-astra-v1"
     assert stories.input_fingerprint(sources, history, settings) != original
 
 

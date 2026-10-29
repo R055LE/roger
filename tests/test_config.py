@@ -159,6 +159,34 @@ def test_curated_defaults(monkeypatch):
     assert settings.curated_min_spacing_minutes == 60
     assert settings.curated_max_observations_per_day == 8
     assert settings.curated_developing_stories is False
+    assert settings.curated_request_profile == "legacy"
+
+
+def test_curated_profile_requires_explicit_story_opt_in(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("CURATED_REQUEST_PROFILE", "sol-astra-v1")
+    with pytest.raises(ValidationError, match="requires CURATED_DEVELOPING_STORIES"):
+        Settings()
+
+
+def test_curated_profile_reports_effective_models_without_changing_legacy_config(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("MODEL_CURATED", "legacy/writer")
+    monkeypatch.setenv("MODEL_CURATED_REVIEW", "legacy/reviewer")
+    monkeypatch.setenv("CURATED_REQUEST_PROFILE", "sol-astra-v1")
+    monkeypatch.setenv("CURATED_DEVELOPING_STORIES", "true")
+    settings = Settings()
+    assert settings.curated_models == ["openai/gpt-6.1-sol-20260929"]
+    assert settings.curated_review_models == ["openai/gpt-6-astra-20260903"]
+    assert settings.model_curated == "legacy/writer"
+    assert settings.model_curated_review == "legacy/reviewer"
+
+
+def test_unknown_curated_profile_is_rejected(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("CURATED_REQUEST_PROFILE", "unknown-profile")
+    with pytest.raises(ValidationError):
+        Settings()
 
 
 @pytest.mark.parametrize("setting", ["CURATED_CHECK_INTERVAL_MINUTES",
