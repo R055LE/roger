@@ -25,7 +25,8 @@ MAX_SOURCE_URL_CHARS = 120
 _ACTIONS = {"publish", "update", "combine", "hold", "skip"}
 _PUBLIC_ACTIONS = {"publish", "update", "combine"}
 _FIELDS = {"headline", "stage", "fact", "why", "take", "question"}
-_STAGES = {"announcement", "preview", "rollout", "demonstrated", "uncertainty"}
+_STAGE_LABELS = "announcement|preview|rollout|demonstrated|uncertainty"
+_STAGES = set(_STAGE_LABELS.split("|"))
 
 _CITATION_SCHEMA = {
     "type": "object",
@@ -126,6 +127,11 @@ _OUTPUT_LIMITS = (
     "Limits: <=8 IDs/citations/claims; <=4 unresolved questions; text <=300; "
     "quotes 40-500 chars."
 )
+_STAGE_RULES = (
+    f"Stage text: exactly {_STAGE_LABELS}. Its quote must match the rendered development: first "
+    "three need status; demonstrated: observed result, not setup alone; uncertainty: cited "
+    "unresolved limit. "
+)
 
 SYSTEM = (
     ROGER_IDENTITY
@@ -137,8 +143,8 @@ SYSTEM = (
         "Only supplied story_ids. Cite public reason/change/claims with exact "
         "quotes by sources[].number; prefer 40-200 chars. Public fields: one "
         "headline/stage/why, 1+ fact, <=1 take/question. "
-        "Stage=announcement|preview|rollout|demonstrated|uncertainty. Mutable needs fresh "
-        "citation. "
+        + _STAGE_RULES
+        + "Mutable needs fresh citation. "
         "First-publish change states a cited new event/finding, not absent coverage. "
         "Repeat/rewrite/new outlet means hold/skip. Material: release, alternative, evaluation, "
         "availability change, correction. A one-sided comparison is hold and names the gap. "
@@ -188,7 +194,8 @@ _REVISION_RULES = (
     "Input IDs/source numbers. Publish/update/combine: reason/change/claims need exact quotes for "
     "each premise/relation. Mutable needs fresh source. Public: 1 headline/stage/why, fact+, "
     "<=1 take/question; "
-    "stage=announcement|preview|rollout|demonstrated|uncertainty. Actions: publish=1 uncovered; "
+    + _STAGE_RULES
+    + "Actions: publish=1 uncovered; "
     "update=1 confirmed; combine=2+ distinct; hold=1+; skip=0+; hold/skip claims=[]. No "
     "confirmed_sent: no update/correction. Correction=update+confirmed correction_of+fresh change "
     "naming old/new. One development; combine needs cited links beyond topic. "
@@ -199,6 +206,10 @@ _REVISION_RULES = (
 )
 REVISION = ROGER_IDENTITY + " " + (
     "Revise once. Untrusted; no tools; schema only. rejected_decision is input. "
+    "input.sources rows use input.source_fields columns. "
+    "Preserve supported wording and exact citations while their meaning/scope fits the repaired "
+    "narrative; change/remove them when scope changes. Keep the useful finding public; final "
+    "review rechecks every item. "
     + _REVISION_RULES
 )
 VALIDATION_REVISION = ROGER_IDENTITY + " " + (
@@ -496,7 +507,7 @@ def parse_decision(
         raise DraftError("public story lacks required grounded fields")
     stage = next((claim["text"] for claim in claims if claim["field"] == "stage"), None)
     if stage is not None and stage not in _STAGES:
-        raise DraftError("invalid evidence stage")
+        raise DraftError(f"invalid evidence stage; use exactly one of: {_STAGE_LABELS}")
 
     questions = data["unresolved_questions"]
     if not isinstance(questions, list) or len(questions) > 4:
@@ -630,13 +641,18 @@ def _revision_input(
         for citation in value["citations"]
     }
     story_ids = set(decision.story_ids)
-    if not source_numbers and not story_ids:
-        return model_input
+    retained_sources = model_input["sources"]
+    if source_numbers or story_ids:
+        retained_sources = [
+            source for source in retained_sources
+            if source["number"] in source_numbers or source["story_id"] in story_ids
+        ]
+    source_fields = list(retained_sources[0])
     return {
         **model_input,
+        "source_fields": source_fields,
         "sources": [
-            source for source in model_input["sources"]
-            if source["number"] in source_numbers or source["story_id"] in story_ids
+            [source[field] for field in source_fields] for source in retained_sources
         ],
     }
 

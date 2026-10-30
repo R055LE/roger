@@ -97,6 +97,9 @@ human confirmation, so this gate alone cannot select a reviewer.
 Reviewer requests are built and verdicts are parsed by the production helpers. They include the
 actual public embed fields plus bounded selected-story evidence for material-omission review;
 broader evidence cannot substitute for a proposed item's own cited spans.
+The stage item's own quote must support the rendered development's stage. In particular,
+`demonstrated` needs an observed result rather than test setup alone, while `uncertainty` needs an
+explicit unresolved limit.
 The repository's regressions are derived synthetic reproductions. Exact captured outputs stay in
 their immutable evaluation bundle.
 

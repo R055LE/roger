@@ -37,6 +37,9 @@ DOTS_REPEAT = (
 SYNTH_FIRST = "The synthetic release is available to every test account in this fixture."
 SYNTH_SECOND = "The synthetic release now limits access to a staged test cohort."
 SYNTH_FILLER = " Synthetic fixture context is intentionally long enough for production admission."
+# Synthetic analogues of held-out stage prose; captured responses remain in the private bundle.
+SYNTH_STAGE_SENTENCE = "Demonstrated inference on low-cost synthetic streaming boxes."
+SYNTH_STAGE_PREFIX = "Demonstrated: inference across fifteen synthetic streaming boxes."
 JEV_URL = "https://typesafe.ai/blog/introducing-system-one-models-and-jev"
 KEV_URL = (
     "https://github.com/jaredpalmer/kev/blob/"
@@ -140,6 +143,13 @@ def _request_chars(messages, response_format):
     )
 
 
+def _revision_sources(model_input):
+    return [
+        dict(zip(model_input["source_fields"], row, strict=True))
+        for row in model_input["sources"]
+    ]
+
+
 def _validation_retry_fixture():
     excerpt = "V" * 800
     entry = _entry("validation-retry", excerpt)
@@ -151,6 +161,18 @@ def _validation_retry_fixture():
     invalid["reason"]["text"] = "r" * 541
     invalid["reason"]["citations"][0]["quote"] = excerpt[:501]
     invalid["claims"][1]["citations"] = []
+    return entry, invalid, corrected
+
+
+def _stage_validation_retry_fixture():
+    excerpt = "S" * 800
+    entry = _entry("stage-validation-retry", excerpt)
+    corrected = _decision(
+        "publish", [_sid("stage-validation-retry")], [(1, excerpt[:80])],
+        stage="demonstrated",
+    )
+    invalid = copy.deepcopy(corrected)
+    invalid["claims"][1]["text"] = SYNTH_STAGE_SENTENCE
     return entry, invalid, corrected
 
 
@@ -884,6 +906,48 @@ def test_observed_invalid_story_shapes_fail_closed(mutation, message):
 
 
 @pytest.mark.parametrize(
+    "stage",
+    [
+        SYNTH_STAGE_SENTENCE,
+        SYNTH_STAGE_PREFIX,
+        "Stage: demonstrated",
+        "Demonstrated",
+    ],
+)
+def test_stage_prose_prefixes_and_case_variants_fail_closed(stage):
+    sources = stories.prepare_captured_sources(
+        [_entry("stage-label", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision(
+        "publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)], stage=stage,
+    )
+    with pytest.raises(
+        DraftError,
+        match="invalid evidence stage; use exactly one of: "
+        "announcement\\|preview\\|rollout\\|demonstrated\\|uncertainty",
+    ):
+        stories.parse_decision(
+            json.dumps(decision), sources, {"stories": [], "delivered": []},
+        )
+
+
+@pytest.mark.parametrize(
+    "stage", ["announcement", "preview", "rollout", "demonstrated", "uncertainty"],
+)
+def test_exact_stage_labels_are_accepted(stage):
+    sources = stories.prepare_captured_sources(
+        [_entry("stage-label", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision(
+        "publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)], stage=stage,
+    )
+    parsed = stories.parse_decision(
+        json.dumps(decision), sources, {"stories": [], "delivered": []},
+    )
+    assert parsed.claims[1]["text"] == stage
+
+
+@pytest.mark.parametrize(
     ("reason", "message"),
     [("", "reason is empty"), ("r" * 301, "reason exceeds 300 characters")],
 )
@@ -1144,6 +1208,137 @@ async def test_final_review_rejects_revision_that_drops_a_supported_material_dis
     assert len(llm.calls) == 4
 
 
+# Synthetic analogue derived from the held-out four-call stage failure. Captured output remains in
+# the immutable evaluation bundle.
+def _synthetic_stage_revision_case():
+    observed = (
+        "In testing, the 9B model completed inference on eight of nine synthetic hardware targets."
+    )
+    setup = (
+        "The team built a firewalled cluster of eight Android emulator nodes for the exercise."
+    )
+    unresolved = (
+        "The report leaves end-to-end autonomous replication unresolved under real-world network "
+        "controls."
+    )
+    upper_bound = (
+        "The evaluation used an unauthenticated port, making measured success an upper bound on "
+        "real-world replication."
+    )
+    entry = _entry("stage-grounding", " ".join((observed, setup, unresolved, upper_bound)))
+    draft = _decision(
+        "publish", [_sid("stage-grounding")], [(1, observed)],
+        headline="Testing shows bounded heterogeneous-hardware inference",
+        fact="A 9B model completed inference on eight of nine synthetic hardware targets.",
+        why="The setup proves autonomous replication works under real-world controls.",
+        stage="demonstrated",
+    )
+    draft["reason"]["text"] = (
+        "The report demonstrates autonomous replication across heterogeneous hardware."
+    )
+    draft["claims"][3]["citations"] = [_citation(1, upper_bound)]
+    rejected = _review(draft)
+    rejected["supported"][0] = False
+    rejected["supported"][5] = False
+    return entry, draft, rejected, observed, setup, unresolved, upper_bound
+
+
+async def test_final_review_rejects_revision_that_grounds_demonstrated_in_setup_only():
+    entry, draft, rejected, observed, setup, _, upper_bound = _synthetic_stage_revision_case()
+    revision = copy.deepcopy(draft)
+    revision["reason"] = _grounded(
+        "The report gives a bounded heterogeneous-hardware inference result.", 1, observed,
+    )
+    revision["claims"][1]["citations"] = [_citation(1, setup)]
+    revision["claims"][3] = {
+        "field": "why",
+        "text": "The unauthenticated port makes the replication evaluation an upper bound.",
+        "citations": [_citation(1, upper_bound)],
+        "mutable": False,
+    }
+    final_review = _review(revision)
+    final_review["supported"][3] = False
+    llm = RecordingQueueLLM(draft, rejected, revision, final_review)
+
+    with pytest.raises(DraftError, match="rejected the revision: supported"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+
+    revision_request = llm.calls[2][3]
+    revision_payload = json.loads(revision_request[-1]["content"])
+    assert _revision_sources(revision_payload["input"])[0]["excerpt"] == entry["article"]["text"]
+    assert "source_fields columns" in revision_request[0]["content"]
+    assert len(llm.calls) == 4
+
+
+async def test_stage_revision_preserves_supported_demonstration_evidence():
+    entry, draft, rejected, observed, _, _, upper_bound = _synthetic_stage_revision_case()
+    revision = copy.deepcopy(draft)
+    revision["reason"] = _grounded(
+        "The report gives a bounded heterogeneous-hardware inference result.", 1, observed,
+    )
+    revision["claims"][3] = {
+        "field": "why",
+        "text": "The unauthenticated port makes the replication evaluation an upper bound.",
+        "citations": [_citation(1, upper_bound)],
+        "mutable": False,
+    }
+    llm = RecordingQueueLLM(draft, rejected, revision, _review(revision))
+
+    decision, sources = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+
+    assert decision.claims[1] == draft["claims"][1]
+    assert observed in decision.claims[1]["citations"][0]["quote"]
+    assert "eight of nine synthetic hardware targets" in (
+        stories._rendered_content(decision, sources, None)["description"]
+    )
+    assert len(llm.calls) == 4
+
+
+async def test_stage_revision_can_narrow_to_cited_uncertainty():
+    entry, draft, rejected, observed, _, unresolved, upper_bound = (
+        _synthetic_stage_revision_case()
+    )
+    revision = copy.deepcopy(draft)
+    revision["reason"] = _grounded(
+        "The report leaves real-world autonomous replication unresolved.", 1, unresolved,
+    )
+    revision["claims"][0] = {
+        "field": "headline",
+        "text": "Real-world autonomous replication remains unresolved",
+        "citations": [_citation(1, unresolved)],
+        "mutable": False,
+    }
+    revision["claims"][1] = {
+        "field": "stage", "text": "uncertainty",
+        "citations": [_citation(1, unresolved)], "mutable": False,
+    }
+    revision["claims"][3] = {
+        "field": "why",
+        "text": "The unauthenticated port makes the replication evaluation an upper bound.",
+        "citations": [_citation(1, upper_bound)],
+        "mutable": False,
+    }
+    llm = RecordingQueueLLM(draft, rejected, revision, _review(revision))
+
+    decision, _ = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+
+    assert decision.claims[1]["text"] == "uncertainty"
+    assert decision.claims[1]["citations"] == [_citation(1, unresolved)]
+    assert decision.claims[2] == draft["claims"][2]
+    assert "full rogue replicator" not in entry["article"]["text"]
+    assert observed in decision.claims[2]["citations"][0]["quote"]
+    assert len(llm.calls) == 4
+
+
 def test_marketing_completeness_tracks_only_caveats_needed_by_the_rendered_claim():
     preview = (
         "Northstar introduced an opt-in preview with per-project retention controls and namespace "
@@ -1331,6 +1526,44 @@ async def test_initial_local_validation_failure_gets_one_fresh_revision_and_revi
         stories.DECISION_RESPONSE_FORMAT,
         stories.DECISION_RESPONSE_FORMAT,
         stories.REVIEW_RESPONSE_FORMAT,
+    ]
+
+
+async def test_invalid_stage_gets_one_exact_label_revision_and_independent_review():
+    entry, invalid, corrected = _stage_validation_retry_fixture()
+    llm = RecordingQueueLLM(invalid, corrected, _review(corrected))
+
+    decision, _ = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+
+    assert decision.claims[1]["text"] == "demonstrated"
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (False, True), (True, False),
+    ]
+    revision_payload = json.loads(llm.calls[1][3][-1]["content"])
+    assert revision_payload["validation_error"] == (
+        "invalid evidence stage; use exactly one of: " + stories._STAGE_LABELS
+    )
+    assert stories._STAGE_LABELS in stories.SYSTEM
+    assert stories._STAGE_LABELS in stories.VALIDATION_REVISION
+
+
+async def test_repeated_invalid_stage_stops_before_review():
+    entry, invalid, _ = _stage_validation_retry_fixture()
+    still_invalid = copy.deepcopy(invalid)
+    still_invalid["claims"][1]["text"] = SYNTH_STAGE_PREFIX
+    llm = RecordingQueueLLM(invalid, still_invalid)
+
+    with pytest.raises(DraftError, match="invalid evidence stage"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (False, True),
     ]
 
 
@@ -1565,9 +1798,18 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
         not {"source_id", "feed_url", "entry_id"}.intersection(source)
         for source in payload["sources"]
     )
+    draft = _decision("publish", [sources[0]["story_id"]], [(1, spans[0])])
+    for value, quote in zip(
+        [draft["reason"], draft["change"], *draft["claims"]], spans, strict=True,
+    ):
+        value["citations"] = [_citation(1, quote)]
+    invalid_stage = copy.deepcopy(draft)
+    invalid_stage["claims"][1]["text"] = SYNTH_STAGE_SENTENCE
+    with pytest.raises(DraftError, match="invalid evidence stage") as stage_error:
+        stories.parse_decision(json.dumps(invalid_stage), sources, history)
     validation_revision = stories._messages(
         stories.VALIDATION_REVISION,
-        {"input": payload, "validation_error": "reason exceeds 300 characters"},
+        {"input": payload, "validation_error": str(stage_error.value)},
         stories.DECISION_RESPONSE_FORMAT,
     )
     assert _request_chars(
@@ -1575,11 +1817,6 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     ) <= stories.MAX_CONTEXT_CHARS
     assert len(json.loads(validation_revision[1]["content"])["input"]["sources"]) == 8
 
-    draft = _decision("publish", [sources[0]["story_id"]], [(1, spans[0])])
-    for value, quote in zip(
-        [draft["reason"], draft["change"], *draft["claims"]], spans, strict=True,
-    ):
-        value["citations"] = [_citation(1, quote)]
     decision = stories.parse_decision(
         json.dumps(draft), sources, history,
     )
@@ -1601,8 +1838,10 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
             "source": 1, "quote": quote,
         }
     revision_input = stories._revision_input(payload, decision)
-    assert [source["number"] for source in revision_input["sources"]] == [1]
-    assert revision_input["sources"][0]["excerpt"] == sources[0]["excerpt"]
+    assert revision_input["source_fields"] == [
+        "number", "story_id", "url", "published_at", "observed_at", "fresh", "excerpt",
+    ]
+    assert _revision_sources(revision_input) == [payload["sources"][0]]
     revision = stories._messages(
         stories.REVISION,
         {
@@ -1620,7 +1859,9 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
         json.dumps(noncontiguous_draft), sources, history,
     )
     noncontiguous_input = stories._revision_input(payload, noncontiguous)
-    assert [source["number"] for source in noncontiguous_input["sources"]] == [3, 8]
+    unpacked = _revision_sources(noncontiguous_input)
+    assert [source["number"] for source in unpacked] == [3, 8]
+    assert unpacked == [payload["sources"][2], payload["sources"][7]]
     assert stories._messages(
         stories.REVISION,
         {
@@ -1641,6 +1882,7 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     )
     skip_input = stories._revision_input(payload, skip)
     assert len(skip_input["sources"]) == stories.MAX_SOURCES
+    assert _revision_sources(skip_input) == payload["sources"]
     rejected_skip = _review(skip.record())
     rejected_skip["supported"] = [False, False]
     for gate in (
