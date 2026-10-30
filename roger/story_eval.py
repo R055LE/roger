@@ -352,18 +352,15 @@ def _reviewer_spec(
     decision = stories.parse_decision(
         json.dumps(_fixture_decision(fixture, case)), sources, case["history"]
     )
-    payload = {
-        "decision": stories._decision_projection(decision),
-        "sources": stories._source_metadata(sources),
-        "confirmed_sent": stories._delivered_view(case["history"]),
-    }
     return CallSpec(
         stage="reviewer",
         case_id=fixture["id"],
         repeat=repeat,
         profile=profile,
         messages=stories._messages(
-            stories.REVIEW, payload, stories.REVIEW_RESPONSE_FORMAT
+            stories.REVIEW,
+            stories.review_payload(decision, sources, case["history"]),
+            stories.REVIEW_RESPONSE_FORMAT,
         ),
         response_format=stories.REVIEW_RESPONSE_FORMAT,
         max_tokens=profile.reviewer_max_tokens,
@@ -822,34 +819,20 @@ def _review_verdict(
             "matches_expected": False,
         }
 
-    try:
-        verdict = json.loads(visible["content"])
-    except (TypeError, json.JSONDecodeError) as exc:
-        return invalid(type(exc).__name__)
-    expected_keys = {
-        "supported", "material_change", "action_supported", "chronology_supported",
-        "relationship_supported", "freshness_supported", "correction_supported",
-    }
-    decision = stories.parse_decision(
-        json.dumps(_fixture_decision(fixture, case)), _case_sources(case), case["history"]
-    )
-    supported = verdict.get("supported") if isinstance(verdict, dict) else None
-    gates = expected_keys - {"supported", "material_change"}
     if (
-        not isinstance(verdict, dict)
-        or set(verdict) != expected_keys
-        or not isinstance(supported, list)
-        or len(supported) != len(stories._decision_projection(decision)["items"])
-        or any(type(value) is not bool for value in supported)
-        or any(type(verdict[key]) is not bool for key in gates | {"material_change"})
+        not isinstance(visible.get("content"), str)
     ):
-        return invalid("InvalidReviewFields")
-    material_matches = verdict["material_change"] is decision.publishable
-    accepted = all(supported) and all(verdict[key] for key in gates) and material_matches
-    failed = ([] if all(supported) else ["supported"])
-    failed.extend(key for key in sorted(gates) if not verdict[key])
-    if not material_matches:
-        failed.append("material_change")
+        return invalid("InvalidReviewContent")
+    sources = _case_sources(case)
+    decision = stories.parse_decision(
+        json.dumps(_fixture_decision(fixture, case)), sources, case["history"]
+    )
+    try:
+        accepted, verdict, failed = stories.parse_review(
+            visible["content"], decision, sources,
+        )
+    except DraftError as exc:
+        return invalid(str(exc))
     return {
         "status": "reviewer_accept" if accepted else "reviewer_reject",
         "expected_label_pending_human_review": expected_accept,

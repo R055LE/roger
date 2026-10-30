@@ -1,5 +1,6 @@
 """Developing-story memory, historical previews, and evidence gates."""
 
+import copy
 import datetime
 import json
 import time
@@ -128,6 +129,8 @@ def _review(decision):
         "relationship_supported": True,
         "freshness_supported": True,
         "correction_supported": True,
+        "materially_complete": True,
+        "missing_material": [],
     }
 
 
@@ -349,8 +352,10 @@ async def test_story_accepts_complete_citation_response_larger_than_old_ceiling(
     assert [(call[1], call[2]) for call in llm.calls] == [(False, True), (True, False)]
     review_payload = json.loads(llm.calls[1][3][-1]["content"])
     assert review_payload["decision"]["citation_pool"] == citations
-    assert review_payload["sources"] == stories._source_metadata(sources)
-    assert all("excerpt" not in source for source in review_payload["sources"])
+    assert review_payload["rendered_post"] == stories._rendered_content(
+        actual, sources, None,
+    )
+    assert review_payload["completeness_evidence"]
 
 
 @pytest.mark.parametrize("truncated_call", range(4))
@@ -1032,6 +1037,278 @@ async def test_review_receives_the_exact_cited_span_and_blocks_irrelevant_suppor
     assert decision.action == "hold"
 
 
+async def test_rendered_completeness_repairs_separate_replication_infrastructure():
+    boxes = (
+        "We run Gemma4-26B-A4B, distributed over 15 inexpensive off-brand Android TV boxes "
+        "that we bought and networked together, at 0.39 tokens per second."
+    )
+    vpc = "To do this, we built a firewalled VPC of 8 nodes running an Android 15 emulator."
+    server = (
+        "The replication model runs on a separate inference server, since the VPC nodes are not "
+        "large enough to run the larger models."
+    )
+    upper_bound = (
+        "The evaluation keeps exploitation trivial, which makes this an upper bound on real-world "
+        "replication success."
+    )
+    entry = _entry("replication", "\n\n".join((boxes, vpc, server, upper_bound)))
+    original = _decision(
+        "publish", [_sid("replication")], [(1, boxes), (1, upper_bound)],
+        headline="Model inference runs across 15 low-cost TV boxes",
+        fact="The model ran across 15 networked TV boxes at 0.39 tokens per second.",
+        why="The simplified replication evaluation is an upper bound on real-world success.",
+    )
+    rejected = _review(original) | {
+        "materially_complete": False,
+        "missing_material": [{
+            "concern": (
+                "The post blurs the TV-box inference setup with separate replication "
+                "infrastructure."
+            ),
+            "source": 1,
+            "quote": server,
+        }],
+    }
+    corrected = copy.deepcopy(original)
+    corrected["claims"].append({
+        "field": "fact",
+        "text": (
+            "The replication test used a firewalled VPC of eight Android 15 emulator nodes, while "
+            "the model ran on a separate inference server."
+        ),
+        "citations": [_citation(1, vpc), _citation(1, server)],
+        "mutable": False,
+    })
+    llm = RecordingQueueLLM(original, rejected, corrected, _review(corrected))
+
+    decision, sources = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+
+    assert len(llm.calls) == 4
+    first_review = json.loads(llm.calls[1][3][-1]["content"])
+    assert server in first_review["completeness_evidence"][0]["excerpt"]
+    rendered = stories._rendered_content(decision, sources, None)["description"]
+    assert "firewalled VPC of eight Android 15 emulator nodes" in rendered
+    assert "separate inference server" in rendered
+
+
+async def test_final_review_rejects_revision_that_drops_a_supported_material_distinction():
+    inference = (
+        "The research runs a 26B model across 15 networked TV boxes at 0.39 tokens per second."
+    )
+    server = (
+        "The replication model runs on a separate inference server because the emulator nodes "
+        "cannot run the larger models."
+    )
+    upper_bound = (
+        "The replication evaluation uses trivial exploitation and is an upper bound on real-world "
+        "success."
+    )
+    entry = _entry("boundary", " ".join((inference, server, upper_bound)))
+    draft = _decision(
+        "publish", [_sid("boundary")], [(1, inference), (1, upper_bound)],
+        fact="The 26B model ran across 15 TV boxes at 0.39 tokens per second.",
+        why="The replication evaluation is an upper bound on real-world success.",
+    )
+    draft["claims"].append({
+        "field": "fact",
+        "text": "The replication model ran on a separate inference server.",
+        "citations": [_citation(1, server)],
+        "mutable": False,
+    })
+    first_review = _review(draft)
+    first_review["supported"][0] = False
+    revision = copy.deepcopy(draft)
+    revision["reason"]["text"] = "The source reports a bounded hardware inference result."
+    revision["reason"]["citations"] = [_citation(1, inference)]
+    revision["claims"].pop()
+    final_review = _review(revision) | {
+        "materially_complete": False,
+        "missing_material": [{
+            "concern": "The revision now blurs the inference hardware and replication setup.",
+            "source": 1,
+            "quote": server,
+        }],
+    }
+    llm = RecordingQueueLLM(draft, first_review, revision, final_review)
+
+    with pytest.raises(DraftError, match="rejected the revision: materially_complete"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+    final_payload = json.loads(llm.calls[3][3][-1]["content"])
+    assert server in final_payload["completeness_evidence"][0]["excerpt"]
+    assert len(llm.calls) == 4
+
+
+def test_marketing_completeness_tracks_only_caveats_needed_by_the_rendered_claim():
+    preview = (
+        "Northstar introduced an opt-in preview with per-project retention controls and namespace "
+        "clearing for synthetic Linux test projects."
+    )
+    speed = (
+        "Northstar says its preview is twice as fast as every competing cache, but the post "
+        "provides no benchmark data or comparison method."
+    )
+    sources = stories.prepare_captured_sources(
+        [_entry("marketing", f"{preview} {speed}")], now=NOW, max_age_hours=36,
+    )
+    history = {"stories": [], "delivered": []}
+    concise = stories.parse_decision(json.dumps(_decision(
+        "publish", [sources[0]["story_id"]], [(1, preview)],
+        headline="Northstar previews cache controls",
+        fact="The opt-in preview adds retention and namespace controls.",
+        why="The controls can be tested on synthetic Linux projects.",
+        stage="preview",
+    )), sources, history)
+    accepted, _, failed = stories.parse_review(
+        json.dumps(_review(concise.record())), concise, sources,
+    )
+    assert accepted and failed == []
+    assert speed in stories.review_payload(
+        concise, sources, history,
+    )["completeness_evidence"][0]["excerpt"]
+
+    exposed = copy.deepcopy(concise.record())
+    exposed["reason"] = _grounded("The speed claim lacks a disclosed benchmark.", 1, speed)
+    exposed["change"] = _grounded("Northstar claims a two-times speedup without data.", 1, speed)
+    exposed["claims"][2] = {
+        "field": "fact", "text": "Northstar says the preview is twice as fast as every rival.",
+        "citations": [_citation(1, speed)], "mutable": False,
+    }
+    exposed_decision = stories.parse_decision(json.dumps(exposed), sources, history)
+    omission = _review(exposed) | {
+        "materially_complete": False,
+        "missing_material": [{
+            "concern": "The public speed claim omits that no benchmark or method was provided.",
+            "source": 1,
+            "quote": speed,
+        }],
+    }
+    accepted, _, failed = stories.parse_review(
+        json.dumps(omission), exposed_decision, sources,
+    )
+    assert not accepted and failed == ["materially_complete"]
+    assert "benchmark" not in stories._rendered_content(
+        exposed_decision, sources, None,
+    )["description"]
+
+    corrected = copy.deepcopy(exposed)
+    corrected["claims"][3] = {
+        "field": "why", "text": "The vendor supplies no benchmark data or comparison method.",
+        "citations": [_citation(1, speed)], "mutable": False,
+    }
+    corrected_decision = stories.parse_decision(json.dumps(corrected), sources, history)
+    accepted, _, failed = stories.parse_review(
+        json.dumps(_review(corrected)), corrected_decision, sources,
+    )
+    assert accepted and failed == []
+    assert "no benchmark" in stories._rendered_content(
+        corrected_decision, sources, None,
+    )["description"]
+
+
+def test_completeness_evidence_excludes_unrelated_sources_and_invalid_diagnostics_fail_closed():
+    selected_quote = "The selected release is available today with a bounded migration workflow."
+    unrelated_quote = "An unrelated vendor reports a separate benchmark with different hardware."
+    entries = [_entry("selected", selected_quote), _entry("other", unrelated_quote)]
+    sources = stories.prepare_captured_sources(entries, now=NOW, max_age_hours=36)
+    history = {"stories": [], "delivered": []}
+    decision = stories.parse_decision(json.dumps(_decision(
+        "publish", [sources[0]["story_id"]], [(1, selected_quote)],
+    )), sources, history)
+    payload = stories.review_payload(decision, sources, history)
+    assert [item["number"] for item in payload["completeness_evidence"]] == [1]
+    assert [item["number"] for item in payload["sources"]] == [1, 2]
+
+    missing_fields = _review(decision.record())
+    missing_fields.pop("missing_material")
+    with pytest.raises(DraftError, match="lacks completeness evidence"):
+        stories.parse_review(json.dumps(missing_fields), decision, sources)
+    unsupported_diagnostic = _review(decision.record()) | {
+        "materially_complete": False,
+        "missing_material": [{
+            "concern": "This unrelated benchmark is missing.",
+            "source": 2,
+            "quote": unrelated_quote,
+        }],
+    }
+    with pytest.raises(DraftError, match="outside completeness evidence"):
+        stories.parse_review(json.dumps(unsupported_diagnostic), decision, sources)
+    contradictory = _review(decision.record()) | {"materially_complete": False}
+    with pytest.raises(DraftError, match="verdict conflicts with evidence"):
+        stories.parse_review(json.dumps(contradictory), decision, sources)
+
+
+def test_no_post_review_retains_source_metadata_without_completeness_requirements():
+    quote = "The available evidence repeats an already covered release without a material change."
+    sources = stories.prepare_captured_sources(
+        [_entry("repeat", quote)], now=NOW, max_age_hours=36,
+    )
+    history = {"stories": [], "delivered": []}
+    decision = stories.parse_decision(json.dumps(_decision(
+        "hold", [sources[0]["story_id"]], [], reason="The item repeats prior coverage.",
+    )), sources, history)
+    payload = stories.review_payload(decision, sources, history)
+    assert payload["rendered_post"] is None
+    assert payload["completeness_evidence"] == []
+    assert payload["sources"] == stories._source_metadata(sources)
+    accepted, _, failed = stories.parse_review(
+        json.dumps(_review(decision.record())), decision, sources,
+    )
+    assert accepted and failed == []
+
+
+async def test_revision_cannot_hide_unchanged_rejected_item_with_metadata_changes():
+    first = "The release supports the documented Linux migration workflow for test projects."
+    second = "The release also publishes signed packages and checksums for those test projects."
+    entry = _entry("release", f"{first} {second}")
+    draft = _decision("publish", [_sid("release")], [(1, first), (1, second)])
+    rejected = _review(draft)
+    rejected["supported"][4] = False
+    revision = copy.deepcopy(draft)
+    revision["claims"][2]["citations"].reverse()
+    revision["claims"][2]["mutable"] = not revision["claims"][2]["mutable"]
+    llm = RecordingQueueLLM(draft, rejected, revision)
+
+    with pytest.raises(DraftError, match="left a rejected item unchanged"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+    assert len(llm.calls) == 3
+
+
+async def test_revision_cannot_change_only_hidden_fields_after_completeness_rejection():
+    quote = "The release is a preview limited to a named synthetic Linux test environment."
+    entry = _entry("preview", quote)
+    draft = _decision(
+        "publish", [_sid("preview")], [(1, quote)], stage="preview",
+    )
+    rejected = _review(draft) | {
+        "materially_complete": False,
+        "missing_material": [{
+            "concern": "The public post omits the preview's test-environment limit.",
+            "source": 1,
+            "quote": quote,
+        }],
+    }
+    revision = copy.deepcopy(draft)
+    revision["reason"]["text"] = "The hidden editorial reason now mentions the test limit."
+    revision["change"]["text"] = "The hidden change now mentions the test limit."
+    llm = RecordingQueueLLM(draft, rejected, revision)
+
+    with pytest.raises(DraftError, match="incomplete public post unchanged"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+    assert len(llm.calls) == 3
+
+
 async def test_initial_local_validation_failure_gets_one_fresh_revision_and_review():
     entry, invalid, corrected = _validation_retry_fixture()
     llm = RecordingQueueLLM(invalid, corrected, _review(corrected))
@@ -1177,7 +1454,7 @@ def test_story_response_schemas_are_strict_and_portable():
         {"type": "integer"}, {"type": "null"},
     ]
     review = stories.REVIEW_RESPONSE_FORMAT["json_schema"]["schema"]
-    assert len(review["properties"]) == 7
+    assert len(review["properties"]) == 9
 
 
 @pytest.mark.parametrize(
@@ -1234,17 +1511,14 @@ def test_max_length_retained_sources_fit_projected_model_history():
     projected = stories._decision_projection(decision)
     assert stories._messages(
         stories.REVIEW,
-        {
-            "decision": projected, "sources": stories._source_metadata(bundle),
-            "confirmed_sent": stories._delivered_view(history),
-        },
+        stories.review_payload(decision, bundle, history),
         stories.REVIEW_RESPONSE_FORMAT,
     )
     assert stories._messages(
         stories.REVISION,
         {
             "input": payload, "rejected_decision": projected,
-            "review": _review(decision.record()),
+            "review": stories._revision_feedback(_review(decision.record()), []),
         },
         stories.DECISION_RESPONSE_FORMAT,
     )
@@ -1315,13 +1589,17 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     ]
     review = stories._messages(
         stories.REVIEW,
-        {
-            "decision": projected, "sources": stories._source_metadata(sources),
-            "confirmed_sent": [],
-        },
+        stories.review_payload(decision, sources, history),
         stories.REVIEW_RESPONSE_FORMAT,
     )
-    assert all("excerpt" not in source for source in json.loads(review[1]["content"])["sources"])
+    review_payload = json.loads(review[1]["content"])
+    assert review_payload["rendered_post"] == stories._rendered_content(decision, sources, None)
+    assert review_payload["completeness_evidence"][0]["excerpt"].count("[cited span ") == 6
+    for index, quote in enumerate(spans, 1):
+        assert f"[cited span {index}]" in review_payload["completeness_evidence"][0]["excerpt"]
+        assert review_payload["decision"]["citation_pool"][index - 1] == {
+            "source": 1, "quote": quote,
+        }
     revision_input = stories._revision_input(payload, decision)
     assert [source["number"] for source in revision_input["sources"]] == [1]
     assert revision_input["sources"][0]["excerpt"] == sources[0]["excerpt"]
@@ -1329,7 +1607,7 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
         stories.REVISION,
         {
             "input": revision_input, "rejected_decision": projected,
-            "review": _review(decision.record()),
+            "review": stories._revision_feedback(_review(decision.record()), []),
         },
         stories.DECISION_RESPONSE_FORMAT,
     )
@@ -1348,7 +1626,7 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
         {
             "input": noncontiguous_input,
             "rejected_decision": stories._decision_projection(noncontiguous),
-            "review": _review(noncontiguous.record()),
+            "review": stories._revision_feedback(_review(noncontiguous.record()), []),
         },
         stories.DECISION_RESPONSE_FORMAT,
     )
@@ -1363,11 +1641,22 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     )
     skip_input = stories._revision_input(payload, skip)
     assert len(skip_input["sources"]) == stories.MAX_SOURCES
+    rejected_skip = _review(skip.record())
+    rejected_skip["supported"] = [False, False]
+    for gate in (
+        "action_supported", "chronology_supported", "relationship_supported",
+        "freshness_supported", "correction_supported",
+    ):
+        rejected_skip[gate] = False
+    accepted, rejected_skip, failed = stories.parse_review(
+        json.dumps(rejected_skip), skip, sources,
+    )
+    assert not accepted
     skip_revision = stories._messages(
         stories.REVISION,
         {
             "input": skip_input, "rejected_decision": stories._decision_projection(skip),
-            "review": _review(skip.record()),
+            "review": stories._revision_feedback(rejected_skip, failed),
         },
         stories.DECISION_RESPONSE_FORMAT,
     )
