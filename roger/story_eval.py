@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 from decimal import Decimal, InvalidOperation
@@ -41,6 +42,8 @@ class ModelProfile:
     service_tier: str
     prompt_usd_per_million: Decimal
     completion_usd_per_million: Decimal
+    prompt_cache: str
+    prompt_cache_write_usd_per_million: Decimal
     reasoning_effort: str
     writer_max_tokens: int
     reviewer_max_tokens: int
@@ -51,6 +54,11 @@ class ModelProfile:
     @classmethod
     def from_record(cls, name: str, record: dict[str, Any]) -> ModelProfile:
         pricing = record["pricing_usd_per_million"]
+        try:
+            prompt_cache = record["prompt_cache"]
+            cache_write_price = Decimal(str(pricing["prompt_cache_write"]))
+        except (KeyError, InvalidOperation, TypeError, ValueError) as exc:
+            raise EvaluationError(f"missing or invalid prompt-cache profile: {name}") from exc
         profile = cls(
             name=name,
             model=record["model"],
@@ -59,6 +67,8 @@ class ModelProfile:
             service_tier=record["service_tier"],
             prompt_usd_per_million=Decimal(str(pricing["prompt"])),
             completion_usd_per_million=Decimal(str(pricing["completion"])),
+            prompt_cache=prompt_cache,
+            prompt_cache_write_usd_per_million=cache_write_price,
             reasoning_effort=record["reasoning_effort"],
             writer_max_tokens=int(record["writer_max_tokens"]),
             reviewer_max_tokens=int(record["reviewer_max_tokens"]),
@@ -71,10 +81,13 @@ class ModelProfile:
             or profile.service_tier != "default"
             or profile.reasoning_effort != "medium"
             or profile.writer_max_tokens <= 0 or profile.reviewer_max_tokens <= 0
+            or profile.prompt_cache not in ("disabled", "provider_default")
+            or (profile.prompt_cache == "disabled" and profile.provider != "openai")
             or any(
                 not price.is_finite() or price <= 0
                 for price in (
-                    profile.prompt_usd_per_million, profile.completion_usd_per_million
+                    profile.prompt_usd_per_million, profile.completion_usd_per_million,
+                    profile.prompt_cache_write_usd_per_million,
                 )
             )
         ):
@@ -114,7 +127,10 @@ class CallSpec:
                 f"request needs {self.input_token_upper_bound} input tokens, above the "
                 f"{_INPUT_TOKEN_RESERVE} token reservation"
             )
-        prompt = Decimal(_INPUT_TOKEN_RESERVE) * self.profile.prompt_usd_per_million
+        # Cover possible billed writes even when the request asks the provider not to cache.
+        prompt = Decimal(_INPUT_TOKEN_RESERVE) * max(
+            self.profile.prompt_usd_per_million, self.profile.prompt_cache_write_usd_per_million
+        )
         completion = Decimal(self.max_tokens) * self.profile.completion_usd_per_million
         estimated = (prompt + completion) / Decimal(1_000_000)
         return estimated.quantize(Decimal("0.01"), rounding="ROUND_CEILING")
@@ -132,6 +148,11 @@ class CallSpec:
             "provider_display_name": self.profile.provider_display_name,
             "service_tier": self.profile.service_tier,
             "reasoning_effort": self.profile.reasoning_effort,
+            "response_cache": "disabled",
+            "prompt_cache": self.profile.prompt_cache,
+            "prompt_cache_write_usd_per_million": str(
+                self.profile.prompt_cache_write_usd_per_million
+            ),
             "max_tokens": self.max_tokens,
             "timeout_seconds": 900 if "reviewer" in self.stage else 1200,
             "input_token_upper_bound": self.input_token_upper_bound,
@@ -424,7 +445,13 @@ def build_plan(
 
 
 def _request_kwargs(spec: CallSpec) -> dict[str, Any]:
-    return {
+    if any(
+        not isinstance(message, dict) or set(message) != {"role", "content"}
+        or not isinstance(message["content"], str)
+        for message in spec.messages
+    ):
+        raise EvaluationError("evaluation messages must be plain text without cache controls")
+    kwargs = {
         "model": spec.profile.model,
         "messages": spec.messages,
         "max_tokens": spec.max_tokens,
@@ -444,6 +471,9 @@ def _request_kwargs(spec: CallSpec) -> dict[str, Any]:
             "reasoning": {"effort": spec.profile.reasoning_effort, "exclude": True},
         },
     }
+    if spec.profile.prompt_cache == "disabled":
+        kwargs["extra_body"]["prompt_cache_options"] = {"mode": "explicit"}
+    return kwargs
 
 
 def _request_record(spec: CallSpec) -> dict[str, Any]:
@@ -558,6 +588,8 @@ def _visible_response(response: Any) -> dict[str, Any]:
     if choice is not None and message is None:
         shape_error = "missing_message"
     visible = {
+        "generation_id": _generation_id(response),
+        "usage_details": _usage_details(response),
         "model": getattr(response, "model", None),
         "finish_reason": getattr(choice, "finish_reason", None),
         "content": getattr(message, "content", None),
@@ -568,6 +600,45 @@ def _visible_response(response: Any) -> dict[str, Any]:
     if shape_error is not None:
         visible["shape_error"] = shape_error
     return visible
+
+
+def _generation_id(response: Any) -> str | None:
+    value = getattr(response, "id", None)
+    if isinstance(value, str) and re.fullmatch(r"gen-[A-Za-z0-9_-]{1,252}", value):
+        return value
+    return None
+
+
+def _usage_details(response: Any) -> dict[str, Any]:
+    usage = getattr(response, "usage", None)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    cost_details = getattr(usage, "cost_details", None)
+
+    def field(container: Any, key: str) -> Any:
+        return container.get(key) if isinstance(container, dict) else getattr(container, key, None)
+
+    counts = {}
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    for key in ("cached_tokens", "cache_write_tokens"):
+        value = field(prompt_details, key)
+        counts[key] = value if (
+            type(value) is int and value >= 0
+            and (type(prompt_tokens) is not int or prompt_tokens < 0 or value <= prompt_tokens)
+        ) else None
+    costs = {}
+    for key in (
+        "upstream_inference_cost", "upstream_inference_prompt_cost",
+        "upstream_inference_completions_cost",
+    ):
+        value = field(cost_details, key)
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            amount = None
+        costs[key] = (
+            str(amount) if amount is not None and amount.is_finite() and amount >= 0 else None
+        )
+    return {**counts, "cost_details": costs}
 
 
 def _usage(response: Any) -> dict[str, int | Decimal | None] | None:
@@ -654,10 +725,11 @@ class Runner:
             raise EvaluationError(
                 f"profile {spec.profile.name} is marked unavailable: {spec.profile.note}"
             )
+        kwargs = _request_kwargs(spec)
         index = self.ledger.reserve(spec)
         started = time.monotonic()
         try:
-            response = await self.client.chat.completions.create(**_request_kwargs(spec))
+            response = await self.client.chat.completions.create(**kwargs)
         except Exception as exc:
             latency = round((time.monotonic() - started) * 1000)
             self.ledger.finish(
@@ -669,6 +741,18 @@ class Runner:
         visible = _visible_response(response)
         usage = _usage(response)
         status = _response_status(visible, spec.profile)
+        cache_counts = [visible["usage_details"][key] for key in (
+            "cached_tokens", "cache_write_tokens"
+        )]
+        visible["prompt_cache_observation"] = (
+            "activity_reported" if any(count is not None and count > 0 for count in cache_counts)
+            else "none_reported" if cache_counts == [0, 0] else "unknown"
+        )
+        if (
+            status == "completed" and spec.profile.prompt_cache == "disabled"
+            and visible["prompt_cache_observation"] == "activity_reported"
+        ):
+            status = "prompt_cache_policy_mismatch"
         if usage is None and status != "malformed_response":
             status = "missing_usage_or_cost"
         elif usage is not None and (
@@ -684,7 +768,9 @@ class Runner:
         artifact = {
             "request": _request_record(spec),
             "response": visible,
-            "accounting": usage and {key: str(value) for key, value in usage.items()},
+            "accounting": usage and {
+                key: str(value) if value is not None else None for key, value in usage.items()
+            },
             "status": self.ledger.data["calls"][index]["status"],
         }
         destination = self.responses / f"{index + 1:03d}-{spec.request_id}.json"

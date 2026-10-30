@@ -8,27 +8,31 @@ Scout, the production database, or Discord.
 The prepared screen is 48 writer calls (four models, six cases, two repeats)
 and 48 reviewer calls (two models, twelve calibration fixtures, two repeats).
 Each call reserves 32,768 input tokens and either 16,384 writer tokens or 8,192
-reviewer tokens. Reasoning tokens count against the output ceiling. The current
-per-call ceilings total $27.60, so the proposed initial allowance is 96 calls
-and $28. Up to two selected writer/reviewer pairings can later use 96 calls and
-$64. A separately reviewed current-evidence acceptance packet can use four more
-calls and $2.60. The exact reserved total is $92.60, with a proposed $100 outer
-envelope for 196 calls. These are approval bounds, not expected spend.
+reviewer tokens. Reasoning tokens count against the output ceiling. Input uses
+the greater of the base price and the total price including possible cache
+writes, even when the request asks the provider not to cache. The current
+per-call ceilings total $30.00 for the prepared 96-call screen. These are
+reservation bounds, not expected spend or an approved allowance.
+
+The original proposal reserved $92.60 within a $100 envelope for 196 calls.
+That proposal predates cache-write-aware pricing. It remains historical evidence;
+new plans and approvals must use the current calculation without rewriting old
+ledgers or transferring unused allowances.
 
 The initial screen uses separate immutable ledgers, so the operator must track
 the aggregate approval across them:
 
 | Run | Calls | Per-run ceiling |
 | --- | ---: | ---: |
-| Astra writer | 12 | $13.80 |
-| Sol writer | 12 | $2.76 |
-| Sonnet writer | 12 | $2.76 |
+| Astra writer | 12 | $14.76 |
+| Sol writer | 12 | $3.00 |
+| Sonnet writer | 12 | $3.00 |
 | Gemini writer | 12 | $1.08 |
-| Sol reviewer | 24 | $3.60 |
-| Sonnet reviewer | 24 | $3.60 |
+| Sol reviewer | 24 | $4.08 |
+| Sonnet reviewer | 24 | $4.08 |
 
-The worst-case selected pairing is 48 calls and $31.20 when Astra writes and
-Sol or Sonnet reviews. Two such pairing ledgers reserve 96 calls and $62.40.
+The worst-case selected pairing is 48 calls and $33.60 when Astra writes and
+Sol or Sonnet reviews. Two such pairing ledgers reserve 96 calls and $67.20.
 No single ledger enforces the aggregate allowance across other artifact
 directories.
 
@@ -61,7 +65,7 @@ runtime and is not written to artifacts.
 OPENROUTER_API_KEY=... python -m roger.story_eval run \
   --stage writer --model sol --case straight_release --repeats 2 \
   --artifact-dir /tmp/roger-story-eval-sol \
-  --max-calls 2 --max-cost-usd 0.46 --approve-paid-calls
+  --max-calls 2 --max-cost-usd 0.50 --approve-paid-calls
 ```
 
 Reviewer calibration uses `--stage reviewer --model sol`; each `--case` value
@@ -103,8 +107,28 @@ explicit unresolved limit.
 The repository's regressions are derived synthetic reproductions. Exact captured outputs stay in
 their immutable evaluation bundle.
 
-The API cache is disabled so repeated requests remain real repeats. Artifacts
-contain the complete visible response text, an allowlisted routing-metadata
+Response caching is disabled with `X-OpenRouter-Cache: false`. Provider prompt
+caching is separate. OpenAI profiles request it off using
+`prompt_cache_options: {"mode": "explicit"}` without breakpoints. Other profiles
+record `provider_default`. Messages must be plain text, without explicit cache
+markers or TTLs that would invalidate the price bound. Sonnet's input bound
+covers default five-minute writes. Gemini implicit caching adds no write/storage
+charge, so its total input price remains the base price; the catalog's explicit
+storage surcharge is not a total input-token price. Missing or invalid cache
+policy/pricing rejects the profile before a request can be sent.
+
+These settings follow the [provider caching documentation](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+SDK tests verify serialization, not live endpoint acceptance of the new control.
+Positive reported prompt-cache activity under requested-off stops the run after
+recording the reported cost. Missing counters remain unknown; two zero counters
+mean `none_reported`, not independently verified absence of caching.
+
+Artifacts retain allowlisted IDs in `response.generation_id`, and cache-read/write
+token counts and upstream cost components in `response.usage_details`, even when
+required usage is missing or the response is malformed. Unknown or invalid optional fields
+stay `null` and do not replace a valid provider-reported charge. A cost difference
+alone does not establish cache activity. Earlier artifacts are not rewritten.
+Artifacts also contain the complete visible response text, an allowlisted routing-metadata
 view, token/cost accounting, sanitized error classes or status codes, and the
 exact messages, schema and non-secret request settings needed to reproduce the
 call. They do not contain the key, authorization headers, hidden reasoning or
