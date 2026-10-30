@@ -131,13 +131,38 @@ def _review(decision):
     }
 
 
+def _request_chars(messages, response_format):
+    return sum(len(message["content"]) for message in messages) + len(
+        stories._compact_json(response_format)
+    )
+
+
+def _validation_retry_fixture():
+    excerpt = "V" * 800
+    entry = _entry("validation-retry", excerpt)
+    corrected = _decision(
+        "publish", [_sid("validation-retry")], [(1, excerpt[:80])],
+        headline="A bounded validation retry",
+    )
+    invalid = json.loads(json.dumps(corrected))
+    invalid["reason"]["text"] = "r" * 541
+    invalid["reason"]["citations"][0]["quote"] = excerpt[:501]
+    invalid["claims"][1]["citations"] = []
+    return entry, invalid, corrected
+
+
 class FakeLLM:
     def __init__(self, decision):
         self.responses = [decision, _review(decision)]
         self.calls = []
+        self.response_formats = []
 
-    async def complete(self, brain, messages, *, curated_review=False, curated_story=False):
+    async def complete(
+        self, brain, messages, *, curated_review=False, curated_story=False,
+        response_format=None,
+    ):
         self.calls.append((brain, curated_review, curated_story, messages))
+        self.response_formats.append(response_format)
         value = self.responses.pop(0)
         content = json.dumps(value)
         return SimpleNamespace(choices=[SimpleNamespace(
@@ -149,7 +174,10 @@ class QueueLLM:
     def __init__(self, *values):
         self.values = list(values)
 
-    async def complete(self, brain, messages, *, curated_review=False, curated_story=False):
+    async def complete(
+        self, brain, messages, *, curated_review=False, curated_story=False,
+        response_format=None,
+    ):
         value = self.values.pop(0)
         return SimpleNamespace(
             choices=[SimpleNamespace(
@@ -162,11 +190,17 @@ class RecordingQueueLLM(QueueLLM):
     def __init__(self, *values):
         super().__init__(*values)
         self.calls = []
+        self.response_formats = []
 
-    async def complete(self, brain, messages, *, curated_review=False, curated_story=False):
+    async def complete(
+        self, brain, messages, *, curated_review=False, curated_story=False,
+        response_format=None,
+    ):
         self.calls.append((brain, curated_review, curated_story, messages))
+        self.response_formats.append(response_format)
         return await super().complete(
             brain, messages, curated_review=curated_review, curated_story=curated_story,
+            response_format=response_format,
         )
 
 
@@ -266,6 +300,9 @@ async def test_historical_captured_source_previews(
     assert all(source["observed_at"] == "2026-10-01T12:00:00+00:00"
                for source in result["sources"])
     assert len(llm.calls) == 2
+    assert llm.response_formats == [
+        stories.DECISION_RESPONSE_FORMAT, stories.REVIEW_RESPONSE_FORMAT,
+    ]
     for claim in result["claims"]:
         for citation in claim["citations"]:
             source = result["sources"][citation["source"] - 1]
@@ -329,6 +366,7 @@ async def test_provider_truncation_stops_each_story_completion_stage(truncated_c
 
         async def complete(
             self, brain, messages, *, curated_review=False, curated_story=False,
+            response_format=None,
         ):
             call = len(self.calls)
             self.calls.append((curated_review, curated_story))
@@ -348,6 +386,38 @@ async def test_provider_truncation_stops_each_story_completion_stage(truncated_c
     ][:truncated_call + 1]
 
 
+@pytest.mark.parametrize(
+    ("finish_reason", "content", "refusal", "message"),
+    [
+        ("length", "{}", None, "truncated by provider"),
+        ("content_filter", "{}", None, "content filter"),
+        ("stop", None, "blocked", "refused by provider"),
+        ("stop", "   ", None, "response was blank"),
+    ],
+)
+async def test_terminal_initial_story_response_never_gets_revision(
+    finish_reason, content, refusal, message,
+):
+    class TerminalLLM:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, *args, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason=finish_reason,
+                message=SimpleNamespace(content=content, refusal=refusal),
+            )])
+
+    llm = TerminalLLM()
+    with pytest.raises(DraftError, match=message):
+        await stories.decide(
+            [_entry("release", SYNTH_FIRST)], {"stories": [], "delivered": []}, llm,
+            now=NOW, max_age_hours=36, captured_source_preview=True,
+        )
+    assert llm.calls == 1
+
+
 async def test_truncated_story_preview_does_not_review_or_write_state(tmp_path, monkeypatch):
     entry = _entry("release", SYNTH_FIRST, production=True)
 
@@ -360,6 +430,7 @@ async def test_truncated_story_preview_does_not_review_or_write_state(tmp_path, 
 
         async def complete(
             self, brain, messages, *, curated_review=False, curated_story=False,
+            response_format=None,
         ):
             self.calls.append((curated_review, curated_story))
             decision = _decision("publish", [_sid("release")], [(1, SYNTH_FIRST)])
@@ -634,6 +705,29 @@ def test_story_fingerprint_ignores_timestamp_only_refresh_but_detects_changed_ex
     )
 
 
+@pytest.mark.parametrize("schema_name", ["DECISION_RESPONSE_FORMAT", "REVIEW_RESPONSE_FORMAT"])
+def test_story_fingerprint_includes_response_schemas(monkeypatch, schema_name):
+    settings = SimpleNamespace(curated_models=["draft"], curated_review_models=["review"])
+    sources = stories.prepare_captured_sources(
+        [_entry("release", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    history = {"stories": [], "delivered": []}
+    original = stories.input_fingerprint(sources, history, settings)
+    monkeypatch.setattr(stories, schema_name, {"changed": schema_name})
+    assert stories.input_fingerprint(sources, history, settings) != original
+
+
+def test_story_fingerprint_includes_validation_revision_prompt(monkeypatch):
+    settings = SimpleNamespace(curated_models=["draft"], curated_review_models=["review"])
+    sources = stories.prepare_captured_sources(
+        [_entry("release", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    history = {"stories": [], "delivered": []}
+    original = stories.input_fingerprint(sources, history, settings)
+    monkeypatch.setattr(stories, "VALIDATION_REVISION", "changed validation prompt")
+    assert stories.input_fingerprint(sources, history, settings) != original
+
+
 async def test_story_records_restart_and_enforce_count_caps(tmp_path):
     path = str(tmp_path / "roger.db")
     store = await Store(path).open()
@@ -744,6 +838,9 @@ def test_untrusted_unhashable_model_shapes_raise_draft_error(mutation):
         ("source_id", "invalid citation"),
         ("plural_facts", "invalid story claim field"),
         ("uncited_headline_stage", "invalid citations"),
+        ("missing_keys", "invalid story decision fields"),
+        ("eleven_claims", "invalid story claims"),
+        ("uncited_change", "invalid citations"),
         ("update_without_history", "update lacks confirmed prior coverage"),
         ("update_two_ids", "update covers one distinct story"),
     ],
@@ -763,6 +860,13 @@ def test_observed_invalid_story_shapes_fail_closed(mutation, message):
     elif mutation == "uncited_headline_stage":
         decision["claims"][0]["citations"] = []
         decision["claims"][1]["citations"] = []
+    elif mutation == "missing_keys":
+        del decision["unresolved_questions"]
+        del decision["correction_of"]
+    elif mutation == "eleven_claims":
+        decision["claims"].extend([decision["claims"][2]] * 7)
+    elif mutation == "uncited_change":
+        decision["change"]["citations"] = []
     elif mutation == "update_without_history":
         decision["action"] = "update"
     else:
@@ -772,6 +876,76 @@ def test_observed_invalid_story_shapes_fail_closed(mutation, message):
         stories.parse_decision(
             json.dumps(decision), sources, {"stories": [], "delivered": []},
         )
+
+
+@pytest.mark.parametrize(
+    ("reason", "message"),
+    [("", "reason is empty"), ("r" * 301, "reason exceeds 300 characters")],
+)
+def test_story_text_reports_empty_and_length_failures_separately(reason, message):
+    sources = stories.prepare_captured_sources(
+        [_entry("release", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision("publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)])
+    decision["reason"]["text"] = reason
+    with pytest.raises(DraftError, match=message):
+        stories.parse_decision(json.dumps(decision), sources, {"stories": [], "delivered": []})
+
+
+@pytest.mark.parametrize("quote_length", [25, 514])
+def test_exact_source_quote_outside_length_bound_reports_length(quote_length):
+    excerpt = "Q" * 600
+    sources = stories.prepare_captured_sources(
+        [_entry("release", excerpt)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision(
+        "publish", [sources[0]["story_id"]], [(1, excerpt[:80])],
+    )
+    decision["reason"]["citations"] = [_citation(1, excerpt[:quote_length])]
+    with pytest.raises(DraftError, match="citation quote must be 40-500 characters"):
+        stories.parse_decision(json.dumps(decision), sources, {"stories": [], "delivered": []})
+
+
+def test_in_bounds_nonexistent_quote_reports_exact_match_failure():
+    excerpt = "Q" * 600
+    sources = stories.prepare_captured_sources(
+        [_entry("release", excerpt)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision(
+        "publish", [sources[0]["story_id"]], [(1, excerpt[:80])],
+    )
+    decision["reason"]["citations"] = [_citation(1, "Z" * 80)]
+    with pytest.raises(DraftError, match="citation quote is not an exact source excerpt"):
+        stories.parse_decision(json.dumps(decision), sources, {"stories": [], "delivered": []})
+
+
+@pytest.mark.parametrize("action", ["hold", "skip"])
+def test_quiet_decisions_reject_claims(action):
+    sources = stories.prepare_captured_sources(
+        [_entry("quiet", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    ids = [] if action == "skip" else [sources[0]["story_id"]]
+    decision = _decision(action, ids, [], reason="No material development.")
+    decision["claims"] = _decision(
+        "publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)],
+    )["claims"]
+    with pytest.raises(DraftError, match="cannot contain claims"):
+        stories.parse_decision(json.dumps(decision), sources, {"stories": [], "delivered": []})
+
+
+@pytest.mark.parametrize("field", ["take", "question"])
+def test_public_decision_rejects_duplicate_singleton_claims(field):
+    sources = stories.prepare_captured_sources(
+        [_entry("release", SYNTH_FIRST)], now=NOW, max_age_hours=36,
+    )
+    decision = _decision("publish", [sources[0]["story_id"]], [(1, SYNTH_FIRST)])
+    optional = {
+        "field": field, "text": "A bounded optional claim.",
+        "citations": [_citation(1, SYNTH_FIRST)], "mutable": False,
+    }
+    decision["claims"].extend([optional, optional])
+    with pytest.raises(DraftError, match="required grounded fields"):
+        stories.parse_decision(json.dumps(decision), sources, {"stories": [], "delivered": []})
 
 
 def test_story_identity_dedupes_url_aliases_and_hashes_long_fallbacks():
@@ -858,6 +1032,86 @@ async def test_review_receives_the_exact_cited_span_and_blocks_irrelevant_suppor
     assert decision.action == "hold"
 
 
+async def test_initial_local_validation_failure_gets_one_fresh_revision_and_review():
+    entry, invalid, corrected = _validation_retry_fixture()
+    llm = RecordingQueueLLM(invalid, corrected, _review(corrected))
+    decision, _ = await stories.decide(
+        [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+        captured_source_preview=True,
+    )
+    assert decision.publishable
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (False, True), (True, False),
+    ]
+    revision_payload = json.loads(llm.calls[1][3][-1]["content"])
+    assert set(revision_payload) == {"input", "validation_error"}
+    assert revision_payload["validation_error"] == "reason exceeds 300 characters"
+    assert revision_payload["input"]["sources"][0]["excerpt"] == "V" * 800
+    assert llm.calls[1][3][0]["content"] == stories.VALIDATION_REVISION
+    assert stories._OUTPUT_LIMITS in stories.VALIDATION_REVISION
+    assert "r" * 541 not in llm.calls[1][3][-1]["content"]
+    assert llm.response_formats == [
+        stories.DECISION_RESPONSE_FORMAT,
+        stories.DECISION_RESPONSE_FORMAT,
+        stories.REVIEW_RESPONSE_FORMAT,
+    ]
+
+
+async def test_invalid_validation_revision_stops_after_two_calls():
+    entry, invalid, _ = _validation_retry_fixture()
+    llm = RecordingQueueLLM(invalid, invalid)
+    with pytest.raises(DraftError, match="reason exceeds 300 characters"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (False, True),
+    ]
+
+
+async def test_review_rejected_validation_revision_stops_after_three_calls():
+    entry, invalid, corrected = _validation_retry_fixture()
+    rejected = _review(corrected) | {"material_change": False}
+    llm = RecordingQueueLLM(invalid, corrected, rejected)
+    with pytest.raises(DraftError, match="review rejected the revision"):
+        await stories.decide(
+            [entry], {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (False, True), (True, False),
+    ]
+
+
+async def test_mixed_topic_draft_and_revision_fail_independent_focus_review():
+    entries = [_entry("release", SYNTH_FIRST), _entry("agent", GROK)]
+    mixed = _decision(
+        "publish", [_sid("release")], [(1, SYNTH_FIRST), (2, GROK)],
+        headline="A synthetic release and an unrelated agent product",
+        fact="The release is available while the agent product keeps named bots.",
+    )
+    rejected = _review(mixed) | {
+        "action_supported": False,
+        "relationship_supported": False,
+    }
+    llm = RecordingQueueLLM(mixed, rejected, mixed, rejected)
+    with pytest.raises(DraftError, match="review rejected the revision"):
+        await stories.decide(
+            entries, {"stories": [], "delivered": []}, llm, now=NOW, max_age_hours=36,
+            captured_source_preview=True,
+        )
+    assert [(call[1], call[2]) for call in llm.calls] == [
+        (False, True), (True, False), (False, True), (True, False),
+    ]
+    assert llm.response_formats == [
+        stories.DECISION_RESPONSE_FORMAT,
+        stories.REVIEW_RESPONSE_FORMAT,
+        stories.DECISION_RESPONSE_FORMAT,
+        stories.REVIEW_RESPONSE_FORMAT,
+    ]
+
+
 def test_correction_target_must_match_story_and_use_fresh_change_evidence():
     source = stories.prepare_captured_sources(
         [_entry("a", DOTS_REPEAT)], now=NOW, max_age_hours=36,
@@ -891,6 +1145,61 @@ def test_public_reason_requires_exact_source_citation():
         )
 
 
+def test_story_response_schemas_are_strict_and_portable():
+    encoded = stories._compact_json([
+        stories.DECISION_RESPONSE_FORMAT, stories.REVIEW_RESPONSE_FORMAT,
+    ])
+    assert '"maxItems"' not in encoded
+    assert '"$defs"' not in encoded
+
+    def assert_closed(value):
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert value["additionalProperties"] is False
+                assert set(value["required"]) == set(value["properties"])
+            for nested in value.values():
+                assert_closed(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_closed(nested)
+
+    assert_closed(stories.DECISION_RESPONSE_FORMAT)
+    assert_closed(stories.REVIEW_RESPONSE_FORMAT)
+    decision = stories.DECISION_RESPONSE_FORMAT["json_schema"]["schema"]
+    assert set(decision["properties"]["action"]["enum"]) == stories._ACTIONS
+    claim = decision["properties"]["claims"]["items"]
+    assert set(claim["properties"]["field"]["enum"]) == stories._FIELDS
+    citation = claim["properties"]["citations"]["items"]
+    assert citation["properties"]["source"] == {"type": "integer"}
+    assert claim["properties"]["citations"]["minItems"] == 1
+    assert "minItems" not in decision["properties"]["reason"]["properties"]["citations"]
+    assert decision["properties"]["correction_of"]["anyOf"] == [
+        {"type": "integer"}, {"type": "null"},
+    ]
+    review = stories.REVIEW_RESPONSE_FORMAT["json_schema"]["schema"]
+    assert len(review["properties"]) == 7
+
+
+@pytest.mark.parametrize(
+    "response_format",
+    [stories.DECISION_RESPONSE_FORMAT, stories.REVIEW_RESPONSE_FORMAT],
+)
+def test_model_request_limit_counts_full_response_format(response_format):
+    system = "s"
+    empty_payload = {"value": ""}
+    filler_size = (
+        stories.MAX_CONTEXT_CHARS
+        - len(system)
+        - len(stories._compact_json(empty_payload))
+        - len(stories._compact_json(response_format))
+    )
+    payload = {"value": "x" * filler_size}
+    messages = stories._messages(system, payload, response_format)
+    assert _request_chars(messages, response_format) == stories.MAX_CONTEXT_CHARS
+    with pytest.raises(DraftError, match="context exceeds limit"):
+        stories._messages(system, {"value": "x" * (filler_size + 1)}, response_format)
+
+
 def test_max_length_retained_sources_fit_projected_model_history():
     entries = [
         _entry(str(index), f"Evidence {index} " + "x" * 1_700,
@@ -912,7 +1221,7 @@ def test_max_length_retained_sources_fit_projected_model_history():
     }
     bundle = stories.evidence_bundle(entries, history, now=NOW, max_age_hours=36)
     payload = stories._model_input(bundle, history)
-    assert stories._messages(stories.SYSTEM, payload)
+    assert stories._messages(stories.SYSTEM, payload, stories.DECISION_RESPONSE_FORMAT)
     assert [source["number"] for source in payload["sources"]] == [1, 2, 3]
     assert all("source_id" not in source for source in payload["sources"])
     source_quotes = [(index, source["excerpt"][:500])
@@ -923,13 +1232,22 @@ def test_max_length_retained_sources_fit_projected_model_history():
         )), bundle, {"stories": [], "delivered": []},
     )
     projected = stories._decision_projection(decision)
-    assert stories._messages(stories.REVIEW, {
-        "decision": projected, "sources": stories._source_metadata(bundle),
-        "confirmed_sent": stories._delivered_view(history),
-    })
-    assert stories._messages(stories.REVISION, {
-        "input": payload, "rejected_decision": projected, "review": _review(decision.record()),
-    })
+    assert stories._messages(
+        stories.REVIEW,
+        {
+            "decision": projected, "sources": stories._source_metadata(bundle),
+            "confirmed_sent": stories._delivered_view(history),
+        },
+        stories.REVIEW_RESPONSE_FORMAT,
+    )
+    assert stories._messages(
+        stories.REVISION,
+        {
+            "input": payload, "rejected_decision": projected,
+            "review": _review(decision.record()),
+        },
+        stories.DECISION_RESPONSE_FORMAT,
+    )
 
 
 def test_eight_max_length_current_sources_fit_draft_request_limit():
@@ -962,16 +1280,26 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
         "stories": [],
         "confirmed_sent": [],
     }
-    assert len(stories.SYSTEM) + len(json.dumps(old_projection)) == 18_547
-
     payload = stories._model_input(sources, history)
-    messages = stories._messages(stories.SYSTEM, payload)
-    assert len(messages[0]["content"]) + len(messages[1]["content"]) == 17_899
+    messages = stories._messages(stories.SYSTEM, payload, stories.DECISION_RESPONSE_FORMAT)
+    assert _request_chars(messages, stories.DECISION_RESPONSE_FORMAT) <= stories.MAX_CONTEXT_CHARS
+    assert len(json.dumps(old_projection)) > len(messages[1]["content"])
+    assert len(sources) == stories.MAX_SOURCES
+    assert all(len(source["excerpt"]) == stories.SOURCE_EXCERPT_CAP for source in sources)
     assert {"source_id", "feed_url", "entry_id"}.issubset(sources[0])
     assert all(
         not {"source_id", "feed_url", "entry_id"}.intersection(source)
         for source in payload["sources"]
     )
+    validation_revision = stories._messages(
+        stories.VALIDATION_REVISION,
+        {"input": payload, "validation_error": "reason exceeds 300 characters"},
+        stories.DECISION_RESPONSE_FORMAT,
+    )
+    assert _request_chars(
+        validation_revision, stories.DECISION_RESPONSE_FORMAT,
+    ) <= stories.MAX_CONTEXT_CHARS
+    assert len(json.loads(validation_revision[1]["content"])["input"]["sources"]) == 8
 
     draft = _decision("publish", [sources[0]["story_id"]], [(1, spans[0])])
     for value, quote in zip(
@@ -985,20 +1313,27 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     assert projected["citation_pool"] == [
         {"source": 1, "quote": quote} for quote in spans
     ]
-    review = stories._messages(stories.REVIEW, {
-        "decision": projected, "sources": stories._source_metadata(sources),
-        "confirmed_sent": [],
-    })
-    assert len(review[0]["content"]) + len(review[1]["content"]) == 5_263
+    review = stories._messages(
+        stories.REVIEW,
+        {
+            "decision": projected, "sources": stories._source_metadata(sources),
+            "confirmed_sent": [],
+        },
+        stories.REVIEW_RESPONSE_FORMAT,
+    )
     assert all("excerpt" not in source for source in json.loads(review[1]["content"])["sources"])
     revision_input = stories._revision_input(payload, decision)
     assert [source["number"] for source in revision_input["sources"]] == [1]
     assert revision_input["sources"][0]["excerpt"] == sources[0]["excerpt"]
-    revision = stories._messages(stories.REVISION, {
-        "input": revision_input, "rejected_decision": projected,
-        "review": _review(decision.record()),
-    })
-    assert len(revision[0]["content"]) + len(revision[1]["content"]) == 5_951
+    revision = stories._messages(
+        stories.REVISION,
+        {
+            "input": revision_input, "rejected_decision": projected,
+            "review": _review(decision.record()),
+        },
+        stories.DECISION_RESPONSE_FORMAT,
+    )
+    assert _request_chars(revision, stories.DECISION_RESPONSE_FORMAT) <= stories.MAX_CONTEXT_CHARS
 
     noncontiguous_draft = _decision(
         "publish", [sources[2]["story_id"]], [(8, sources[7]["excerpt"][:180])],
@@ -1008,11 +1343,15 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     )
     noncontiguous_input = stories._revision_input(payload, noncontiguous)
     assert [source["number"] for source in noncontiguous_input["sources"]] == [3, 8]
-    assert stories._messages(stories.REVISION, {
-        "input": noncontiguous_input,
-        "rejected_decision": stories._decision_projection(noncontiguous),
-        "review": _review(noncontiguous.record()),
-    })
+    assert stories._messages(
+        stories.REVISION,
+        {
+            "input": noncontiguous_input,
+            "rejected_decision": stories._decision_projection(noncontiguous),
+            "review": _review(noncontiguous.record()),
+        },
+        stories.DECISION_RESPONSE_FORMAT,
+    )
     reindexed = json.loads(json.dumps(noncontiguous_draft))
     for value in [reindexed["reason"], reindexed["change"], *reindexed["claims"]]:
         value["citations"][0]["source"] = 2
@@ -1024,11 +1363,17 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     )
     skip_input = stories._revision_input(payload, skip)
     assert len(skip_input["sources"]) == stories.MAX_SOURCES
-    skip_revision = stories._messages(stories.REVISION, {
-        "input": skip_input, "rejected_decision": stories._decision_projection(skip),
-        "review": _review(skip.record()),
-    })
-    assert len(skip_revision[0]["content"]) + len(skip_revision[1]["content"]) == 17_253
+    skip_revision = stories._messages(
+        stories.REVISION,
+        {
+            "input": skip_input, "rejected_decision": stories._decision_projection(skip),
+            "review": _review(skip.record()),
+        },
+        stories.DECISION_RESPONSE_FORMAT,
+    )
+    assert _request_chars(
+        skip_revision, stories.DECISION_RESPONSE_FORMAT,
+    ) <= stories.MAX_CONTEXT_CHARS
 
 
 def test_related_history_does_not_match_only_on_url_protocol():

@@ -295,12 +295,16 @@ recent output at `CURATED_HOUR=7` in `TZ` by default, after Scout's 05:30 local 
   extends it only when `CURATED_DEVELOPING_STORIES=true`: validated story decisions may follow a
   changed source version through the same delivery ledger. `/status` and sanitized job outcomes report allowances,
   spacing, pending deliveries, last input age, and recent check/editorial outcomes.
-- Developing-story mode keeps at most eight Scout sources in an 18,000-character model context,
-  four confirmed prior deliveries, 100 current story pointers, and 500 immutable decisions for 90
-  days. Actual coverage is derived by joining a decision to a `sent` delivery with a message ID;
-  rejected drafts and pending or uncertain sends are excluded. Every rendered field carries exact
-  excerpt citations and passes an independent review. Current mutable claims require a fresh source
-  observation. Preview uses the same checks and model budget while leaving all Curated state alone.
+- Developing-story mode keeps at most eight Scout sources in an 18,000-character request including
+  the serialized response schema, four confirmed prior deliveries, 100 current story pointers, and
+  500 immutable decisions for 90 days. Drafts, the one allowed revision, and independent reviews
+  use provider-enforced strict JSON schemas plus local parsing, exact-quote validation, and semantic
+  review. A valid draft uses two or four model calls; an initial local-validation failure reuses the
+  one revision slot and uses three, so every path remains at four or fewer. Actual coverage is derived by
+  joining a decision to a `sent` delivery with a message ID; rejected drafts and pending or uncertain
+  sends are excluded. Every rendered field carries exact excerpt citations. Current mutable claims
+  require a fresh source observation. Preview uses the same checks and model budget while leaving all
+  Curated state alone.
 
 Historical Digest and Spark usage rows remain in SQLite after those jobs and tools are retired.
 
