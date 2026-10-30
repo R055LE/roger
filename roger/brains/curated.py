@@ -545,13 +545,15 @@ async def run_curated_job(
                     post = None
                 else:
                     post = await draft([entry for _, entry in ready], llm)
-        except BudgetExceeded:
-            local = clock().astimezone(timezone)
+        except BudgetExceeded as exc:
+            local = clock().astimezone() if exc.reason else clock().astimezone(timezone)
             tomorrow = datetime.datetime.combine(
-                local.date() + datetime.timedelta(days=1), datetime.time(), tzinfo=timezone,
+                local.date() + datetime.timedelta(days=1), datetime.time(),
+                tzinfo=None if exc.reason else timezone,
             )
             await finish("budget", retry_at=tomorrow.timestamp())
-            return await result("budget exceeded; skipped")
+            reason = f" ({exc.reason})" if exc.reason else ""
+            return await result(f"budget exceeded{reason}; skipped")
         except LLMConfigError:
             await finish("configuration")
             return await result("curated brain not configured")
@@ -686,8 +688,9 @@ async def preview_curated_job(
                 batch.entries, history, llm, now=now,
                 max_age_hours=settings.scout_max_age_hours,
             )
-        except BudgetExceeded:
-            return {"status": "budget exceeded; skipped"}
+        except BudgetExceeded as exc:
+            reason = f" ({exc.reason})" if exc.reason else ""
+            return {"status": f"budget exceeded{reason}; skipped"}
         except LLMConfigError:
             return {"status": "curated brain not configured"}
         except CuratedModelError as exc:

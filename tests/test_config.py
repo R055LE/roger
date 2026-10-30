@@ -154,6 +154,8 @@ def test_curated_defaults(monkeypatch):
     assert settings.curated_review_models == []
     assert settings.daily_tokens_curated == 30_000
     assert settings.daily_usd_curated == 0.0
+    assert settings.daily_attempts_curated == 0
+    assert settings.daily_workflows_curated == 0
     assert settings.curated_check_interval_minutes == 0
     assert settings.curated_max_posts_per_day == 1
     assert settings.curated_min_spacing_minutes == 60
@@ -175,6 +177,9 @@ def test_curated_profile_reports_effective_models_without_changing_legacy_config
     monkeypatch.setenv("MODEL_CURATED_REVIEW", "legacy/reviewer")
     monkeypatch.setenv("CURATED_REQUEST_PROFILE", "sol-astra-v1")
     monkeypatch.setenv("CURATED_DEVELOPING_STORIES", "true")
+    monkeypatch.setenv("DAILY_USD_CURATED", "2")
+    monkeypatch.setenv("DAILY_ATTEMPTS_CURATED", "8")
+    monkeypatch.setenv("DAILY_WORKFLOWS_CURATED", "2")
     settings = Settings()
     assert settings.curated_models == ["openai/gpt-6.1-sol-20260929"]
     assert settings.curated_review_models == ["openai/gpt-6-astra-20260903"]
@@ -186,6 +191,20 @@ def test_unknown_curated_profile_is_rejected(monkeypatch):
     _set_required(monkeypatch)
     monkeypatch.setenv("CURATED_REQUEST_PROFILE", "unknown-profile")
     with pytest.raises(ValidationError):
+        Settings()
+
+
+@pytest.mark.parametrize("missing", [
+    "DAILY_USD_CURATED", "DAILY_ATTEMPTS_CURATED", "DAILY_WORKFLOWS_CURATED",
+])
+def test_selected_profile_requires_explicit_positive_budget_limits(monkeypatch, missing):
+    _set_required(monkeypatch)
+    for key, value in {
+        "CURATED_REQUEST_PROFILE": "sol-astra-v1", "CURATED_DEVELOPING_STORIES": "true",
+        "DAILY_USD_CURATED": "2", "DAILY_ATTEMPTS_CURATED": "8", "DAILY_WORKFLOWS_CURATED": "2",
+    }.items():
+        monkeypatch.setenv(key, "0" if key == missing else value)
+    with pytest.raises(ValidationError, match="requires positive DAILY_USD_CURATED"):
         Settings()
 
 

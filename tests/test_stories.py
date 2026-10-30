@@ -632,6 +632,7 @@ async def test_selected_profile_real_preview_path_is_no_send(
     settings = Settings(
         discord_token="test", openrouter_api_key="test", owner_id=1, guild_id=2,  # noqa: S106
         curated_request_profile="sol-astra-v1", curated_developing_stories=True,
+        daily_usd_curated=2, daily_attempts_curated=8, daily_workflows_curated=1,
         scout_digest_dir=str(tmp_path),
     )
     store = await Store(str(tmp_path / "profile-preview.db")).open()
@@ -672,12 +673,33 @@ async def test_selected_profile_real_preview_path_is_no_send(
         assert [call["model"] for call in calls] == [
             curated_protocol.CURATED_WRITER.model, curated_protocol.CURATED_REVIEWER.model,
         ]
-        assert await store.usage_today("curated") == 300
-        assert await store.cost_today("curated") == 0.02
+        assert await store.usage_today("curated") == (150 if review_failure else 300)
+        assert await store.cost_today("curated") == (0.01 if review_failure else 0.02)
+        budget = await store.curated_budget_state()
+        assert budget["attempts_today"] == 2
+        assert budget["workflows_today"] == 1
+        assert budget["unknown_attempts"] == int(review_failure)
         for table in ("curated_story", "curated_story_decision", "curated_delivery", "seen",
                       "curated_observation"):
             cursor = await store._conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
             assert (await cursor.fetchone())[0] == 0
+        settings.curated_channel_id = 42
+
+        async def send(**kwargs):
+            raise AssertionError("the scheduled check shares the preview's workflow allowance")
+
+        client = SimpleNamespace(get_channel=lambda _: SimpleNamespace(send=send))
+        scheduled = await run_curated_job(
+            client=client, settings=settings, llm=llm, store=store, now=now,
+        )
+        assert scheduled["status"] == "budget exceeded (daily_workflows); skipped"
+        assert len(calls) == 2
+        assert (await store.curated_budget_state())["workflows_today"] == 1
+        preview_denied = await preview_curated_job(
+            settings=settings, llm=llm, store=store, developing_stories=True,
+        )
+        assert preview_denied["status"] == "budget exceeded (daily_workflows); skipped"
+        assert len(calls) == 2
     finally:
         await llm._client.close()
         await store.close()
@@ -705,6 +727,7 @@ async def test_selected_profile_job_does_not_replay_uncertain_calls(
         discord_token="test", openrouter_api_key="test", owner_id=1, guild_id=2,  # noqa: S106
         curated_channel_id=42, curated_request_profile="sol-astra-v1",
         curated_developing_stories=True, curated_min_spacing_minutes=0,
+        daily_usd_curated=2, daily_attempts_curated=8, daily_workflows_curated=2,
         scout_digest_dir=str(tmp_path),
     )
     store = await Store(str(tmp_path / "profile-job.db")).open()

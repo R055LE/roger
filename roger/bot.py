@@ -363,6 +363,10 @@ def _format_status(
     curated_last_check: dict[str, Any] | None = None,
     curated_last_decision: dict[str, Any] | None = None,
     curated_last_input: dict[str, Any] | None = None,
+    curated_budget: dict[str, Any] | None = None,
+    curated_attempt_cap: int = 0,
+    curated_workflow_cap: int = 0,
+    curated_profile_last_call: dict[str, Any] | None = None,
 ) -> str:
     """Render the /status readout body (pure). The caller wraps it in a code block."""
     usd_caps = usd_caps or {}
@@ -390,6 +394,21 @@ def _format_status(
     if curated_configured and curated_check_interval_minutes:
         curated = f"checks every {curated_check_interval_minutes} min ({tz} daily limits)"
     lines.append(f"curated: {curated}")
+    if curated_budget is not None:
+        lines.append("curated model budget (host day; unresolved calls carry forward):")
+        for category in ("used", "reserved", "unknown"):
+            lines.append(
+                f"  {category}: {curated_budget[f'{category}_tokens']:,} tokens; "
+                f"${curated_budget[f'{category}_usd']:.6f}"
+            )
+        lines.append(
+            f"curated model attempts: {curated_budget['attempts_today']}/{curated_attempt_cap}; "
+            f"workflows: {curated_budget['workflows_today']}/{curated_workflow_cap}"
+        )
+        if curated_budget["overrun_attempts"]:
+            lines.append("curated reservation hold: reservation_overrun; reconciliation required")
+        if curated_profile_last_call:
+            lines.append(f"curated last model result: {curated_profile_last_call['status']}")
     if curated_configured and curated_state is not None:
         lines.append(
             f"curated allowance: {curated_state['remaining_posts']}/{curated_max_posts_per_day} "
@@ -462,6 +481,14 @@ async def gather_status(*, store: Store, settings: Settings, guild: Any) -> str:
         curated_last_check=json.loads(await store.get_meta("curated_last_check") or "{}"),
         curated_last_decision=json.loads(await store.get_meta("curated_last_decision") or "{}"),
         curated_last_input=json.loads(await store.get_meta("curated_last_input") or "{}"),
+        curated_budget=(await store.curated_budget_state()
+                        if getattr(settings, "curated_request_profile", "legacy") != "legacy"
+                        else None),
+        curated_attempt_cap=getattr(settings, "daily_attempts_curated", 0),
+        curated_workflow_cap=getattr(settings, "daily_workflows_curated", 0),
+        curated_profile_last_call=json.loads(
+            await store.get_meta("curated_profile_last_call") or "{}",
+        ),
         tz=settings.tz,
     )
 
