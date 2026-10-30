@@ -131,13 +131,30 @@ Feature-complete across the planned phases:
   change Curated state. Ask for `preview_curated` with `developing_stories=true` to inspect the
   bounded story-memory path. It follows confirmed sent reports across source updates, records
   explicit publish/update/combine/hold/skip decisions, and stays disabled until
-  `CURATED_DEVELOPING_STORIES=true`. Story drafts and the one allowed revision have a fixed 4,096
+  `CURATED_DEVELOPING_STORIES=true`. With the default `CURATED_REQUEST_PROFILE=legacy`, story
+  drafts and the one allowed revision have a fixed 4,096
   token output ceiling; legacy Curated drafts and reviews keep the 900-token ceiling, and every
   call spends from the same Curated daily token and dollar budgets. Set `CURATED_CHANNEL_ID` only
   after reviewing preview quality. See
   [ADR-0012](docs/decisions/0012-scout-is-the-item-source.md) for the Scout boundary. Scout currently
   fetches only newly reported items; [Scout #21](https://github.com/R055LE/scout/issues/21) tracks
   same-page refresh evidence.
+
+  `CURATED_REQUEST_PROFILE=sol-astra-v1` requires developing stories and selects the evaluated
+  Sol 20260929 writer (16,384 output tokens, 1,200-second timeout) and Astra 20260903 reviewer
+  (8,192 output tokens, 900-second timeout). Both use OpenAI, default service tier, medium
+  reasoning, no temperature, and one transport attempt with no provider fallback. Response
+  caching is disabled; prompt caching uses explicit mode with no cache markers. Unknown cache
+  usage stays unknown. Reported cache activity, a mismatched route, or an unusable response
+  prevents publication; trustworthy usage is recorded even on rejected responses. Missing usage
+  and transport failures are recorded as uncertain, without retaining response text. Selected
+  profiles reject legacy Curated calls and do not automatically replay uncertain calls.
+
+  The scheduled job keeps its 30-minute overall lease and deadline, which can interrupt the
+  four-call workflow before all per-call timeouts elapse. The selector defaults to `legacy` and
+  does not change deployed channels, schedules, or budgets. Existing budget checks compare
+  already-reported usage, so they are not hard spend reservations; [#117](https://github.com/R055LE/roger/issues/117)
+  tracks reservation enforcement before activating this profile in production.
 
 Runs as a non-root, read-only-rootfs container. More than 300 tests cover the guard rules, the tool loop
 (including channel creation with access presets and the confirm-gated edit, post, and reorder

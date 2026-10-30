@@ -1050,6 +1050,9 @@ def input_fingerprint(
         DECISION_RESPONSE_FORMAT,
         REVIEW_RESPONSE_FORMAT,
     ]
+    profile = getattr(settings, "curated_request_profile", "legacy")
+    if profile != "legacy":
+        payload.append({"request_profile": profile})
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()

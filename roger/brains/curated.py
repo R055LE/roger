@@ -19,7 +19,7 @@ import discord
 from openai import OpenAIError
 
 from roger.identity import ROGER_IDENTITY
-from roger.llm import LLM, BudgetExceeded, LLMConfigError
+from roger.llm import LLM, BudgetExceeded, CuratedModelError, LLMConfigError
 from roger.scout_source import collect_from_scout
 from roger.store import CURATED_CHECK_LEASE_SECONDS, Store
 
@@ -555,7 +555,13 @@ async def run_curated_job(
         except LLMConfigError:
             await finish("configuration")
             return await result("curated brain not configured")
+        except CuratedModelError as exc:
+            await finish("rejected")
+            return await result(f"model response rejected: {exc.status}; skipped")
         except (OpenAIError, TimeoutError):
+            if getattr(settings, "curated_request_profile", "legacy") != "legacy":
+                await finish("rejected")
+                return await result("model request interrupted; usage uncertain; skipped")
             log.exception("curated model request failed")
             await finish("transient", retry_at=clock().timestamp() + 3600)
             return await result("model request failed; skipped")
@@ -684,6 +690,8 @@ async def preview_curated_job(
             return {"status": "budget exceeded; skipped"}
         except LLMConfigError:
             return {"status": "curated brain not configured"}
+        except CuratedModelError as exc:
+            return {"status": f"model response rejected: {exc.status}; skipped"}
         except OpenAIError:
             log.exception("developing story preview model request failed")
             return {"status": "model request failed; skipped"}

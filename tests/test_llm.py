@@ -7,10 +7,19 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, AsyncOpenAI
+from openai.types.chat import ChatCompletion
 
+from roger import curated_protocol, story_eval
 from roger.brains import stories
 from roger.config import Settings
-from roger.llm import LLM, MAX_ATTEMPTS, BudgetExceeded, LLMConfigError, _retry_after_seconds
+from roger.llm import (
+    LLM,
+    MAX_ATTEMPTS,
+    BudgetExceeded,
+    CuratedModelError,
+    LLMConfigError,
+    _retry_after_seconds,
+)
 from roger.store import Store
 
 
@@ -558,4 +567,220 @@ async def test_curated_budget_exceeded_before_network(monkeypatch, tmp_path):
         with pytest.raises(BudgetExceeded):
             await llm.complete("curated", [{"role": "user", "content": "hi"}])
     finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("review", [False, True])
+async def test_selected_curated_profile_uses_evaluated_output_limits(monkeypatch, tmp_path, review):
+    _env(monkeypatch, MODEL_CURATED="legacy/writer", MODEL_CURATED_REVIEW="legacy/reviewer",
+         CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "profile.db")).open()
+    try:
+        llm = LLM(Settings(), store)
+        calls = []
+
+        async def create(**kwargs):
+            calls.append(kwargs)
+            return ChatCompletion.model_validate(_profile_response(review=review))
+
+        monkeypatch.setattr(llm._client.chat.completions, "create", create)
+        await llm.complete(
+            "curated", [{"role": "user", "content": "one measured development"}],
+            curated_story=not review, curated_review=review,
+            response_format=(stories.REVIEW_RESPONSE_FORMAT if review
+                             else stories.DECISION_RESPONSE_FORMAT),
+        )
+        assert calls[0]["max_tokens"] == (8192 if review else 16384)
+    finally:
+        await store.close()
+
+
+def _profile_response(*, review=False, content="{}"):
+    profile = curated_protocol.CURATED_REVIEWER if review else curated_protocol.CURATED_WRITER
+    return {
+        "id": "gen-profile-fixture", "object": "chat.completion", "created": 1,
+        "model": profile.returned_models[-1], "service_tier": "default",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": content}}],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+                  "cost": 0.01, "completion_tokens_details": {"reasoning_tokens": 10}},
+        "openrouter_metadata": {
+            "requested": profile.model, "strategy": "direct", "attempt": 1,
+            "attempts": [{"provider": "OpenAI"}],
+            "endpoints": {"available": [{"provider": "OpenAI", "model": profile.model,
+                                          "selected": True}]}, "pipeline": [],
+        },
+    }
+
+
+def test_production_curated_profiles_match_evaluated_contract():
+    profiles = story_eval.load_profiles()
+    for production in (curated_protocol.CURATED_WRITER, curated_protocol.CURATED_REVIEWER):
+        evaluated = profiles[production.name]
+        for field in ("model", "returned_models", "provider", "provider_display_name",
+                      "service_tier", "reasoning_effort", "prompt_cache",
+                      "prompt_usd_per_million", "completion_usd_per_million",
+                      "prompt_cache_write_usd_per_million"):
+            assert getattr(production, field) == getattr(evaluated, field)
+    assert curated_protocol.CURATED_WRITER.max_tokens == profiles["sol"].writer_max_tokens
+    assert curated_protocol.CURATED_REVIEWER.max_tokens == profiles["astra"].reviewer_max_tokens
+
+
+@pytest.mark.parametrize("review", [False, True])
+async def test_production_profile_serializes_exact_request(monkeypatch, tmp_path, review):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "wire.db")).open()
+    requests = []
+
+    async def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json=_profile_response(review=review))
+
+    llm = LLM(Settings(), store)
+    await llm._client.close()
+    llm._client = AsyncOpenAI(
+        api_key="test", base_url="https://openrouter.ai/api/v1", max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    )
+    try:
+        await llm.complete(
+            "curated", [{"role": "user", "content": "a supported finding"}],
+            curated_story=not review, curated_review=review,
+            response_format=(stories.REVIEW_RESPONSE_FORMAT if review
+                             else stories.DECISION_RESPONSE_FORMAT),
+        )
+        profile = curated_protocol.CURATED_REVIEWER if review else curated_protocol.CURATED_WRITER
+        body = json.loads(requests[0].content)
+        assert len(requests) == 1
+        assert body["model"] == profile.model
+        assert body["max_tokens"] == (8192 if review else 16384)
+        assert body["service_tier"] == "default"
+        assert body["reasoning"] == {"effort": "medium", "exclude": True}
+        assert body["provider"] == {
+            "only": ["openai"], "allow_fallbacks": False, "require_parameters": True,
+            "max_price": {"prompt": float(profile.prompt_usd_per_million),
+                          "completion": float(profile.completion_usd_per_million)},
+        }
+        assert body["prompt_cache_options"] == {"mode": "explicit"}
+        assert body["response_format"]["json_schema"]["strict"] is True
+        assert not {"temperature", "top_p", "models", "tools"}.intersection(body)
+        assert requests[0].headers["x-openrouter-cache"] == "false"
+        assert requests[0].headers["x-openrouter-metadata"] == "enabled"
+        assert requests[0].extensions["timeout"]["read"] == profile.timeout
+        assert await store.usage_today("curated") == 150
+        assert await store.cost_today("curated") == 0.01
+        diagnostic = json.loads(await store.get_meta("curated_profile_last_call"))
+        assert diagnostic["status"] == "completed"
+        assert diagnostic["usage_details"]["cache_write_tokens"] is None
+        assert "content" not in diagnostic
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+@pytest.mark.parametrize("kind,status", [
+    ("null_choices", "malformed_response"), ("missing_usage", "missing_usage_or_cost"),
+    ("empty_choices", "malformed_response"),
+    ("cache_write", "prompt_cache_policy_mismatch"), ("wrong_model", "model_mismatch"),
+    ("blank", "blank_response"),
+])
+async def test_profile_response_failures_preserve_safe_usage(
+    monkeypatch, tmp_path, kind, status,
+):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "failure.db")).open()
+    llm = LLM(Settings(), store)
+    payload = _profile_response(content="private source text")
+    if kind == "null_choices":
+        payload["choices"] = None
+    elif kind == "empty_choices":
+        payload["choices"] = []
+    elif kind == "missing_usage":
+        del payload["usage"]
+    elif kind == "cache_write":
+        payload["usage"]["prompt_tokens_details"] = {"cached_tokens": 0, "cache_write_tokens": 10}
+    elif kind == "wrong_model":
+        payload["model"] = "unexpected/private-model"
+    elif kind == "blank":
+        payload["choices"][0]["message"]["content"] = ""
+    response = ChatCompletion.model_validate({**payload, "choices": payload["choices"] or []})
+    if kind == "null_choices":
+        response.choices = None
+
+    async def create(**kwargs):
+        return response
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        with pytest.raises(CuratedModelError, match=status):
+            await llm.complete("curated", [{"role": "user", "content": "private source text"}],
+                               curated_story=True, response_format=stories.DECISION_RESPONSE_FORMAT)
+        diagnostic = await store.get_meta("curated_profile_last_call")
+        assert json.loads(diagnostic)["status"] == status
+        assert "private source text" not in diagnostic
+        assert "unexpected/private-model" not in diagnostic
+        assert await store.cost_today("curated") == (0 if kind == "missing_usage" else 0.01)
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+async def test_profile_transport_has_one_attempt_and_sanitized_uncertainty(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "transport.db")).open()
+    llm = LLM(Settings(), store)
+    calls = 0
+
+    async def create(**kwargs):
+        nonlocal calls
+        calls += 1
+        raise APIConnectionError(message="private vendor response", request=_REQUEST)
+
+    monkeypatch.setattr(llm._client.chat.completions, "create", create)
+    try:
+        with pytest.raises(CuratedModelError, match="request_error_uncertain") as caught:
+            await llm.complete("curated", [{"role": "user", "content": "finding"}],
+                               curated_story=True, response_format=stories.DECISION_RESPONSE_FORMAT)
+        assert calls == 1
+        assert caught.value.__suppress_context__ is True
+        diagnostic = await store.get_meta("curated_profile_last_call")
+        assert "private vendor response" not in diagnostic
+        assert json.loads(diagnostic)["usage"] is None
+        assert await store.cost_today("curated") == 0
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+async def test_selected_profile_rejects_legacy_curated_before_io(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true")
+    store = await Store(str(tmp_path / "legacy.db")).open()
+    llm = LLM(Settings(), store)
+    try:
+        with pytest.raises(LLMConfigError, match="tool-free story request"):
+            await llm.complete("curated", [{"role": "user", "content": "legacy draft"}])
+        assert await store.get_meta("curated_profile_last_call") is None
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+async def test_profile_preflight_checks_effective_pair_not_legacy_chains(monkeypatch, tmp_path):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true",
+         CURATED_CHANNEL_ID="42", MODEL_CURATED="legacy/writer", MODEL_CURATED_REVIEW="")
+    store = await Store(str(tmp_path / "preflight.db")).open()
+    llm = LLM(Settings(), store)
+
+    async def get(path, **kwargs):
+        if path == "/key":
+            return {"data": {}}
+        return {"data": [{"id": profile.model} for profile in (
+            curated_protocol.CURATED_WRITER, curated_protocol.CURATED_REVIEWER,
+        )]}
+
+    monkeypatch.setattr(llm._client, "get", get)
+    try:
+        assert await llm.preflight() == []
+    finally:
+        await llm._client.close()
         await store.close()

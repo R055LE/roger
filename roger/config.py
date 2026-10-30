@@ -7,10 +7,13 @@ Nothing is read from a committed file — see the security posture in the README
 from __future__ import annotations
 
 import pathlib
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from roger.curated_protocol import CURATED_REVIEWER, CURATED_WRITER
 
 
 def _split_csv(value: str) -> list[str]:
@@ -40,6 +43,7 @@ class Settings(BaseSettings):
     model_gigabrain: str = ""
     model_curated: str = ""
     model_curated_review: str = ""
+    curated_request_profile: Literal["legacy", "sol-astra-v1"] = "legacy"
 
     # --- budgets (daily in+out tokens per brain) ---
     daily_tokens_admin: int = Field(default=150_000, gt=0)
@@ -137,6 +141,12 @@ class Settings(BaseSettings):
             raise ValueError("must name a loadable IANA timezone") from exc
         return value
 
+    @model_validator(mode="after")
+    def _curated_profile_requires_stories(self) -> Settings:
+        if self.curated_request_profile != "legacy" and not self.curated_developing_stories:
+            raise ValueError("CURATED_REQUEST_PROFILE requires CURATED_DEVELOPING_STORIES")
+        return self
+
     @property
     def admin_models(self) -> list[str]:
         return _split_csv(self.model_admin)
@@ -151,10 +161,14 @@ class Settings(BaseSettings):
 
     @property
     def curated_models(self) -> list[str]:
+        if self.curated_request_profile != "legacy":
+            return [CURATED_WRITER.model]
         return _split_csv(self.model_curated)
 
     @property
     def curated_review_models(self) -> list[str]:
+        if self.curated_request_profile != "legacy":
+            return [CURATED_REVIEWER.model]
         return _split_csv(self.model_curated_review)
 
     @property
