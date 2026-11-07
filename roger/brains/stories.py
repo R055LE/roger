@@ -12,9 +12,10 @@ from urllib.parse import urlsplit
 
 import discord
 
+from roger import curated_protocol
 from roger.brains.curated import DraftError, _json_object, _response_text, _safe_link
 from roger.identity import ROGER_IDENTITY
-from roger.llm import LLM, curated_workflow
+from roger.llm import LLM, CuratedRequestError, curated_workflow
 
 MAX_SOURCES = 8
 SOURCE_EXCERPT_CAP = 1_600
@@ -588,6 +589,7 @@ def related_history(
 def _model_input(
     sources: list[dict[str, Any]],
     history: dict[str, list[dict[str, Any]]],
+    *, input_token_limit: int | None = None,
 ) -> dict[str, Any]:
     story_ids = {source["story_id"] for source in sources}
     stories = []
@@ -606,8 +608,7 @@ def _model_input(
         "stories": stories,
         "confirmed_sent": delivered,
     }
-    encoded = json.dumps(data, ensure_ascii=False)
-    if len(encoded) > MAX_CONTEXT_CHARS:
+    if input_token_limit is None and len(json.dumps(data, ensure_ascii=False)) > MAX_CONTEXT_CHARS:
         raise DraftError("developing story context exceeds limit")
     return data
 
@@ -684,12 +685,17 @@ def _messages(
     system: str,
     payload: dict[str, Any],
     response_format: dict[str, Any],
+    *, input_token_limit: int | None = None,
 ) -> list[dict[str, str]]:
     content = _compact_json(payload)
-    request_chars = len(system) + len(content) + len(_compact_json(response_format))
-    if request_chars > MAX_CONTEXT_CHARS:
-        raise DraftError("developing story model context exceeds limit")
-    return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
+    if input_token_limit is None:
+        request_chars = len(system) + len(content) + len(_compact_json(response_format))
+        if request_chars > MAX_CONTEXT_CHARS:
+            raise DraftError("developing story model context exceeds limit")
+    elif curated_protocol.input_token_upper_bound(messages, response_format) > input_token_limit:
+        raise CuratedRequestError("input context exceeds limit")
+    return messages
 
 
 def _story_response_text(response: Any) -> str:
@@ -952,6 +958,7 @@ async def _review(
             REVIEW,
             review_payload(decision, sources, history),
             REVIEW_RESPONSE_FORMAT,
+            input_token_limit=getattr(llm, "curated_input_token_limit", None),
         ),
         curated_review=True,
         response_format=REVIEW_RESPONSE_FORMAT,
@@ -977,10 +984,13 @@ async def decide(
         )
     if not sources:
         raise DraftError("no usable developing story evidence")
-    model_input = _model_input(sources, history)
+    input_token_limit = getattr(llm, "curated_input_token_limit", None)
+    model_input = _model_input(sources, history, input_token_limit=input_token_limit)
     response = await llm.complete(
         "curated",
-        _messages(SYSTEM, model_input, DECISION_RESPONSE_FORMAT),
+        _messages(
+            SYSTEM, model_input, DECISION_RESPONSE_FORMAT, input_token_limit=input_token_limit,
+        ),
         curated_story=True,
         response_format=DECISION_RESPONSE_FORMAT,
     )
@@ -1005,7 +1015,10 @@ async def decide(
         }
     response = await llm.complete(
         "curated",
-        _messages(revision_system, revision_payload, DECISION_RESPONSE_FORMAT),
+        _messages(
+            revision_system, revision_payload, DECISION_RESPONSE_FORMAT,
+            input_token_limit=input_token_limit,
+        ),
         curated_story=True,
         response_format=DECISION_RESPONSE_FORMAT,
     )
@@ -1053,7 +1066,11 @@ def input_fingerprint(
     ]
     profile = getattr(settings, "curated_request_profile", "legacy")
     if profile != "legacy":
-        payload.append({"request_profile": profile})
+        payload.append({
+            "request_profile": profile,
+            "input_budget_policy": "utf8-json-plus-2048-v1",
+            "input_token_limit": curated_protocol.MAX_INPUT_TOKENS,
+        })
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()

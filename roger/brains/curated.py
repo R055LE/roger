@@ -19,7 +19,7 @@ import discord
 from openai import OpenAIError
 
 from roger.identity import ROGER_IDENTITY
-from roger.llm import LLM, BudgetExceeded, CuratedModelError, LLMConfigError
+from roger.llm import LLM, BudgetExceeded, CuratedModelError, CuratedRequestError, LLMConfigError
 from roger.scout_source import collect_from_scout
 from roger.store import CURATED_CHECK_LEASE_SECONDS, Store
 
@@ -557,6 +557,9 @@ async def run_curated_job(
         except LLMConfigError:
             await finish("configuration")
             return await result("curated brain not configured")
+        except CuratedRequestError as exc:
+            await finish("rejected")
+            return await result(f"model request rejected: {exc}; skipped")
         except CuratedModelError as exc:
             await finish("rejected")
             return await result(f"model response rejected: {exc.status}; skipped")
@@ -693,6 +696,8 @@ async def preview_curated_job(
             return {"status": f"budget exceeded{reason}; skipped"}
         except LLMConfigError:
             return {"status": "curated brain not configured"}
+        except CuratedRequestError as exc:
+            return {"status": f"model request rejected: {exc}; skipped"}
         except CuratedModelError as exc:
             return {"status": f"model response rejected: {exc.status}; skipped"}
         except OpenAIError:
