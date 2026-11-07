@@ -2,6 +2,7 @@
 
 import copy
 import datetime
+import hashlib
 import json
 import time
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from roger.brains import stories
 from roger.brains.curated import DraftError, preview_curated_job, run_curated_job
 from roger.config import Settings
 from roger.llm import LLM as ProductionLLM
-from roger.llm import CuratedModelError
+from roger.llm import CuratedModelError, CuratedRequestError
 from roger.scout_source import ScoutBatch
 from roger.store import CURATED_STORY_DECISION_LIMIT, CURATED_STORY_LIMIT, Store
 
@@ -755,6 +756,54 @@ async def test_selected_profile_job_does_not_replay_uncertain_calls(
         await store.close()
 
 
+@pytest.mark.parametrize("preview", [False, True])
+async def test_selected_oversized_request_is_local_before_ledger_or_provider(
+    tmp_path, monkeypatch, preview,
+):
+    now = datetime.datetime.now(datetime.UTC)
+    entries = [_entry(str(index), "é" * 1600, observed_at=now.isoformat())
+               for index in range(8)]
+
+    async def collect(*args, **kwargs):
+        return ScoutBatch(entries, "oversized-fixture", 1.0, "")
+
+    async def forbidden(**kwargs):
+        raise AssertionError("oversized inputs must not call a provider or send a post")
+
+    monkeypatch.setattr("roger.brains.curated.collect_from_scout", collect)
+    settings = Settings(
+        discord_token="test", openrouter_api_key="test", owner_id=1, guild_id=2,  # noqa: S106
+        curated_channel_id=42, curated_request_profile="sol-astra-v1",
+        curated_developing_stories=True, daily_usd_curated=2,
+        daily_attempts_curated=8, daily_workflows_curated=2, scout_digest_dir=str(tmp_path),
+    )
+    store = await Store(str(tmp_path / "oversized.db")).open()
+    llm = ProductionLLM(settings, store)
+    monkeypatch.setattr(llm._client.chat.completions, "create", forbidden)
+    try:
+        if preview:
+            result = await preview_curated_job(
+                settings=settings, llm=llm, store=store, developing_stories=True,
+            )
+        else:
+            client = SimpleNamespace(get_channel=lambda _: SimpleNamespace(send=forbidden))
+            result = await run_curated_job(
+                client=client, settings=settings, llm=llm, store=store, now=now,
+            )
+        assert result["status"] == "model request rejected: input context exceeds limit; skipped"
+        state = await store.curated_budget_state()
+        assert state["attempts_today"] == state["workflows_today"] == state["used_tokens"] == 0
+        assert await store.get_meta("curated_profile_last_call") is None
+        cursor = await store._conn.execute("SELECT status FROM curated_observation")
+        assert [row[0] for row in await cursor.fetchall()] == ([] if preview else ["rejected"])
+        for table in ("curated_delivery", "curated_story_decision", "seen"):
+            cursor = await store._conn.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+            assert (await cursor.fetchone())[0] == 0
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
 async def test_long_source_url_is_rejected_before_model_or_delivery(tmp_path, monkeypatch):
     entry = _entry(
         "long-url", SYNTH_FIRST, production=True,
@@ -909,6 +958,70 @@ def test_story_fingerprint_includes_profile_without_changing_legacy_fingerprint(
     assert stories.input_fingerprint(sources, history, settings) == original
     settings.curated_request_profile = "sol-astra-v1"
     assert stories.input_fingerprint(sources, history, settings) != original
+
+
+@pytest.mark.parametrize("profile", ["legacy", "sol-astra-v1"])
+async def test_input_policy_reconsiders_old_rejections_only_for_selected_profile(
+    tmp_path, monkeypatch, profile,
+):
+    entries = [_entry("synthetic", SYNTH_FIRST, production=True)]
+    sources = stories.prepare_sources(entries, now=NOW, max_age_hours=36)
+    history = {"stories": [], "delivered": []}
+    settings = Settings(
+        discord_token="test", openrouter_api_key="test", owner_id=1, guild_id=2,  # noqa: S106
+        curated_channel_id=42, curated_request_profile=profile,
+        curated_developing_stories=True, daily_usd_curated=2,
+        daily_attempts_curated=8, daily_workflows_curated=2, scout_digest_dir=str(tmp_path),
+    )
+    old_payload = [
+        [{key: value for key, value in source.items() if key != "observed_at"}
+         for source in sources],
+        [], settings.curated_models, settings.curated_review_models,
+        stories.SYSTEM, stories.REVIEW, stories.REVISION, stories.VALIDATION_REVISION,
+        stories.DECISION_RESPONSE_FORMAT, stories.REVIEW_RESPONSE_FORMAT,
+    ]
+    if profile != "legacy":
+        old_payload.append({"request_profile": profile})
+    old_key = hashlib.sha256(
+        json.dumps(old_payload, sort_keys=True, ensure_ascii=False).encode(),
+    ).hexdigest()
+    new_key = stories.input_fingerprint(sources, history, settings)
+    assert (new_key == old_key) is (profile == "legacy")
+
+    async def collect(*args, **kwargs):
+        return ScoutBatch(entries, "reconsider-fixture", 1.0, "")
+
+    async def send(**kwargs):
+        raise AssertionError("quiet decisions must not send")
+
+    monkeypatch.setattr("roger.brains.curated.collect_from_scout", collect)
+    llm = FakeLLM(_decision("skip", [], [], reason="No material update."))
+    llm.curated_input_token_limit = 32768 if profile != "legacy" else None
+    client = SimpleNamespace(get_channel=lambda _: SimpleNamespace(send=send))
+    store = await Store(str(tmp_path / "reconsider.db")).open()
+    try:
+        await store._conn.execute(
+            "INSERT INTO curated_observation (fingerprint, status, failures, retry_at, ts) "
+            "VALUES (?, 'rejected', 1, 0, ?)", (old_key, NOW.timestamp() - 3600),
+        )
+        await store._conn.commit()
+        result = await run_curated_job(
+            client=client, settings=settings, llm=llm, store=store, now=NOW,
+        )
+        assert result["status"] == (
+            "unchanged input; skipped" if profile == "legacy" else "no post-worthy items"
+        )
+        repeated = await run_curated_job(
+            client=client, settings=settings, llm=llm, store=store,
+            now=NOW + datetime.timedelta(hours=1),
+        )
+        assert repeated["status"] == "unchanged input; skipped"
+        assert len(llm.calls) == (0 if profile == "legacy" else 2)
+        records = await store.curated_observations([old_key, new_key])
+        assert records[old_key]["status"] == "rejected"
+        assert records[new_key]["status"] == ("rejected" if profile == "legacy" else "quiet")
+    finally:
+        await store.close()
 
 
 async def test_story_records_restart_and_enforce_count_caps(tmp_path):
@@ -1866,6 +1979,25 @@ def test_model_request_limit_counts_full_response_format(response_format):
         stories._messages(system, {"value": "x" * (filler_size + 1)}, response_format)
 
 
+@pytest.mark.parametrize("system,schema", [
+    (stories.SYSTEM, stories.DECISION_RESPONSE_FORMAT),
+    (stories.VALIDATION_REVISION, stories.DECISION_RESPONSE_FORMAT),
+    (stories.REVISION, stories.DECISION_RESPONSE_FORMAT),
+    (stories.REVIEW, stories.REVIEW_RESPONSE_FORMAT),
+])
+def test_selected_request_boundary_counts_utf8_and_escaped_json(system, schema):
+    payload = {"evidence": 'é"\\' * 1000}
+    initial = stories._messages(system, payload, schema, input_token_limit=32768)
+    remaining = 32768 - curated_protocol.input_token_upper_bound(initial, schema)
+    payload["evidence"] += "x" * remaining
+    messages = stories._messages(system, payload, schema, input_token_limit=32768)
+    assert curated_protocol.input_token_upper_bound(messages, schema) == 32768
+    assert json.loads(messages[1]["content"]) == payload
+    payload["evidence"] += "x"
+    with pytest.raises(CuratedRequestError, match="input context exceeds limit"):
+        stories._messages(system, payload, schema, input_token_limit=32768)
+
+
 def test_max_length_retained_sources_fit_projected_model_history():
     entries = [
         _entry(str(index), f"Evidence {index} " + "x" * 1_700,
@@ -2061,6 +2193,94 @@ def test_eight_max_length_current_sources_fit_draft_request_limit():
     assert _request_chars(
         skip_revision, stories.DECISION_RESPONSE_FORMAT,
     ) <= stories.MAX_CONTEXT_CHARS
+
+
+def _full_evidence_and_history():
+    entries = []
+    for index in range(stories.MAX_SOURCES):
+        quote = f"Synthetic source {index} confirms a distinct demonstrated result."
+        excerpt = (quote + ' Quoted "résumé" at C:\\examples. ' * 4).ljust(1600, "x")
+        url = f"https://example.test/source-{index}/".ljust(120, "p")
+        entries.append(_entry(str(index), excerpt, url=url, published="2026-10-01"))
+    history = {"stories": [], "delivered": [{
+        "id": index + 1, "action": "publish", "story_ids": [f"prior-{index}"],
+        "reason": _grounded("The earlier source supported a bounded report."),
+        "change": _grounded("The prior report described the observed rollout."),
+        "claims": [{"field": field, "text": text} for field, text in (
+            ("headline", "Earlier synthetic release expands access"),
+            ("stage", "rollout"),
+            ("fact", "The earlier announcement described staged access for test accounts. " * 4),
+            ("why", "The earlier evidence left access and deployment timing unresolved. " * 3),
+        )],
+        "correction_of": None, "ts": NOW.timestamp() - (index + 1) * 86400,
+        "message_id": str(100 + index),
+        "message_url": f"https://discord.com/channels/1/2/{100 + index}",
+    } for index in range(stories.MAX_PRIOR_DELIVERIES)]}
+    return entries, history
+
+
+@pytest.mark.parametrize("revision", [None, "validation", "semantic"])
+async def test_selected_profile_preserves_full_evidence_through_every_stage(revision):
+    entries, history = _full_evidence_and_history()
+    sources = stories.prepare_sources(entries, now=NOW, max_age_hours=36)
+    draft = _decision(
+        "combine", [source["story_id"] for source in sources],
+        [(index, source["excerpt"].split(" Quoted")[0])
+         for index, source in enumerate(sources, 1)],
+    )
+    corrected = copy.deepcopy(draft)
+    if revision == "validation":
+        draft["claims"][1]["text"] = SYNTH_STAGE_SENTENCE
+        values = [draft, corrected, _review(corrected)]
+    elif revision == "semantic":
+        rejected = _review(draft)
+        rejected["supported"][0] = False
+        corrected["reason"]["text"] = "The distinct results warrant a combined report."
+        values = [draft, rejected, corrected, _review(corrected)]
+    else:
+        values = [draft, _review(draft)]
+    llm = RecordingQueueLLM(*values)
+    llm.curated_input_token_limit = curated_protocol.MAX_INPUT_TOKENS
+
+    decision, actual_sources = await stories.decide(
+        entries, history, llm, now=NOW, max_age_hours=36,
+    )
+
+    assert actual_sources == sources
+    assert decision.action == "combine"
+    assert len(llm.calls) == {None: 2, "validation": 3, "semantic": 4}[revision]
+    payload = json.loads(llm.calls[0][3][1]["content"])
+    assert len(json.dumps(payload, ensure_ascii=False)) > stories.MAX_CONTEXT_CHARS
+    assert payload["sources"] == stories._numbered_sources(sources)
+    assert payload["confirmed_sent"] == stories._delivered_view(history)
+    for call, schema in zip(llm.calls, llm.response_formats, strict=True):
+        assert _request_chars(call[3], schema) > stories.MAX_CONTEXT_CHARS
+        assert curated_protocol.input_token_upper_bound(call[3], schema) <= 32768
+        stage = json.loads(call[3][1]["content"])
+        if call[1]:
+            assert stage["confirmed_sent"] == payload["confirmed_sent"]
+            assert stage["sources"] == stories._source_metadata(sources)
+            assert stage["rendered_post"]["title"] == corrected["claims"][0]["text"]
+            for evidence, source in zip(stage["completeness_evidence"], sources, strict=True):
+                excerpt = evidence["excerpt"]
+                for index, citation in enumerate(stage["decision"]["citation_pool"], 1):
+                    if citation["source"] == evidence["number"]:
+                        excerpt = excerpt.replace(f"[cited span {index}]", citation["quote"])
+                assert excerpt == source["excerpt"]
+                assert evidence["published_at"] == source["published_at"]
+                assert evidence["observed_at"] == source["observed_at"]
+        elif "input" in stage:
+            assert stage["input"]["confirmed_sent"] == payload["confirmed_sent"]
+            assert (stage["input"]["sources"] if revision == "validation"
+                    else _revision_sources(stage["input"])) == payload["sources"]
+
+
+async def test_legacy_still_rejects_full_evidence_before_dispatch():
+    entries, history = _full_evidence_and_history()
+    llm = RecordingQueueLLM()
+    with pytest.raises(DraftError, match="context exceeds limit"):
+        await stories.decide(entries, history, llm, now=NOW, max_age_hours=36)
+    assert llm.calls == []
 
 
 def test_related_history_does_not_match_only_on_url_protocol():

@@ -18,6 +18,7 @@ from roger.llm import (
     MAX_ATTEMPTS,
     BudgetExceeded,
     CuratedModelError,
+    CuratedRequestError,
     LLMConfigError,
     _retry_after_seconds,
     curated_workflow,
@@ -856,9 +857,66 @@ async def test_profile_counts_utf8_and_schema_before_reserving(monkeypatch, tmp_
     store = await Store(str(tmp_path / "input.db")).open()
     llm = LLM(Settings(), store)
     try:
-        with pytest.raises(LLMConfigError, match="input reservation maximum"):
+        with pytest.raises(CuratedRequestError, match="input context exceeds limit"):
             await _profile_call(llm, content="é" * 15_000)
         assert (await store.curated_budget_state())["attempts_today"] == 0
+    finally:
+        await llm._client.close()
+        await store.close()
+
+
+@pytest.mark.parametrize("review", [False, True])
+@pytest.mark.parametrize("excess", [0, 1])
+@curated_workflow()
+async def test_profile_complete_request_boundary_before_reservation(
+    monkeypatch, tmp_path, review, excess,
+):
+    _env(monkeypatch, CURATED_REQUEST_PROFILE="sol-astra-v1", CURATED_DEVELOPING_STORIES="true",
+         DAILY_TOKENS_CURATED="200000", DAILY_USD_CURATED="2.14")
+    store = await Store(str(tmp_path / "boundary.db")).open()
+    requests = []
+    schema = stories.REVIEW_RESPONSE_FORMAT if review else stories.DECISION_RESPONSE_FORMAT
+    messages = [{"role": "system", "content": "Evaluate source evidence."},
+                {"role": "user", "content": 'é"\\' * 1000}]
+    remaining = 32768 - curated_protocol.input_token_upper_bound(messages, schema)
+    messages[1]["content"] += "x" * (remaining + excess)
+    assert curated_protocol.input_token_upper_bound(messages, schema) == 32768 + excess
+
+    async def handle(request):
+        requests.append(request)
+        state = await store.curated_budget_state()
+        assert state["attempts_today"] == 1
+        assert state["reserved_tokens"] == 32768 + (8192 if review else 16384)
+        return httpx.Response(200, json=_profile_response(review=review))
+
+    llm = LLM(Settings(), store)
+    assert llm.curated_input_token_limit == 32768
+    await llm._client.close()
+    llm._client = AsyncOpenAI(
+        api_key="test", base_url="https://openrouter.ai/api/v1", max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    )
+    try:
+        async def complete():
+            return await llm.complete(
+                "curated", messages, curated_story=not review, curated_review=review,
+                response_format=schema,
+            )
+
+        if excess:
+            with pytest.raises(CuratedRequestError, match="input context exceeds limit"):
+                await complete()
+            assert requests == []
+            state = await store.curated_budget_state()
+            assert state["attempts_today"] == state["workflows_today"] == state["used_tokens"] == 0
+            assert await store.get_meta("curated_profile_last_call") is None
+        else:
+            await complete()
+            assert len(requests) == 1
+            body = json.loads(requests[0].content)
+            assert body["messages"] == messages
+            assert body["response_format"] == schema
+            assert (await store.curated_budget_state())["attempts_today"] == 1
     finally:
         await llm._client.close()
         await store.close()
