@@ -301,9 +301,11 @@ recent output at `CURATED_HOUR=7` in `TZ` by default, after Scout's 05:30 local 
   extends it only when `CURATED_DEVELOPING_STORIES=true`: validated story decisions may follow a
   changed source version through the same delivery ledger. `/status` and sanitized job outcomes report allowances,
   spacing, pending deliveries, last input age, and recent check/editorial outcomes.
-- Developing-story mode keeps at most eight Scout sources in an 18,000-character request including
-  the serialized response schema, four confirmed prior deliveries, 100 current story pointers, and
-  500 immutable decisions for 90 days. Drafts, the one allowed revision, and independent reviews
+- Developing-story mode keeps at most eight Scout sources, four confirmed prior deliveries,
+  100 current story pointers, and 500 immutable decisions for 90 days. The selected profile admits
+  complete requests using its existing 32,768-token conservative UTF-8/schema bound; legacy mode
+  retains its 18,000-character limit. Oversized requests fail before budget reservation or dispatch.
+  Drafts, the one allowed revision, and independent reviews
   use provider-enforced strict JSON schemas plus local parsing, exact-quote validation, and semantic
   review. A valid draft uses two or four model calls; an initial local-validation failure reuses the
   one revision slot and uses three, so every path remains at four or fewer. Actual coverage is derived by

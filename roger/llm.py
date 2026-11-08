@@ -75,6 +75,10 @@ class LLMConfigError(RuntimeError):
     """A brain was invoked with no models configured (MODEL_<BRAIN> is empty)."""
 
 
+class CuratedRequestError(RuntimeError):
+    """A local input-admission failure, before reservation or provider dispatch."""
+
+
 class CuratedModelError(RuntimeError):
     """A classified non-publishing result; never includes vendor exception text."""
 
@@ -137,6 +141,13 @@ class LLM:
         }
         # Opt-in OpenRouter `reasoning.effort` passthrough — only gigabrain ever sets this today.
         self._reasoning_effort = {"gigabrain": settings.gigabrain_reasoning_effort or None}
+
+    @property
+    def curated_input_token_limit(self) -> int | None:
+        """Selected profiles admit complete requests by their conservative token bound."""
+        if self._curated_profile == "legacy":
+            return None
+        return curated_protocol.MAX_INPUT_TOKENS
 
     async def complete(
         self,
@@ -239,7 +250,7 @@ class LLM:
             raise LLMConfigError("unsupported Curated profile request") from None
         input_bound = curated_protocol.input_token_upper_bound(messages, response_format)
         if input_bound > curated_protocol.MAX_INPUT_TOKENS:
-            raise LLMConfigError("Curated request exceeds the input reservation maximum")
+            raise CuratedRequestError("input context exceeds limit")
         reservation = {
             "workflow_id": workflow_id, "role": "reviewer" if review else "writer",
             "profile": profile.name, "input_tokens": input_bound,
