@@ -1,6 +1,6 @@
 # Pinned by digest (not just the moving 3.14-slim tag) so builds are reproducible; Dependabot bumps
 # the digest + comment on a new base release. Tag retained for readability.
-FROM python:3.14-slim@sha256:ce40764625a4ff50df3548277632e7f96c4e77fe75fa848aae9885476e7df5a4
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 # Non-root runtime user with a fixed uid/gid so the host can chown the bind-mounted /data
 # to match. The app writes only to /data (volume) and /tmp (tmpfs), so the rootfs is read-only.
